@@ -29,6 +29,12 @@ export interface OnboardingOptions {
   defaultProvider?: string;
   /** Model to offer first when the wizard asks. Same "default, not decision" rule. */
   defaultModel?: string;
+  /**
+   * Skip the live request that verifies the credential and lists models. Setup
+   * then works offline and in tests, both of which must not depend on someone
+   * else's network answering.
+   */
+  offline?: boolean;
   /** Open the provider's key page in a browser when the user chooses sign-in. */
   openBrowser?: (url: string) => void;
   input?: NodeJS.ReadStream;
@@ -407,6 +413,7 @@ async function pickModel(
   preset: string | undefined,
   source: LineSource,
   defaultModel?: string,
+  offline = false,
 ): Promise<string> {
   // An explicit --model is a decision, not a suggestion: honour it and skip the
   // network probe the picker would otherwise make.
@@ -436,7 +443,7 @@ async function pickModel(
   };
 
   let models: ModelInfo[] = [];
-  if (provider.knownModels.length === 0 || apiKey !== undefined) {
+  if (!offline && (provider.knownModels.length === 0 || apiKey !== undefined)) {
     try {
       models = await fetchModels(probe);
     } catch {
@@ -593,13 +600,19 @@ export async function runOnboarding(options: OnboardingOptions = {}): Promise<On
     preset.model,
     source,
     options.defaultModel,
+    options.offline === true,
   );
   output.write(`${pc.green("✓")} Model ${pc.bold(model)}\n`);
 
   const mode = await pickMode(input, output, preset.mode, source);
   const effort = await pickEffort(input, output, preset.effort);
 
-  const verify = await verifyCredential(provider, baseUrl, credential.key ?? process.env[apiKeyEnvFor(provider.id)]);
+  const verify = await verifyCredential(
+    provider,
+    baseUrl,
+    credential.key ?? process.env[apiKeyEnvFor(provider.id)],
+    options.offline === true,
+  );
   if (verify.ok) {
     output.write(`${verify.line}\n`);
   } else {
@@ -611,7 +624,7 @@ export async function runOnboarding(options: OnboardingOptions = {}): Promise<On
       if (replacement !== undefined && replacement.trim().length > 0) {
         credential.key = replacement.trim();
         credential.stored = true;
-        const second = await verifyCredential(provider, baseUrl, credential.key);
+        const second = await verifyCredential(provider, baseUrl, credential.key, options.offline === true);
         output.write(`${second.line}\n`);
       }
     }
@@ -659,7 +672,9 @@ async function verifyCredential(
   provider: ProviderSpec,
   baseUrl: string,
   apiKey: string | undefined,
+  offline = false,
 ): Promise<{ ok: boolean; line: string }> {
+  if (offline) return { ok: true, line: "Skipped the live check (offline setup)." };
   const probe: ResolvedConfig = {
     provider: provider.id,
     model: provider.defaultModel,

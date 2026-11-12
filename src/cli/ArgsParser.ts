@@ -289,6 +289,6 @@ REPL COMMANDS
   /compact   /clear             /retry         /doctor
   /config    /permissions       /init          /exit
   /setup     /providers         /skills        /todo
-  /mcp       /update [--check]
+  /mcp       /update [--check]  /undo [n]      /redo [n]
   !<command>  run a shell command in the workspace
 `;

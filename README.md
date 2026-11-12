@@ -1,5 +1,7 @@
 # carls-code
 
+[![CI](https://github.com/carlscodev/carls-agent-v2/actions/workflows/ci.yml/badge.svg)](https://github.com/carlscodev/carls-agent-v2/actions/workflows/ci.yml)
+
 An autonomous coding agent that runs in your terminal. It reads your repository,
 makes the change, runs your tests, and keeps going until the work actually
 passes — with a permission gate in front of anything destructive.
@@ -107,7 +109,7 @@ model.
 | `/models`, `/model`, `/effort` | pick a model and its reasoning effort |
 | `/mode` | `plan`, `pair`, `ask`, `build`, `auto`, `yolo` |
 | `/status`, `/cost`, `/context` | what the session is spending |
-| `/undo`, `/files`, `/diff` | revert, list and inspect the agent's edits |
+| `/undo`, `/redo`, `/files`, `/diff` | revert, re-apply, list and inspect the agent's edits |
 | `/compact`, `/clear`, `/resume` | context and sessions |
 | `/agent <goal>` | run a sub-agent and print its conclusion |
 | `/tools`, `/mcp`, `/skills` | what the agent can use |

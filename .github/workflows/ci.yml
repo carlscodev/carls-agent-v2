@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The unit and integration suite: real filesystem, real bash, scripted
+  # provider. POSIX only, so it runs on Linux and macOS.
+  test:
+    name: test · ${{ matrix.os }} · node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: ["20", "22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - name: CLI smoke test
+        shell: bash
+        run: |
+          node ./bin/carls.mjs --version
+          node ./bin/carls.mjs --help > /dev/null
+          node ./bin/carls.mjs --providers | head -3
+          # The dry run resolves the plan without touching the network or disk.
+          node ./bin/carls.mjs update --ref v9.9.9 --dry-run
+          # Diagnostics must survive a missing config and a missing key.
+          CARLS_SYSTEM_CONFIG="$RUNNER_TEMP/none.json" node ./bin/carls.mjs --doctor
+
+  # The installer, end to end: install into a temp prefix, run the binary,
+  # check the config and the skills, then uninstall and assert it cleaned up.
+  installer:
+    name: installer · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: bash scripts/test-install.sh
+
+  # Windows: the suite is POSIX-only, so this job proves the parts that matter
+  # on Windows — typecheck, build, the CLI itself, and the PowerShell installer.
+  windows:
+    name: windows · node 22
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
+      - name: CLI smoke test
+        shell: pwsh
+        run: |
+          node ./bin/carls.mjs --version
+          node ./bin/carls.mjs --help | Out-Null
+          node ./bin/carls.mjs --providers | Select-Object -First 3
+          node ./bin/carls.mjs update --ref v9.9.9 --dry-run
+          node ./bin/carls.mjs --doctor
+
+      - name: Installer (PowerShell)
+        shell: pwsh
+        run: |
+          $prefix = Join-Path $env:RUNNER_TEMP "carls-installed"
+          ./scripts/install.ps1 -Yes -NoNode -Prefix $prefix
+          $shim = Join-Path $prefix "bin\carls.cmd"
+          if (-not (Test-Path $shim)) { throw "installer did not write $shim" }
+          $version = & $shim --version
+          if ($LASTEXITCODE -ne 0) { throw "carls --version failed with exit code $LASTEXITCODE" }
+          Write-Host "installed version: $version"
+          $config = Join-Path $env:APPDATA "carls\.carlsrc.json"
+          if (-not (Test-Path $config)) { throw "installer did not write $config" }
+          if (-not (Test-Path (Join-Path $prefix "app\skills"))) { throw "skills were not deployed" }
+          & $shim --help | Out-Null
+          ./scripts/install.ps1 -Uninstall -Prefix $prefix
+          if (Test-Path $prefix) { throw "uninstall left $prefix behind" }

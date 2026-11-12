@@ -161,3 +161,22 @@ output.
 ```bash
 npm run typecheck && npm test
 ```
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs three jobs:
+
+| Job | OS | What it proves |
+| --- | --- | --- |
+| `test` | Ubuntu, macOS · Node 20, 22, 24 | typecheck, the whole suite, build, CLI smoke (`--help`, `--providers`, `--doctor`, `update --dry-run`) |
+| `installer` | Ubuntu, macOS | `scripts/test-install.sh`: install into a temp prefix, run the launcher, check config and skills, uninstall and assert cleanup |
+| `windows` | Windows Server | typecheck, build, the CLI itself and `scripts/install.ps1` end to end |
+
+The vitest suite is POSIX-only on purpose: it shells out to real `bash` and uses
+symbolic links and `chmod`, which do not behave the same way on Windows. The
+Windows job covers everything that is portable instead of pretending the rest
+passes.
+
+`.github/workflows/release.yml` runs on a `v*` tag: it re-checks the tree,
+fails if the tag and `package.json` disagree, and publishes a GitHub Release with
+both installers attached. That release is what `carls update` reads.

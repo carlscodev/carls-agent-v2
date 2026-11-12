@@ -18,9 +18,18 @@ export interface BackupEntry {
  * Keeps a copy of every file the agent is about to overwrite, so `/undo` can
  * put it back. Copies live under ~/.carls/backups/<session>/.
  */
+interface RedoEntry {
+  path: string;
+  /** Saved copy of the file as it was before the revert; empty when absent. */
+  copy: string;
+  existed: boolean;
+}
+
 export class BackupStore {
   private readonly dir: string;
   private readonly manifestPath: string;
+  /** Session-scoped: a restart starts with nothing to redo, which is honest. */
+  private readonly redoStack: RedoEntry[] = [];
 
   constructor(sessionId: string, rootDir?: string) {
     const base = rootDir ?? join(homedir(), ".carls", "backups");
@@ -87,6 +96,67 @@ export class BackupStore {
   latest(): BackupEntry | undefined {
     const entries = this.list();
     return entries[entries.length - 1];
+  }
+
+  /**
+   * Reverts the last `count` edits. Each file is snapshotted before it is
+   * reverted, which is what makes `/redo` possible without a second manifest.
+   * Returns one human-readable line per file.
+   */
+  undo(count = 1): string[] {
+    const entries = this.list().slice(-Math.max(1, count));
+    const messages: string[] = [];
+    for (const entry of [...entries].reverse()) {
+      const current = this.snapshotForRedo(entry.path);
+      if (current !== undefined) this.redoStack.push(current);
+      messages.push(this.restore(entry));
+    }
+    return messages;
+  }
+
+  /**
+   * Re-applies what the last undo removed. The stack holds the state as it was
+   * before each revert, so popping in order replays the edits forwards.
+   */
+  redo(count = 1): string[] {
+    const messages: string[] = [];
+    for (let index = 0; index < Math.max(1, count); index++) {
+      const entry = this.redoStack.pop();
+      if (entry === undefined) break;
+      if (!entry.existed) {
+        if (!existsSync(entry.path)) {
+          messages.push(`${entry.path} was already absent`);
+          continue;
+        }
+        unlinkSync(entry.path);
+        messages.push(`removed ${entry.path} again`);
+        continue;
+      }
+      if (!existsSync(entry.copy)) {
+        messages.push(`redo snapshot for ${entry.path} is missing`);
+        continue;
+      }
+      copyFileSync(entry.copy, entry.path);
+      messages.push(`re-applied ${entry.path}`);
+    }
+    return messages;
+  }
+
+  /** How many undone edits can still be redone. */
+  redoDepth(): number {
+    return this.redoStack.length;
+  }
+
+  private snapshotForRedo(path: string): RedoEntry | undefined {
+    if (!existsSync(path)) return { path, copy: "", existed: false };
+    try {
+      mkdirSync(this.dir, { recursive: true });
+      const copy = join(this.dir, `redo-${Date.now()}-${randomUUID().slice(0, 6)}-${basename(path)}`);
+      copyFileSync(path, copy);
+      return { path, copy, existed: true };
+    } catch {
+      return undefined;
+    }
   }
 
   /** Restores an entry. Returns a human-readable outcome. */

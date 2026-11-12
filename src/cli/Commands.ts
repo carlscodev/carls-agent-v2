@@ -317,16 +317,27 @@ export const COMMANDS: CommandSpec[] = [
     summary: "Revert the last agent file edit(s) from a snapshot",
     run: (args, ctx) => {
       const store = ctx.runtime.backups;
-      const entries = store.list();
-      if (entries.length === 0) {
+      if (store.list().length === 0) {
         printInfo("No edits to undo in this session.");
         return false;
       }
       const count = Math.max(1, Number.parseInt(args[0] ?? "1", 10) || 1);
-      const last = entries.slice(-count);
-      for (const entry of last.reverse()) {
-        printInfo(store.restore(entry));
+      for (const line of store.undo(count)) printInfo(line);
+      return false;
+    },
+  },
+  {
+    name: "/redo",
+    usage: "/redo [n]",
+    summary: "Re-apply the last undone edits",
+    run: (args, ctx) => {
+      const store = ctx.runtime.backups;
+      if (store.redoDepth() === 0) {
+        printInfo("Nothing to redo. /undo first, then /redo puts it back.");
+        return false;
       }
+      const count = Math.max(1, Number.parseInt(args[0] ?? "1", 10) || 1);
+      for (const line of store.redo(count)) printInfo(line);
       return false;
     },
   },

@@ -50,7 +50,8 @@ While a turn is running the spinner shows the current step and elapsed seconds.
 | `/context` | token usage of the transcript |
 | `/compact` | compact now instead of waiting for the threshold |
 | `/clear` | start a fresh session |
-| `/undo [n]`, `/files`, `/diff` | revert edits, list touched files, show the diff |
+| `/undo [n]`, `/redo [n]` | revert the last edits, or re-apply what an undo removed |
+| `/files`, `/diff` | files the agent touched, and the working-tree diff |
 | `/todo` | the agent's current plan |
 | `/agent <goal>` | run an isolated sub-agent and print its conclusion |
 | `/tools` | every tool, its category, parallel-safe and advertised flags |

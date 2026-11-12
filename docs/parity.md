@@ -14,7 +14,7 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 | Context compaction | 75% threshold, tool-pair-safe cut, checkpoint summary, `/compact` |
 | Sub-agents | `delegate_task`, read-only, no nesting, structured report |
 | Sessions | persisted transcripts, `/resume`, `/sessions` picker |
-| Undo | per-file snapshots behind `/undo` |
+| Undo / redo | per-file snapshots behind `/undo`, session redo stack behind `/redo` |
 | Providers | 33 bundled ids, custom gateway via `baseUrl`, Ollama/LM Studio/vLLM/llama.cpp |
 | Models | `/models` against the live endpoint, effort plumbing |
 | Permissions | 6 modes, allow/deny lists, diff preview, `Shift+Tab` |
@@ -29,29 +29,29 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 | Install | one-line curl (Linux/macOS) and PowerShell (Windows), self-bootstrapping |
 | Updates | `carls update`, tag-pinned, cached startup notice |
 | Diagnostics | `/doctor` covering config, credentials, endpoint, MCP, updates |
+| CI | Linux + macOS on Node 20/22/24, installer end to end on both, Windows job for build + CLI + PowerShell installer |
+| Releases | tag-driven; the release is what `carls update` reads, installers attached |
 
 ## Missing, in the order I would build it
 
 1. **`@file` mentions.** `@` in the prompt opens a fuzzy file picker and attaches
    the file to the message. Today the model has to spend a tool call on it.
-2. **`/redo`.** `/undo` exists; the reverse does not, because backups are
-   one-directional.
-3. **Custom agent definitions.** The six permission modes are fixed. A
+2. **Custom agent definitions.** The six permission modes are fixed. A
    `.agents/agents/<name>.json` with its own prompt, tool set and permission
    policy would let a project define `reviewer`, `migrator`, `docs` and switch
    with `Tab`.
-4. **LSP diagnostics.** An `lsp` tool that reports errors and hover info after an
+3. **LSP diagnostics.** An `lsp` tool that reports errors and hover info after an
    edit would catch whole classes of mistakes without running a build.
-5. **`websearch` / `webfetch`.** `network_request` exists but returns raw HTML;
+4. **`websearch` / `webfetch`.** `network_request` exists but returns raw HTML;
    a reader-mode fetch and a search tool are not implemented.
-6. **Session tabs and a sidebar.** One session on screen at a time today.
-7. **External editor handoff** (`/editor`, `$EDITOR`) for long prompts.
-8. **Queue and steer.** Submitting while a turn runs queues nothing yet.
-9. **Headless server + remote client.** The runtime is embeddable, but there is
+5. **Session tabs and a sidebar.** One session on screen at a time today.
+6. **External editor handoff** (`/editor`, `$EDITOR`) for long prompts.
+7. **Queue and steer.** Submitting while a turn runs queues nothing yet.
+8. **Headless server + remote client.** The runtime is embeddable, but there is
    no HTTP/WS server mode.
-10. **Custom keybinds and per-project TUI config.**
-11. **Export/share.** No `/export`, no share links.
-12. **Plugins.** No plugin API; MCP tools, skills and hooks are the extension
+9. **Custom keybinds and per-project TUI config.**
+10. **Export/share.** No `/export`, no share links.
+11. **Plugins.** No plugin API; MCP tools, skills and hooks are the extension
     points.
 
 ## Ground rules for closing the list

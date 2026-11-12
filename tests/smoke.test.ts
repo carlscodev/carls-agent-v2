@@ -501,6 +501,36 @@ describe("BackupStore", () => {
     expect(store.restore(store.latest()!)).toContain("deleted");
     expect(existsSync(file)).toBe(false);
   });
+
+  it("undo stores what it removed so redo can put it back", async () => {
+    const { BackupStore } = await import("../src/core/Backups.js");
+    const store = new BackupStore("redo-session", join(dir, "backups"));
+    const file = join(dir, "redo.txt");
+    await writeFile(file, "first\n");
+    store.save(file);
+    await writeFile(file, "second\n");
+
+    expect(store.redoDepth()).toBe(0);
+    expect(store.undo(1)[0]).toContain("restored");
+    expect(await readFile(file, "utf8")).toBe("first\n");
+    expect(store.redoDepth()).toBe(1);
+
+    expect(store.redo(1)[0]).toContain("re-applied");
+    expect(await readFile(file, "utf8")).toBe("second\n");
+    expect(store.redoDepth()).toBe(0);
+  });
+
+  it("redo recreates a file that an undo deleted", async () => {
+    const { BackupStore } = await import("../src/core/Backups.js");
+    const store = new BackupStore("redo-create", join(dir, "backups"));
+    const file = join(dir, "created-then-undone.txt");
+    store.save(file);
+    await writeFile(file, "content\n");
+    store.undo(1);
+    expect(existsSync(file)).toBe(false);
+    store.redo(1);
+    expect(await readFile(file, "utf8")).toBe("content\n");
+  });
 });
 
 describe("todo_write tool", () => {
@@ -1347,6 +1377,8 @@ describe("first-run onboarding", () => {
       input,
       output,
       outPath: options.outPath,
+      // No test may depend on a provider answering during setup.
+      offline: true,
       ...(options.openBrowser !== undefined ? { openBrowser: options.openBrowser } : {}),
     });
     return { result, written };
@@ -1437,7 +1469,14 @@ describe("onboarding provider switching", () => {
     const outPath = join(dir, "switch", ".carlsrc.json");
     input.end("nvidia\nnvapi-abcdefghijklmnopqrstuvwxyz\n\nask\noff\n");
 
-    const result = await runOnboarding({ input, output, outPath, defaultProvider: "openai", defaultModel: "gpt-4o" });
+    const result = await runOnboarding({
+      input,
+      output,
+      outPath,
+      defaultProvider: "openai",
+      defaultModel: "gpt-4o",
+      offline: true,
+    });
     expect(result.cancelled).toBe(false);
     expect(result.provider).toBe("nvidia");
     expect(written).toContain("Provider id [openai]");
@@ -1455,7 +1494,8 @@ describe("onboarding provider switching", () => {
     process.env.OPENAI_API_KEY = "sk-abcdefghijklmnopqrstuvwxyz012345";
     input.end("\n\nask\noff\n");
     try {
-      const result = await runOnboarding({ input, output, outPath, defaultProvider: "openai" });
+      // Offline: the wizard must not need the public internet to be testable.
+      const result = await runOnboarding({ input, output, outPath, defaultProvider: "openai", offline: true });
       expect(result.cancelled).toBe(false);
       expect(result.provider).toBe("openai");
     } finally {

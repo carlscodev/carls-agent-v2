@@ -1,0 +1,52 @@
+name: Release
+
+# Pushing a v* tag is the release: it verifies the tree, checks the tag against
+# package.json, and publishes a GitHub Release. `carls update` reads
+# /releases/latest, so this workflow is what makes in-place updates work.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: publish ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - name: Tag matches package.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+          echo "releasing $version"
+
+      - name: Publish release with the installers attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets="scripts/install.sh scripts/install.ps1"
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" $assets --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --title "carls-code $GITHUB_REF_NAME" --notes-from-tag
+          else
+            gh release create "$GITHUB_REF_NAME" $assets \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "carls-code $GITHUB_REF_NAME" \
+              --generate-notes
+          fi
