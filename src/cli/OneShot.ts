@@ -3,7 +3,7 @@ import { Runtime } from "../core/Runtime.js";
 import { SessionStore } from "../core/SessionStore.js";
 import type { Logger } from "../utils/Logger.js";
 import { expandMentions } from "./Mentions.js";
-import { Spinner, printCost, printError, printInfo } from "./TerminalUI.js";
+import { Spinner, printError, printInfo, printTurnSummary } from "./TerminalUI.js";
 
 /**
  * `carls -p "…"`.
@@ -23,11 +23,16 @@ export async function runOneShot(query: string, config: ResolvedConfig, logger: 
   const runtime = new Runtime({ config, logger, session });
   const spinner = new Spinner(process.stderr.isTTY === true);
   let streamed = false;
+  let steps = 0;
+  const startedAt = Date.now();
   try {
     await runtime.connectMcpServers();
     await runtime.start();
     spinner.start("working");
     const result = await runtime.runTurn(expanded.text, {
+      onStep: (step) => {
+        steps = step;
+      },
       onText: (chunk) => {
         spinner.stop();
         streamed = true;
@@ -39,7 +44,12 @@ export async function runOneShot(query: string, config: ResolvedConfig, logger: 
     // example when the model only calls tools), so emit the final text then.
     if (!streamed && result.finalText.length > 0) process.stdout.write(result.finalText);
     process.stdout.write("\n");
-    printCost(runtime.cost.format());
+    printTurnSummary({
+      durationMs: Date.now() - startedAt,
+      steps,
+      stoppedReason: result.stoppedReason,
+      tokens: runtime.cost.compact(),
+    });
     return result.stoppedReason === "error" ? 1 : 0;
   } catch (error) {
     spinner.stop();

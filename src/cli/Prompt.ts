@@ -1,5 +1,4 @@
 import * as readline from "node:readline";
-import pc from "picocolors";
 import type { Chrome } from "./Chrome.js";
 
 /** Result of reading one prompt line. */
@@ -167,20 +166,10 @@ export class Prompt {
 
         // Shift+Tab arrives as the CSI Z sequence.
         if (seq === "\u001b[Z" || (name === "tab" && key.shift === true)) {
-          const label = options.onModeCycle?.();
-          if (label !== undefined) {
-            const note = `${pc.gray("mode →")} ${pc.bold(label)}`;
-            if (options.chrome !== undefined) {
-              // The cursor sits on the prompt row, so return to the conversation
-              // region first; writing here would put the note under the footer,
-              // where the next prompt repaint erases it.
-              options.chrome.clearPrompt();
-              options.chrome.moveToRegionBottom();
-              options.chrome.writeRegion(`${note}\n`);
-            } else {
-              this.output.write(`\r\u001b[K${note}\n`);
-            }
-          }
+          // The footer already carries the mode, so cycling it only needs the
+          // status line repainted. Writing a note into the conversation left a
+          // stray line behind on every press.
+          options.onModeCycle?.();
           render();
           return;
         }

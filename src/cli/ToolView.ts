@@ -1,6 +1,6 @@
 import type { ToolResult } from "../types/tools.js";
 import { theme } from "./Theme.js";
-import { visibleWidth } from "./Text.js";
+import { visibleWidth, formatDuration } from "./Text.js";
 import { splitLines } from "../utils/eol.js";
 
 /**
@@ -183,13 +183,14 @@ export function toolCallLine(name: string, input: unknown): string {
 }
 
 /** The line (or block) printed once a tool returns. */
-export function toolResultLine(name: string, result: ToolResult): string {
+export function toolResultLine(name: string, result: ToolResult, durationMs?: number): string {
   const t = theme();
   const { family } = glyphFor(name);
 
   if (!result.ok) {
     const reason = (result.error ?? "failed").split("\n")[0] ?? "failed";
-    return `${t.paint(t.colors.feedback.error, GLYPH.fail)} ${t.paint(t.colors.text.muted, truncate(reason, 110))}`;
+    const time = durationMs !== undefined ? ` ${t.paint(t.colors.text.faint, `· ${formatDuration(durationMs)}`)}` : "";
+    return `${t.paint(t.colors.feedback.error, GLYPH.fail)} ${t.paint(t.colors.text.muted, truncate(reason, 110))}${time}`;
   }
 
   const body = toolBody(name, result);
@@ -202,12 +203,19 @@ export function toolResultLine(name: string, result: ToolResult): string {
       ? `${t.paint(t.categorical(family), glyphFor(name).glyph)} ${t.bold(titleFor(name, result.metadata?.path !== undefined ? { path: result.metadata.path } : {}))} `
       : "";
 
+  // Every call reports how long it took, so a slow tool is visible even when it
+  // prints nothing. Shell already carries its own timing in the summary.
+  const time =
+    durationMs !== undefined && name !== "bash"
+      ? ` ${t.paint(t.colors.text.faint, `· ${formatDuration(durationMs)}`)}`
+      : "";
+
   const head =
     summary.length > 0
-      ? `${lead}${t.paint(t.colors.feedback.success, GLYPH.ok)} ${t.paint(t.colors.text.muted, summary)}`
+      ? `${lead}${t.paint(t.colors.feedback.success, GLYPH.ok)} ${t.paint(t.colors.text.muted, summary)}${time}`
       : name === "bash"
         ? ""
-        : `${lead}${t.paint(t.colors.feedback.success, GLYPH.ok)}`;
+        : `${lead}${t.paint(t.colors.feedback.success, GLYPH.ok)}${time}`;
   if (body === undefined) return head;
   return head.length > 0 ? `${head}\n${body}` : body;
 }
@@ -281,7 +289,7 @@ function resultSummary(name: string, result: ToolResult): string {
             ? t.paint(t.colors.feedback.success, "exit 0")
             : t.paint(t.colors.feedback.error, `exit ${code}`)
           : "";
-      const time = typeof ms === "number" ? t.paint(t.colors.text.faint, `${Math.round(ms)}ms`) : "";
+      const time = typeof ms === "number" ? t.paint(t.colors.text.faint, formatDuration(ms)) : "";
       return ["shell completed", exit, time].filter((part) => part.length > 0).join(" · ");
     }
     case "glob_files":

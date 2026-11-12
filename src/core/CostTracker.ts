@@ -65,7 +65,25 @@ export class CostTracker {
   format(): string {
     const snapshot = this.snapshot();
     const tokens = `in ${snapshot.inputTokens.toLocaleString()} / out ${snapshot.outputTokens.toLocaleString()} tokens`;
-    if (!snapshot.priced) return `${tokens} (no price data for ${this.model})`;
+    if (!snapshot.priced) return `${tokens} · free`;
     return `${tokens} · $${snapshot.usd.toFixed(4)}`;
   }
+
+  /**
+   * Terse form for the footer, where space is scarce and the model name is
+   * already on the line. Empty until the first token is spent, so a fresh
+   * session does not carry a `0 / 0` counter around.
+   */
+  compact(): string {
+    const snapshot = this.snapshot();
+    if (snapshot.inputTokens === 0 && snapshot.outputTokens === 0) return "";
+    const tokens = `↑${compactCount(snapshot.inputTokens)} ↓${compactCount(snapshot.outputTokens)}`;
+    if (!snapshot.priced) return tokens;
+    return `${tokens} · $${snapshot.usd.toFixed(4)}`;
+  }
+}
+
+function compactCount(tokens: number): string {
+  if (tokens < 1000) return String(tokens);
+  return `${(tokens / 1000).toFixed(tokens >= 10000 ? 0 : 1)}k`;
 }

@@ -1,7 +1,9 @@
 import { theme } from "./Theme.js";
 import { redact } from "../utils/Logger.js";
 import type { Effort, PermissionMode } from "../config/Config.js";
-import { pad, terminalDimension, truncate, visibleWidth, wrap } from "./Text.js";
+import { formatDuration, pad, terminalDimension, truncate, visibleWidth, wrap } from "./Text.js";
+
+export { formatDuration };
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -209,8 +211,48 @@ export function printToolResult(name: string, ok: boolean, summary: string): voi
   process.stderr.write(`${icon} ${t.bold(name)} ${t.paint(t.colors.text.muted, summary)}\n`);
 }
 
-export function printCost(text: string): void {
-  process.stderr.write(`${theme().paint(theme().colors.text.faint, "·")} ${theme().paint(theme().colors.text.faint, text)}\n`);
+/**
+ * One line closing a turn: how long it took, how many steps, and what it cost.
+ * Without it a finished turn and a frozen one look identical — the answer stops
+ * streaming and nothing else changes on screen.
+ */
+export function turnSummaryLine(info: {
+  durationMs: number;
+  steps: number;
+  stoppedReason: "completed" | "max_steps" | "aborted" | "error";
+  tokens: string;
+}): string {
+  const t = theme();
+  const mark =
+    info.stoppedReason === "completed"
+      ? t.paint(t.colors.feedback.success, "✓")
+      : info.stoppedReason === "aborted"
+        ? t.paint(t.colors.feedback.warning, "■")
+        : t.paint(t.colors.feedback.error, "✖");
+  const label =
+    info.stoppedReason === "completed"
+      ? "done"
+      : info.stoppedReason === "aborted"
+        ? "stopped"
+        : info.stoppedReason === "max_steps"
+          ? "step limit reached"
+          : "error";
+  const parts = [
+    t.paint(t.colors.text.muted, label),
+    t.paint(t.colors.text.faint, formatDuration(info.durationMs)),
+    t.paint(t.colors.text.faint, `${info.steps} ${info.steps === 1 ? "step" : "steps"}`),
+  ];
+  if (info.tokens.length > 0) parts.push(t.paint(t.colors.text.faint, info.tokens));
+  return `${mark} ${parts.join(t.paint(t.colors.text.faint, " · "))}`;
+}
+
+export function printTurnSummary(info: {
+  durationMs: number;
+  steps: number;
+  stoppedReason: "completed" | "max_steps" | "aborted" | "error";
+  tokens: string;
+}): void {
+  process.stderr.write(`${turnSummaryLine(info)}\n`);
 }
 
 /** Marks the start of the assistant's answer, so the transcript reads as a chat. */

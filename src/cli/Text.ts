@@ -110,3 +110,16 @@ export function clampWidth(columns: number | undefined, fallback: number, minimu
 export function terminalDimension(columns: number | undefined, fallback = 80): number {
   return columns !== undefined && columns > 0 ? columns : fallback;
 }
+
+/**
+ * Human duration for UI lines: sub-second stays in ms, under a minute reads in
+ * seconds, anything longer gets `XmYYs`. Shared by the tool lines and the turn
+ * summary so a 3.5s tool and a 3.5s turn cannot disagree.
+ */
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.round((ms % 60_000) / 1000);
+  return `${minutes}m${seconds.toString().padStart(2, "0")}s`;
+}

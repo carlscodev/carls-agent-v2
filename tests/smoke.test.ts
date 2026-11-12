@@ -36,6 +36,8 @@ import { FileWrite } from "../src/tools/FileWrite.js";
 import { buildSystemPrompt } from "../src/core/Runtime.js";
 import { MODE_CYCLE } from "../src/config/Config.js";
 import { toolCallLine, toolResultLine } from "../src/cli/ToolView.js";
+import { formatDuration, turnSummaryLine } from "../src/cli/TerminalUI.js";
+import { CostTracker } from "../src/core/CostTracker.js";
 import { ApplyPatch, FileDelete, HashFile, ListDir, MultiRead, WriteMany } from "../src/tools/FileOps.js";
 import { ComputerUse, EnvGet } from "../src/tools/SystemOps.js";
 import { BrowserOpen } from "../src/tools/BrowserOps.js";
@@ -1254,6 +1256,72 @@ describe("tool view", () => {
     expect(line).toContain("boom");
     expect(line.split("\n").length).toBe(1);
   });
+
+  it("appends the duration to a tool result when one is measured", () => {
+    const line = toolResultLine(
+      "read_file",
+      { ok: true, output: "a\nb", metadata: { lines: 2, shown: 2 } },
+      1500,
+    );
+    const plain = line.replace(/\u001b\[[0-9;]*m/g, "");
+    expect(plain).toContain("1.5s");
+  });
+
+  it("omits the duration when none is measured, so old callers keep their shape", () => {
+    const line = toolResultLine("read_file", { ok: true, output: "a", metadata: { lines: 1, shown: 1 } });
+    const plain = line.replace(/\u001b\[[0-9;]*m/g, "");
+    expect(plain).not.toContain("ms");
+    expect(plain).not.toContain("s ·");
+  });
+});
+
+describe("turn reporting", () => {
+  it("formats durations across the ms, s and m ranges", () => {
+    expect(formatDuration(420)).toBe("420ms");
+    expect(formatDuration(1500)).toBe("1.5s");
+    expect(formatDuration(12_000)).toBe("12s");
+    expect(formatDuration(65_000)).toBe("1m05s");
+  });
+
+  it("summarises a finished turn with time, steps and spend", () => {
+    const line = turnSummaryLine({ durationMs: 4200, steps: 3, stoppedReason: "completed", tokens: "↑1.2k ↓340" });
+    const plain = line.replace(/\u001b\[[0-9;]*m/g, "");
+    expect(plain).toContain("done");
+    expect(plain).toContain("4.2s");
+    expect(plain).toContain("3 steps");
+    expect(plain).toContain("↑1.2k ↓340");
+  });
+
+  it("labels a stopped turn and hides the spend when nothing was spent", () => {
+    const line = turnSummaryLine({ durationMs: 900, steps: 1, stoppedReason: "aborted", tokens: "" });
+    const plain = line.replace(/\u001b\[[0-9;]*m/g, "");
+    expect(plain).toContain("stopped");
+    expect(plain).toContain("1 step");
+    expect(plain).not.toContain("·  ·");
+  });
+});
+
+describe("cost tracker", () => {
+  it("reports a terse footer form only after tokens are spent", () => {
+    const cost = new CostTracker("free/glm-5.3-flash");
+    expect(cost.compact()).toBe("");
+    cost.add({ inputTokens: 1200, outputTokens: 340 });
+    const plain = cost.compact().replace(/\u001b\[[0-9;]*m/g, "");
+    expect(plain).toBe("↑1.2k ↓340");
+  });
+
+  it("drops the verbose 'no price data' note for unpriced models", () => {
+    const cost = new CostTracker("free/glm-5.3-flash");
+    cost.add({ inputTokens: 10, outputTokens: 5 });
+    expect(cost.format()).not.toContain("no price data");
+    expect(cost.format()).toContain("free");
+  });
+
+  it("prices a known model in dollars", () => {
+    const cost = new CostTracker("gpt-4o");
+    cost.add({ inputTokens: 1_000_000, outputTokens: 0 });
+    expect(cost.format()).toContain("$2.5000");
+  });
 });
 
 describe("new tools", () => {
@@ -1845,7 +1913,7 @@ describe("Shift+Tab mode cycling", () => {
   });
 });
 
-describe("Shift+Tab writes the note into the conversation region", () => {
+describe("Shift+Tab mode cycling", () => {
   /** A fake TTY that records everything written to it. */
   async function fakeTty(columns: number, rows: number): Promise<{ stream: NodeJS.WriteStream; writes: string[] }> {
     const { PassThrough } = await import("node:stream");
@@ -1858,7 +1926,7 @@ describe("Shift+Tab writes the note into the conversation region", () => {
     return { stream, writes };
   }
 
-  it("moves to the region bottom before writing, so the footer cannot erase it", async () => {
+  it("repaints the footer without writing a stray line into the conversation", async () => {
     const { Prompt } = await import("../src/cli/Prompt.js");
     const { Chrome } = await import("../src/cli/Chrome.js");
     const { PassThrough } = await import("node:stream");
@@ -1872,24 +1940,30 @@ describe("Shift+Tab writes the note into the conversation region", () => {
     expect(layout).toBeDefined();
     writes.length = 0;
 
+    let cycled = 0;
     const prompt = new Prompt(input, output);
-    const pending = prompt.read({ prompt: "carls> ", onModeCycle: () => "build", chrome });
+    const pending = prompt.read({
+      prompt: "carls> ",
+      onModeCycle: () => {
+        cycled += 1;
+        return "build";
+      },
+      chrome,
+    });
     await new Promise((r) => setTimeout(r, 10));
     input.write("\u001b[Z");
     await new Promise((r) => setTimeout(r, 20));
     input.write("\r");
     await pending;
 
+    // The callback still fires so the caller can repaint the status line, but
+    // nothing lands in the conversation region: no "mode → build" note, and no
+    // cursor move to the region bottom that used to accompany it.
+    expect(cycled).toBe(1);
     const out = writes.join("");
-    const noteIndex = out.indexOf("build");
-    expect(noteIndex).toBeGreaterThan(-1);
+    expect(out).not.toContain("mode →");
     const regionBottom = layout?.regionBottom ?? 0;
-    // The note must be preceded by a cursor move to the region bottom; writing
-    // it while the cursor sits on the prompt row is what hid it before.
-    const before = out.slice(0, noteIndex);
-    expect(before).toContain(`\u001b[${regionBottom};1H`);
-    const noteRow = before.lastIndexOf("\u001b[");
-    expect(before.slice(noteRow)).toMatch(new RegExp(`^\\u001b\\[${regionBottom};1H`));
+    expect(out).not.toContain(`\u001b[${regionBottom};1H`);
   });
 });
 

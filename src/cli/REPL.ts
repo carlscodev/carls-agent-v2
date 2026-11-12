@@ -4,7 +4,7 @@ import { loadConfig } from "../config/Config.js";
 import { Logger } from "../utils/Logger.js";
 import { SessionStore } from "../core/SessionStore.js";
 import { Runtime } from "../core/Runtime.js";
-import { Spinner, bannerLines, modeTag, printAssistantHeader, printCost, printError, printInfo, printStatusBar, tabStripLine } from "./TerminalUI.js";
+import { Spinner, bannerLines, modeTag, printAssistantHeader, printError, printInfo, printStatusBar, printTurnSummary, tabStripLine, turnSummaryLine } from "./TerminalUI.js";
 import { Chrome } from "./Chrome.js";
 import { Splash } from "./Splash.js";
 import { closeBrowser } from "../tools/BrowserOps.js";
@@ -172,9 +172,11 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       parts.push(t.paint(t.colors.accent, `@${runtime.config.agentName}`));
     }
     if (runtime.config.effort !== undefined) parts.push(t.paint(t.colors.accent, runtime.config.effort));
+    if (busy) parts.push(t.paint(t.colors.feedback.info, "working…"));
     if (queue.length > 0) parts.push(t.paint(t.colors.feedback.warning, `↑${queue.length} queued`));
-    parts.push(t.paint(paint, `${tokenCount(used)}/${tokenCount(runtime.config.contextWindow)}`));
-    parts.push(t.paint(t.colors.text.faint, runtime.cost.format()));
+    parts.push(t.paint(paint, `ctx ${tokenCount(used)}/${tokenCount(runtime.config.contextWindow)}`));
+    const spend = runtime.cost.compact();
+    if (spend.length > 0) parts.push(t.paint(t.colors.text.faint, spend));
     parts.push(t.paint(t.colors.text.faint, cwd));
     return parts.join(t.paint(t.colors.text.faint, " │ "));
   };
@@ -256,7 +258,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           detail: index === tabs.activeIndex ? t.paint(t.colors.accent, "● active") : "",
           preview: [
             `${turns} turn${turns === 1 ? "" : "s"} · ${tab.payload.config.model}`,
-            `${tab.payload.cost.format()}`,
+            tab.payload.cost.compact() || "no spend yet",
           ],
         };
       }),
@@ -272,6 +274,11 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     busy = true;
     interruptCount = 0;
     activeAbort = new AbortController();
+    const turnStartedAt = Date.now();
+    let turnSteps = 0;
+    // The footer carries a "working…" marker while a turn runs, so the terminal
+    // shows the agent is busy even when the model is silent for a while.
+    if (useChrome) showStatus();
     // The first goal names the tab; later goals leave it, so the strip keeps
     // pointing at what the conversation is about rather than its last message.
     const tab = tabs.current();
@@ -320,6 +327,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           else process.stderr.write(`\n${line}\n`);
         },
         onStep: (step, max) => {
+          turnSteps = step;
           if (!streamed) spinner.start(`thinking · step ${step}/${max}`);
         },
         onText: (chunk) => {
@@ -348,7 +356,12 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       }
       if (result.stoppedReason === "aborted") printInfo("Stopped.");
       else if (result.stoppedReason === "max_steps") printError(result.finalText);
-      printCost(`cost ${runtime.cost.format()}`);
+      // The closing line is what tells the user the agent stopped rather than
+      // hung: it reports the wall-clock time, the step count and the spend.
+      const spend = runtime.cost.compact();
+      const summary = { durationMs: Date.now() - turnStartedAt, steps: turnSteps, stoppedReason: result.stoppedReason, tokens: spend };
+      if (useChrome) chrome.writeRegion(`${turnSummaryLine(summary)}\n`);
+      else printTurnSummary(summary);
     } catch (error) {
       spinner.stop();
       markdown.flush();

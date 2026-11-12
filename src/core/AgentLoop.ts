@@ -64,7 +64,7 @@ export interface RunOptions {
   /** Called for every assistant text delta. */
   onText?: (chunk: string) => void;
   /** Called after each tool finishes, for UI rendering. */
-  onToolResult?: (name: string, result: ToolResult) => void;
+  onToolResult?: (name: string, result: ToolResult, durationMs: number) => void;
   /** Called when steering messages were folded into the conversation. */
   onSteer?: (messages: string[]) => void;
   /** Called at the start of every model step, for progress UI. */
@@ -127,14 +127,16 @@ export class AgentLoop {
     if (!options.silent) process.stderr.write(`\n${toolCallLine(toolUse.name, toolUse.input)}\n`);
 
     let result: ToolResult;
+    const startedAt = Date.now();
     try {
       result = await this.executeTool(toolUse.name, toolUse.input, ctx);
     } catch (error) {
       result = { ok: false, output: "", error: `Tool ${toolUse.name} failed: ${(error as Error).message}` };
     }
+    const durationMs = Date.now() - startedAt;
 
-    if (!options.silent) process.stderr.write(`${toolResultLine(toolUse.name, result)}\n`);
-    options.onToolResult?.(toolUse.name, result);
+    if (!options.silent) process.stderr.write(`${toolResultLine(toolUse.name, result, durationMs)}\n`);
+    options.onToolResult?.(toolUse.name, result, durationMs);
 
     if (result.ok) {
       const path = result.metadata?.path;
