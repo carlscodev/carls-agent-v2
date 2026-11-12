@@ -65,6 +65,8 @@ export interface RunOptions {
   onText?: (chunk: string) => void;
   /** Called after each tool finishes, for UI rendering. */
   onToolResult?: (name: string, result: ToolResult, durationMs: number) => void;
+  /** Called right before a tool starts, so the UI can name what is running. */
+  onToolStart?: (name: string, input: unknown) => void;
   /** Called when steering messages were folded into the conversation. */
   onSteer?: (messages: string[]) => void;
   /** Called at the start of every model step, for progress UI. */
@@ -125,6 +127,7 @@ export class AgentLoop {
     filesTouched: Set<string>,
   ): Promise<ContentBlock> {
     if (!options.silent) process.stderr.write(`\n${toolCallLine(toolUse.name, toolUse.input)}\n`);
+    options.onToolStart?.(toolUse.name, toolUse.input);
 
     let result: ToolResult;
     const startedAt = Date.now();

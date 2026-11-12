@@ -1,4 +1,5 @@
 import type { ToolResult } from "../types/tools.js";
+import { folds } from "./Folds.js";
 import { theme } from "./Theme.js";
 import { visibleWidth, formatDuration } from "./Text.js";
 import { splitLines } from "../utils/eol.js";
@@ -172,6 +173,63 @@ function defersTitle(name: string): boolean {
   return name === "write_file" || name === "edit_file" || name === "apply_patch" || name === "write_many";
 }
 
+/**
+ * Short present-tense label for the footer's activity segment, e.g. `reading
+ * src/index.ts` or `running npm test`. It reuses the same title the transcript
+ * prints, lower-cased so the footer reads as a sentence next to the spinner.
+ */
+export function toolLabel(name: string, input: unknown = {}): string {
+  const title = titleFor(name, input);
+  // Tools whose title is already the argument, with no leading noun to drop.
+  const bare: Record<string, string> = {
+    bash: "running",
+    network_request: "requesting",
+    web_fetch: "fetching",
+    web_search: "searching the web",
+  };
+  const barePrefix = bare[name];
+  if (barePrefix !== undefined) {
+    return title.length > 0 ? `${barePrefix} ${title}` : barePrefix;
+  }
+  const verb: Record<string, string> = {
+    read_file: "reading",
+    read_many: "reading",
+    write_file: "writing",
+    write_many: "writing",
+    edit_file: "editing",
+    apply_patch: "patching",
+    file_append: "appending",
+    glob_files: "finding files",
+    grep_search: "searching",
+    todo_write: "planning",
+    delegate_task: "delegating",
+    use_skill: "loading skill",
+    save_skill: "saving skill",
+    list_dir: "listing",
+    tree_view: "listing",
+    file_delete: "deleting",
+    file_move: "moving",
+    file_copy: "copying",
+    make_dir: "creating",
+    git_commit: "committing",
+    git_status: "checking git",
+    git_diff: "diffing",
+    lsp: "asking the language server",
+    env_get: "reading env",
+    sleep_wait: "waiting",
+  };
+  const prefix = verb[name];
+  if (prefix !== undefined) {
+    // `titleFor` already carries the argument (the path, the command); the verb
+    // replaces the leading noun so the footer reads "running npm test".
+    const rest = title.replace(/^\S+\s*/, "");
+    return rest.length > 0 ? `${prefix} ${rest}` : prefix;
+  }
+  const mcp = parseMcpName(name);
+  if (mcp !== undefined) return `${mcp.server} · ${mcp.tool}`;
+  return title;
+}
+
 /** The line printed before a tool runs, or "" when the input says nothing useful. */
 export function toolCallLine(name: string, input: unknown): string {
   if (defersTitle(name)) return "";
@@ -217,7 +275,41 @@ export function toolResultLine(name: string, result: ToolResult, durationMs?: nu
         ? ""
         : `${lead}${t.paint(t.colors.feedback.success, GLYPH.ok)}${time}`;
   if (body === undefined) return head;
-  return head.length > 0 ? `${head}\n${body}` : body;
+
+  // The body is printed truncated; keep the whole thing so Ctrl+O can expand it.
+  const raw = fullBody(name, result);
+  let hint = "";
+  if (raw !== undefined && wasTruncated(name, result)) {
+    const fold = folds().add(name, titleFor(name, result.metadata?.path !== undefined ? { path: result.metadata.path } : {}), raw);
+    hint = `\n${t.paint(t.colors.text.faint, `  ⌄ ctrl+o expands (${raw.split("\n").length} lines · #${fold.id})`)}`;
+  }
+  return head.length > 0 ? `${head}\n${body}${hint}` : `${body}${hint}`;
+}
+
+/** The complete, unpainted body for a tool, or undefined when there is none. */
+function fullBody(name: string, result: ToolResult): string | undefined {
+  const meta = result.metadata ?? {};
+  if (name === "edit_file" || name === "apply_patch") {
+    const diff = meta["diff"];
+    return typeof diff === "string" && diff.trim().length > 0 ? diff : undefined;
+  }
+  if (name === "write_file" && typeof meta["content"] === "string") return meta["content"] as string;
+  if (name === "bash") {
+    const output = result.output.trim();
+    return output.length > 0 ? output : undefined;
+  }
+  if (name === "todo_write") {
+    const todos = meta["todos"];
+    return Array.isArray(todos) ? JSON.stringify(todos, null, 2) : undefined;
+  }
+  return undefined;
+}
+
+/** True when the rendered block dropped lines the full body still holds. */
+function wasTruncated(name: string, result: ToolResult): boolean {
+  const raw = fullBody(name, result);
+  if (raw === undefined) return false;
+  return raw.split("\n").length > MAX_BODY_LINES || raw.length > MAX_BODY_CHARS;
 }
 
 /** A bounded block body for tools whose output is worth reading. */

@@ -18,6 +18,10 @@ export interface ChromeLayout {
   statusRow: number;
   /** Row holding the input prompt. */
   promptRow: number;
+  /** First row of the completion menu, or 0 when the menu is hidden. */
+  menuTop: number;
+  /** Rows the completion menu occupies. */
+  menuRows: number;
   /** Total terminal rows. */
   height: number;
 }
@@ -37,6 +41,8 @@ export class Chrome {
   private statusText = "";
   /** One line of tab labels, or undefined when the strip is hidden. */
   private tabStrip: string | undefined;
+  /** Completion menu rows, drawn just above the status line. */
+  private menuLines: string[] = [];
   private readonly out: NodeJS.WriteStream;
 
   constructor(out: NodeJS.WriteStream = process.stderr) {
@@ -72,6 +78,8 @@ export class Chrome {
     regionBottom: 1,
     statusRow: 1,
     promptRow: 1,
+    menuTop: 0,
+    menuRows: 0,
     height: 24,
   };
 
@@ -83,15 +91,17 @@ export class Chrome {
     const rows = this.out.rows ?? 0;
     const height = Math.max(12, rows > 0 ? rows : 24);
     const tabRows = this.tabStrip === undefined ? 0 : 1;
-    // The strip takes its row out of the header's budget, so the footer rows and
-    // at least one conversation row survive on a short terminal.
-    const headerRows = Math.min(this.headerLines.length, Math.max(0, height - 6 - tabRows));
+    const menuRows = this.menuLines.length;
+    // The strip and the menu take their rows out of the header's budget, so the
+    // footer rows and at least one conversation row survive on a short terminal.
+    const headerRows = Math.min(this.headerLines.length, Math.max(0, height - 6 - tabRows - menuRows));
     const statusRow = height - 1;
     const promptRow = height;
     const tabRow = tabRows === 1 ? headerRows + 1 : 0;
     const regionTop = headerRows + tabRows + 1;
-    const regionBottom = Math.max(regionTop, statusRow - 1);
-    return { headerRows, tabRow, regionTop, regionBottom, statusRow, promptRow, height };
+    const menuTop = statusRow - menuRows;
+    const regionBottom = Math.max(regionTop, menuTop - 1);
+    return { headerRows, tabRow, regionTop, regionBottom, statusRow, promptRow, height, menuTop, menuRows };
   }
 
   /** Recomputes after a terminal resize. */
@@ -101,6 +111,8 @@ export class Chrome {
     this.drawHeader();
     this.applyRegion();
     this.moveToRegionBottom();
+    this.drawMenu();
+    this.drawStatus();
   }
 
   private drawHeader(): void {
@@ -162,6 +174,45 @@ export class Chrome {
     this.out.write(text);
   }
 
+  /**
+   * Sets the completion menu. Passing an empty array hides it and gives the rows
+   * back to the conversation region, so the layout is identical to a run without
+   * a menu. Rows are counted from the bottom so the menu always sits flush above
+   * the status line.
+   */
+  setMenu(lines: string[]): void {
+    const hadRows = this.menuLines.length;
+    const hadTop = this.layout.menuTop;
+    this.menuLines = lines;
+    if (!this.enabled) return;
+    if (hadRows !== lines.length) {
+      // Erase the old rows using the layout that still knows where they are,
+      // otherwise shrinking the menu leaves its text stranded on screen.
+      for (let index = 0; index < hadRows; index++) {
+        this.out.write(`${ESC}${hadTop + index};1H${ESC}2K`);
+      }
+      this.layout = this.computeLayout();
+      this.applyRegion();
+      this.moveToRegionBottom();
+    }
+    this.drawMenu();
+  }
+
+  private drawMenu(): void {
+    const { menuRows, menuTop } = this.layout;
+    if (menuRows === 0 || menuTop === 0) return;
+    const width = terminalDimension(this.out.columns);
+    for (let index = 0; index < menuRows; index++) {
+      const line = fit(this.menuLines[index] ?? "", width);
+      this.out.write(`${ESC}${menuTop + index};1H${ESC}2K${line}`);
+    }
+  }
+
+  /** Clears every menu row and collapses the reserved space. */
+  clearMenu(): void {
+    this.setMenu([]);
+  }
+
   /** Redraws the status line without disturbing the conversation cursor. */
   setStatus(text: string): void {
     this.statusText = text;
@@ -199,17 +250,48 @@ export class Chrome {
     this.out.write(`${ESC}${promptRow};1H${ESC}2K`);
   }
 
-  /** Temporarily restores normal scrolling, e.g. for a full-screen selector. */
+  /** Clears the reserved status row. */
+  private clearStatus(): void {
+    if (!this.enabled) return;
+    this.out.write(`${ESC}${this.layout.statusRow};1H${ESC}2K`);
+  }
+
+  /**
+   * Temporarily restores normal scrolling, e.g. for a full-screen selector.
+   *
+   * Two things matter here. The region must be reset, because a selector draws
+   * into the alternate screen and a live region would clip its frame. And the
+   * cursor must be left inside the conversation region, not on the last row: with
+   * the region off, a newline written at the bottom of the screen scrolls the
+   * whole screen, which would drag the status line up into the transcript. That
+   * is what made every `/resume` leave another footer behind.
+   */
   suspend(): void {
     if (!this.enabled) return;
+    // The menu belongs to the prompt line, and the caller is about to hand the
+    // screen to a full-screen selector. Clear its rows first (using the current
+    // layout, which still knows where they are) and give the space back.
+    const { menuTop, menuRows } = this.layout;
+    for (let index = 0; index < menuRows; index++) {
+      this.out.write(`${ESC}${menuTop + index};1H${ESC}2K`);
+    }
+    this.menuLines = [];
+    this.layout = this.computeLayout();
     this.out.write(`${ESC}r`);
     this.clearPrompt();
-    this.out.write(`${ESC}${this.layout.height};1H`);
+    this.clearStatus();
+    this.out.write(`${ESC}${this.layout.regionBottom};1H`);
   }
 
   resume(): void {
     if (!this.enabled) return;
+    // A command can print past the bottom of the screen while the region is off,
+    // which scrolls the whole screen and corrupts both the header and the footer.
+    // Repainting all three from scratch is the only way back to a known state.
+    this.clearStatus();
+    this.clearPrompt();
     this.applyRegion();
+    this.drawHeader();
     this.moveToRegionBottom();
     this.drawStatus();
   }
@@ -220,6 +302,12 @@ export class Chrome {
     this.enabled = false;
     this.out.write(`${ESC}r`);
     const { statusRow, promptRow } = this.layout;
+    // The menu rows sit above the status line; wipe them so the closing line does
+    // not land on top of a stale completion list.
+    const { menuTop, menuRows } = this.layout;
+    for (let index = 0; index < menuRows; index++) {
+      this.out.write(`${ESC}${menuTop + index};1H${ESC}2K`);
+    }
     this.out.write(`${ESC}${statusRow};1H${ESC}2K`);
     this.out.write(`${ESC}${promptRow};1H${ESC}2K`);
     if (finalLine !== undefined) this.out.write(`${ESC}${promptRow};1H${finalLine}\n`);

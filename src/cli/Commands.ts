@@ -1101,6 +1101,8 @@ export function printCommandHelp(): void {
     `${"# note".padEnd(34)} ${pc.gray("added to the session context")}`,
     `${"@file".padEnd(34)} ${pc.gray("pick a file and attach its contents to the message")}`,
     `${"Shift+Tab".padEnd(34)} ${pc.gray("cycle the permission mode")}`,
+    `${"Tab".padEnd(34)} ${pc.gray("accept the highlighted completion")}`,
+    `${"Ctrl+O".padEnd(34)} ${pc.gray("expand the last truncated tool output")}`,
   ]);
 }
 

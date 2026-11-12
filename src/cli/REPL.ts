@@ -4,8 +4,10 @@ import { loadConfig } from "../config/Config.js";
 import { Logger } from "../utils/Logger.js";
 import { SessionStore } from "../core/SessionStore.js";
 import { Runtime } from "../core/Runtime.js";
-import { Spinner, bannerLines, modeTag, printAssistantHeader, printError, printInfo, printStatusBar, printTurnSummary, tabStripLine, turnSummaryLine } from "./TerminalUI.js";
+import { Spinner, activityFrame, bannerLines, modeTag, printAssistantHeader, printError, printInfo, printStatusBar, printTurnSummary, tabStripLine, turnSummaryLine } from "./TerminalUI.js";
+import { toolLabel } from "./ToolView.js";
 import { Chrome } from "./Chrome.js";
+import { folds } from "./Folds.js";
 import { Splash } from "./Splash.js";
 import { closeBrowser } from "../tools/BrowserOps.js";
 import { packageVersion } from "../core/Runtime.js";
@@ -95,6 +97,13 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   let interruptCount = 0;
   let lastGoal: string | undefined;
   let activeAbort: AbortController | undefined;
+  /**
+   * Live activity, shown in the footer while a turn runs. A silent model looks
+   * identical to a hung process, so the footer carries what the agent is doing
+   * right now, how long it has been doing it, and which step it is on.
+   */
+  let activity: { label: string; startedAt: number; step?: number; maxSteps?: number } | undefined;
+  let activityTimer: NodeJS.Timeout | undefined;
 
   const onSigint = (): void => {
     if (busy && activeAbort) {
@@ -110,6 +119,43 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     process.stderr.write(`\n${pc.gray("Press Ctrl+C again to exit, or type /exit.")}\n`);
   };
   process.on("SIGINT", onSigint);
+
+  /**
+   * Ctrl+O reprints the last collapsed block in full. A terminal cannot rewrite
+   * lines it has already scrolled away, so the expansion is appended: the block
+   * is shown again, complete, below the collapsed form.
+   */
+  const expandLast = (): void => {
+    const fold = folds().last();
+    const t = theme();
+    if (fold === undefined) {
+      writeLine(t.paint(t.colors.text.faint, "  nothing to expand yet"));
+      return;
+    }
+    const expanded = folds().toggle(fold.id)?.expanded === true;
+    const head = `${t.paint(t.colors.accent, expanded ? "⌃" : "⌄")} ${t.bold(`${fold.name} · ${fold.title}`)} ${t.paint(t.colors.text.faint, `(#${fold.id}, ${fold.body.split("\n").length} lines)`)}`;
+    if (!expanded) {
+      writeLine(`\n${head} ${t.paint(t.colors.text.faint, "collapsed")}`);
+      return;
+    }
+    const body = fold.body
+      .split("\n")
+      .map((line) => `${t.paint(t.colors.border, "┃")} ${t.paint(t.colors.text.muted, line)}`)
+      .join("\n");
+    writeLine(`\n${head}\n${body}`);
+  };
+
+  /** Writes a block to the conversation region, chrome or plain. */
+  const writeLine = (text: string): void => {
+    if (useChrome) {
+      // The cursor sits on the prompt row, outside the scroll region, so it must
+      // be moved back inside first or the block lands on the composer.
+      chrome.moveToRegionBottom();
+      chrome.writeRegion(`${text}\n`);
+    } else {
+      process.stderr.write(`${text}\n`);
+    }
+  };
 
   const onResize = (): void => chrome.resize();
   if (useChrome) process.on("SIGWINCH", onResize);
@@ -172,7 +218,9 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       parts.push(t.paint(t.colors.accent, `@${runtime.config.agentName}`));
     }
     if (runtime.config.effort !== undefined) parts.push(t.paint(t.colors.accent, runtime.config.effort));
-    if (busy) parts.push(t.paint(t.colors.feedback.info, "working…"));
+    // Live activity leads the right-hand group so the eye lands on it first.
+    const live = activityFrame(activity);
+    if (live !== undefined) parts.push(live);
     if (queue.length > 0) parts.push(t.paint(t.colors.feedback.warning, `↑${queue.length} queued`));
     parts.push(t.paint(paint, `ctx ${tokenCount(used)}/${tokenCount(runtime.config.contextWindow)}`));
     const spend = runtime.cost.compact();
@@ -270,15 +318,42 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     activateTab(Number.parseInt(choice.id, 10));
   };
 
+  /** Starts the animated footer segment and keeps it ticking. */
+  const beginActivity = (label: string): void => {
+    activity = { label, startedAt: Date.now() };
+    if (activityTimer === undefined && useChrome) {
+      activityTimer = setInterval(() => chrome.setStatus(statusLine()), 90);
+    }
+    showStatus();
+  };
+
+  const setActivity = (label: string, step?: number, maxSteps?: number): void => {
+    if (activity === undefined) return;
+    activity = {
+      label,
+      startedAt: activity.startedAt,
+      ...(step !== undefined ? { step } : {}),
+      ...(maxSteps !== undefined ? { maxSteps } : {}),
+    };
+  };
+
+  const endActivity = (): void => {
+    activity = undefined;
+    if (activityTimer !== undefined) {
+      clearInterval(activityTimer);
+      activityTimer = undefined;
+    }
+  };
+
   const runGoal = async (goal: string): Promise<void> => {
     busy = true;
     interruptCount = 0;
     activeAbort = new AbortController();
     const turnStartedAt = Date.now();
     let turnSteps = 0;
-    // The footer carries a "working…" marker while a turn runs, so the terminal
-    // shows the agent is busy even when the model is silent for a while.
-    if (useChrome) showStatus();
+    // The footer carries a live activity segment while a turn runs, so the
+    // terminal shows the agent is busy even when the model is silent for a while.
+    beginActivity("thinking");
     // The first goal names the tab; later goals leave it, so the strip keeps
     // pointing at what the conversation is about rather than its last message.
     const tab = tabs.current();
@@ -287,6 +362,9 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       showTabs();
     }
     const markdown = new MarkdownRenderer(useChrome ? process.stderr : process.stdout);
+    // Redraw the line being received so code and prose are visible as they
+    // stream, instead of appearing only once a newline arrives.
+    markdown.setLiveTail(true);
     let streamed = false;
     if (useChrome) chrome.moveToRegionBottom();
     spinner.start("thinking");
@@ -328,11 +406,16 @@ export async function runRepl(options: SessionOptions): Promise<number> {
         },
         onStep: (step, max) => {
           turnSteps = step;
-          if (!streamed) spinner.start(`thinking · step ${step}/${max}`);
+          setActivity("thinking", step, max);
+          if (!streamed && !useChrome) spinner.start(`thinking · step ${step}/${max}`);
+        },
+        onToolStart: (name, input) => {
+          setActivity(toolLabel(name, input));
         },
         onText: (chunk) => {
           if (!streamed) {
             spinner.stop();
+            endActivity();
             if (useChrome) chrome.writeRegion(`\n${theme().paint(theme().colors.accent, "◆")} ${theme().bold("carls")}\n`);
             else printAssistantHeader();
             streamed = true;
@@ -344,9 +427,11 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           // narration has no trailing newline, so without this the next tool
           // block is appended to the last word of the sentence.
           if (streamed) markdown.flush();
+          if (!streamed) setActivity("thinking");
         },
       });
       spinner.stop();
+      endActivity();
       markdown.flush();
       if (!streamed && result.finalText.length > 0) {
         if (useChrome) chrome.writeRegion(`\n${theme().paint(theme().colors.accent, "◆")} ${theme().bold("carls")}\n`);
@@ -373,6 +458,9 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       for (const leftover of runtime.takeSteering()) queue.push(leftover);
       busy = false;
       activeAbort = undefined;
+      // The timer must stop even on the error path, or it keeps repainting the
+      // footer after the turn is over.
+      endActivity();
       if (useChrome) {
         chrome.writeRegion("\n");
         chrome.moveToRegionBottom();
@@ -395,6 +483,8 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           ...(resume !== undefined ? { initial: resume } : {}),
           onModeCycle: cycleMode,
           onPalette: () => true,
+          runtime,
+          onExpand: expandLast,
           ...(useChrome ? { chrome } : {}),
         });
         resume = undefined;

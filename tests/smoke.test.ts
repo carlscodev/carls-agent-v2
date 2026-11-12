@@ -5224,3 +5224,263 @@ describe("delegate_task", () => {
     expect(result.error).toContain("not available");
   });
 });
+
+describe("completion engine", () => {
+  /** A runtime stub: only the fields the completion reads are needed. */
+  function runtime(cwd: string): { config: { cwd: string; provider: string; contextWindow?: number } } {
+    return { config: { cwd, provider: "anthropic" } };
+  }
+
+  it("offers every command for a bare slash and ranks prefix matches first", async () => {
+    const { complete } = await import("../src/cli/Autocomplete.js");
+    const result = complete({ line: "/", cursor: 1, runtime: runtime(process.cwd()) as never });
+    expect(result).toBeDefined();
+    const values = result?.items.map((item) => item.value) ?? [];
+    expect(values).toContain("/help");
+    expect(values).toContain("/mode");
+
+    const filtered = complete({ line: "/mo", cursor: 3, runtime: runtime(process.cwd()) as never });
+    const filteredValues = filtered?.items.map((item) => item.value) ?? [];
+    // "/mode" and "/model" start with "/mo"; they must lead the list.
+    expect(filteredValues[0]).toBe("/mode");
+    expect(filteredValues[1]).toBe("/model");
+  });
+
+  it("completes curated arguments: permission modes and efforts", async () => {
+    const { complete } = await import("../src/cli/Autocomplete.js");
+    const modes = complete({ line: "/mode ", cursor: 6, runtime: runtime(process.cwd()) as never });
+    expect(modes?.items.map((item) => item.value)).toContain("yolo");
+
+    const efforts = complete({ line: "/effort m", cursor: 9, runtime: runtime(process.cwd()) as never });
+    expect(efforts?.items.map((item) => item.value)).toContain("medium");
+  });
+
+  it("offers skill names after /skills", async () => {
+    const { complete } = await import("../src/cli/Autocomplete.js");
+    const subs = complete({ line: "/skills ", cursor: 8, runtime: runtime(process.cwd()) as never });
+    expect(subs?.items.map((item) => item.value)).toContain("show");
+  });
+
+  it("returns undefined for free text so the menu stays hidden", async () => {
+    const { complete } = await import("../src/cli/Autocomplete.js");
+    const result = complete({ line: "explain this repo", cursor: 17, runtime: runtime(process.cwd()) as never });
+    expect(result).toBeUndefined();
+  });
+
+  it("applies a completion by replacing the token and adding a space", async () => {
+    const { applyCompletion } = await import("../src/cli/Autocomplete.js");
+    const next = applyCompletion("/mo", 3, { items: [], start: 0, end: 3 }, {
+      value: "/mode",
+      label: "/mode",
+      kind: "command",
+    });
+    expect(next.line).toBe("/mode ");
+    expect(next.cursor).toBe(6);
+  });
+
+  it("fuzzy-matches a subsequence when no prefix fits", async () => {
+    const { rank } = await import("../src/cli/Autocomplete.js");
+    const items = [
+      { value: "/help", label: "/help", kind: "command" as const },
+      { value: "/export", label: "/export", kind: "command" as const },
+    ];
+    // "xpr" is a subsequence of "/export" but not of "/help".
+    expect(rank(items, "xpr").map((item) => item.value)).toEqual(["/export"]);
+  });
+});
+
+describe("fold store", () => {
+  it("keeps the last fold, toggles it, and reports unknown ids as undefined", async () => {
+    const { folds } = await import("../src/cli/Folds.js");
+    folds().reset();
+    const first = folds().add("bash", "npm test", "line\n".repeat(40));
+    const second = folds().add("read_file", "src/a.ts", "x\n".repeat(30));
+    expect(folds().last()?.id).toBe(second.id);
+
+    const toggled = folds().toggle();
+    expect(toggled?.id).toBe(second.id);
+    expect(toggled?.expanded).toBe(true);
+    expect(folds().toggle()?.expanded).toBe(false);
+
+    expect(folds().toggle(first.id)?.id).toBe(first.id);
+    expect(folds().get(9999)).toBeUndefined();
+    folds().reset();
+  });
+
+  it("drops the oldest folds once the cap is reached", async () => {
+    const { folds } = await import("../src/cli/Folds.js");
+    folds().reset();
+    const first = folds().add("bash", "t", "b");
+    for (let index = 0; index < 120; index++) folds().add("bash", "t", "b");
+    expect(folds().get(first.id)).toBeUndefined();
+    expect(folds().size()).toBe(100);
+    folds().reset();
+  });
+});
+
+describe("Chrome completion menu", () => {
+  async function chromeWith(width: number, rows: number) {
+    const { Chrome } = await import("../src/cli/Chrome.js");
+    const { PassThrough } = await import("node:stream");
+    const out = new PassThrough() as unknown as NodeJS.WriteStream;
+    (out as unknown as { isTTY: boolean }).isTTY = true;
+    (out as unknown as { columns: number }).columns = width;
+    (out as unknown as { rows: number }).rows = rows;
+    const writes: string[] = [];
+    out.on("data", (chunk: Buffer) => writes.push(chunk.toString()));
+    const chrome = new Chrome(out);
+    chrome.enable(["h1", "h2"]);
+    return { chrome, writes };
+  }
+
+  it("reserves rows above the status line and gives them back when cleared", async () => {
+    const { chrome } = await chromeWith(80, 24);
+    const bare = chrome.current();
+    expect(bare.menuRows).toBe(0);
+
+    chrome.setMenu(["a", "b", "c"]);
+    const withMenu = chrome.current();
+    expect(withMenu.menuRows).toBe(3);
+    expect(withMenu.menuTop).toBe(withMenu.statusRow - 3);
+    // The menu eats into the conversation region, never into the footer.
+    expect(withMenu.regionBottom).toBeLessThan(bare.regionBottom);
+    expect(withMenu.statusRow).toBe(23);
+    expect(withMenu.promptRow).toBe(24);
+
+    chrome.clearMenu();
+    expect(chrome.current().menuRows).toBe(0);
+    expect(chrome.current().regionBottom).toBe(bare.regionBottom);
+  });
+
+  it("paints the menu rows and wipes them on clear", async () => {
+    const { chrome, writes } = await chromeWith(80, 24);
+    writes.length = 0;
+    chrome.setMenu(["alpha", "beta"]);
+    const painted = writes.join("");
+    expect(painted).toContain("alpha");
+    expect(painted).toContain("beta");
+
+    writes.length = 0;
+    chrome.clearMenu();
+    // Clearing must issue an erase for each row it had drawn.
+    expect(writes.join("")).toContain("\u001b[2K");
+  });
+});
+
+describe("activity label for tools", () => {
+  it("turns a tool call into a present-tense footer label", async () => {
+    const { toolLabel } = await import("../src/cli/ToolView.js");
+    expect(toolLabel("bash", { command: "npm test" })).toBe("running npm test");
+    expect(toolLabel("read_file", { path: "src/index.ts" })).toBe("reading src/index.ts");
+    expect(toolLabel("grep_search", { pattern: "foo" })).toContain("searching");
+    // Unknown tools fall back to their own name rather than showing nothing.
+    expect(toolLabel("mystery_tool", {})).toBe("mystery_tool");
+  });
+});
+
+describe("Markdown live tail", () => {
+  it("draws the in-progress line and erases it before the next one", async () => {
+    const { MarkdownRenderer } = await import("../src/cli/Markdown.js");
+    const { PassThrough } = await import("node:stream");
+    const out = new PassThrough() as unknown as NodeJS.WriteStream;
+    (out as unknown as { columns: number }).columns = 80;
+    (out as unknown as { isTTY: boolean }).isTTY = true;
+    const writes: string[] = [];
+    out.on("data", (chunk: Buffer) => writes.push(chunk.toString()));
+
+    const md = new MarkdownRenderer(out);
+    md.setLiveTail(true);
+    // No newline yet: the partial line must still reach the terminal.
+    md.push("partial ");
+    expect(writes.join("")).toContain("partial");
+    // A complete line arrives; the tail is erased with a carriage return first.
+    writes.length = 0;
+    md.push("line\n");
+    expect(writes.join("")).toContain("\r\u001b[K");
+    expect(writes.join("")).toContain("partial line");
+    md.flush();
+  });
+});
+
+describe("Prompt completion keyboard semantics", () => {
+  /** Drives the real Prompt over a fake TTY and reports what it settles on. */
+  async function press(sequence: string[]): Promise<{ type: string; text?: string }> {
+    const { Prompt } = await import("../src/cli/Prompt.js");
+    const { PassThrough } = await import("node:stream");
+    const input = new PassThrough() as unknown as NodeJS.ReadStream;
+    (input as unknown as { isTTY: boolean }).isTTY = true;
+    (input as unknown as { columns: number }).columns = 100;
+    const output = new PassThrough() as unknown as NodeJS.WriteStream;
+    (output as unknown as { columns: number }).columns = 100;
+    (output as unknown as { rows: number }).rows = 30;
+    const prompt = new Prompt(input, output);
+    const runtime = { config: { cwd: process.cwd(), provider: "anthropic" } } as never;
+    const pending = prompt.read({ prompt: "carls> ", runtime });
+    await new Promise((r) => setTimeout(r, 10));
+    for (const key of sequence) {
+      input.write(key);
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    return pending;
+  }
+
+  it("submits a typed command verbatim when Enter is pressed without navigating", async () => {
+    // The menu is open (argument completions exist for /doctor), but the user
+    // never touched the arrows, so the text must survive untouched.
+    const result = await press(["/doctor", "\r"]);
+    expect(result).toEqual({ type: "line", text: "/doctor" });
+  });
+
+  it("accepts the highlighted row and submits it when the arrows were used", async () => {
+    const result = await press(["/mo", "\u001b[B", "\r"]);
+    expect(result.type).toBe("line");
+    expect(result.text?.startsWith("/mode") || result.text?.startsWith("/model")).toBe(true);
+  });
+
+  it("accepts the highlighted row on Tab without submitting", async () => {
+    // Tab completes into the composer; only the following Enter submits, so the
+    // completed text must equal exactly what Enter then sends.
+    const result = await press(["/mo", "\t", "\r"]);
+    expect(result.type).toBe("line");
+    expect(result.text?.trim().length).toBeGreaterThan(0);
+    // A trailing space is added so the next argument can be typed right away.
+    expect(result.text).toMatch(/^\/mo(de|del|dels)? $/);
+  });
+
+  it("closes the menu on Escape and leaves the typed text alone", async () => {
+    const result = await press(["/mo", "\u001b", "\r"]);
+    expect(result).toEqual({ type: "line", text: "/mo" });
+  });
+});
+
+describe("collapsible tool output", () => {
+  it("registers a fold and prints a ctrl+o hint for long shell output", async () => {
+    const { toolResultLine } = await import("../src/cli/ToolView.js");
+    const { folds } = await import("../src/cli/Folds.js");
+    folds().reset();
+
+    const long = Array.from({ length: 60 }, (_v, index) => `line ${index}`).join("\n");
+    const line = toolResultLine("bash", { ok: true, output: long });
+    // The block is printed collapsed, but the full text is kept for expansion.
+    expect(line).toContain("ctrl+o expands");
+    expect(folds().size()).toBe(1);
+    expect(folds().last()?.body.split("\n").length).toBe(60);
+
+    // A short result needs no fold and no hint.
+    folds().reset();
+    const short = toolResultLine("bash", { ok: true, output: "ok\n" });
+    expect(short).not.toContain("ctrl+o");
+    expect(folds().size()).toBe(0);
+  });
+
+  it("does not fold a short diff", async () => {
+    const { toolResultLine } = await import("../src/cli/ToolView.js");
+    const { folds } = await import("../src/cli/Folds.js");
+    folds().reset();
+    const diff = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new";
+    const line = toolResultLine("edit_file", { ok: true, output: "", metadata: { diff, path: "x" } });
+    expect(line).toContain("+new");
+    expect(line).not.toContain("ctrl+o");
+    expect(folds().size()).toBe(0);
+  });
+});

@@ -1,5 +1,9 @@
 import * as readline from "node:readline";
+import pc from "picocolors";
 import type { Chrome } from "./Chrome.js";
+import { applyCompletion, complete, type Completion, type CompletionResult } from "./Autocomplete.js";
+import type { Runtime } from "../core/Runtime.js";
+import { theme } from "./Theme.js";
 
 /** Result of reading one prompt line. */
 export type PromptResult =
@@ -33,6 +37,27 @@ interface PromptOptions {
   onPalette?: (filter: string) => boolean;
   /** Set to false to type `@` literally (handled by the REPL when picking files). */
   mentions?: boolean;
+  /** Enables the completion menu; needs the runtime to know models and skills. */
+  runtime?: Runtime;
+  /** Called on Ctrl+O to expand the last collapsed tool output. */
+  onExpand?: () => void;
+}
+
+/** Colour per completion kind, so commands and paths read as different things. */
+function kindColor(kind: Completion["kind"]): (text: string) => string {
+  const t = theme();
+  switch (kind) {
+    case "command":
+      return (text: string) => t.paint(t.colors.accent, text);
+    case "skill":
+      return (text: string) => t.paint(t.categorical(4), text);
+    case "model":
+      return (text: string) => t.paint(t.categorical(2), text);
+    case "file":
+      return (text: string) => t.paint(t.colors.markdown.linkText, text);
+    default:
+      return (text: string) => t.paint(t.colors.text.base, text);
+  }
 }
 
 /**
@@ -51,6 +76,8 @@ export class Prompt {
   private cursor = 0;
   private historyIndex = 0;
   private draft = "";
+  /** Open completion menu, or undefined when hidden. */
+  private menu: { result: CompletionResult; index: number; navigated: boolean } | undefined;
 
   constructor(input: NodeJS.ReadStream = process.stdin, output: NodeJS.WriteStream = process.stderr) {
     this.input = input;
@@ -81,6 +108,10 @@ export class Prompt {
         this.input.off("keypress", onKey);
         this.input.setRawMode?.(wasRaw);
         this.input.pause();
+        // The menu occupies real rows above the status line; leaving it up would
+        // strand it there once the line is submitted.
+        this.menu = undefined;
+        options.chrome?.clearMenu();
         options.chrome?.clearPrompt();
         if (options.chrome === undefined) this.output.write("\r\u001b[K");
         if (result.type === "line" && result.text.trim().length > 0) {
@@ -92,11 +123,86 @@ export class Prompt {
       const render = (): void => {
         if (options.chrome !== undefined) {
           options.chrome.drawPrompt(options.prompt, this.buffer, this.cursor);
+          refreshMenu();
           return;
         }
         this.output.write(`\r\u001b[K${options.prompt}${this.buffer}`);
         const back = this.buffer.length - this.cursor;
         if (back > 0) this.output.write(`\u001b[${back}D`);
+        refreshMenu();
+      };
+
+      /** Recomputes the completion menu for the current buffer. */
+      const refreshMenu = (): void => {
+        const runtime = options.runtime;
+        if (runtime === undefined) {
+          this.menu = undefined;
+          options.chrome?.clearMenu();
+          return;
+        }
+        const result = complete({ line: this.buffer, cursor: this.cursor, runtime });
+        this.menu = result === undefined ? undefined : { result, index: 0, navigated: false };
+        if (this.menu === undefined) options.chrome?.clearMenu();
+        else options.chrome?.setMenu(renderMenu());
+      };
+
+      /** Paints the visible slice of the menu, cursor row highlighted. */
+      const renderMenu = (): string[] => {
+        if (this.menu === undefined) return [];
+        const t = theme();
+        const items = this.menu.result.items;
+        const window = 8;
+        const start = Math.max(0, Math.min(this.menu.index - Math.floor(window / 2), items.length - window));
+        const slice = items.slice(start, start + window);
+        const lines = slice.map((item, offset) => {
+          const active = start + offset === this.menu?.index;
+          const glyph = active ? t.paint(t.colors.accent, "❯") : " ";
+          const label = active ? t.bold(item.label) : item.label;
+          const detail = item.detail !== undefined ? `  ${t.paint(t.colors.text.faint, item.detail)}` : "";
+          return `${glyph} ${kindColor(item.kind)(label)}${detail}`;
+        });
+        if (items.length > window) {
+          lines.push(t.paint(t.colors.text.faint, `  ${this.menu.index + 1}/${items.length} · ↑↓ select · tab accept · esc close`));
+        } else {
+          lines.push(t.paint(t.colors.text.faint, "  ↑↓ select · tab accept · esc close"));
+        }
+        return lines;
+      };
+
+      const accept = (): boolean => {
+        if (this.menu === undefined) return false;
+        const chosen: Completion | undefined = this.menu.result.items[this.menu.index];
+        if (chosen === undefined) return false;
+        const next = applyCompletion(this.buffer, this.cursor, this.menu.result, chosen);
+        this.buffer = next.line;
+        this.cursor = next.cursor;
+        this.menu = undefined;
+        options.chrome?.clearMenu();
+        render();
+        return true;
+      };
+
+      const closeMenu = (): void => {
+        if (this.menu === undefined) return;
+        this.menu = undefined;
+        options.chrome?.clearMenu();
+      };
+
+      const moveMenu = (direction: number): boolean => {
+        if (this.menu === undefined) return false;
+        const count = this.menu.result.items.length;
+        if (count === 0) return false;
+        this.menu.index = (this.menu.index + direction + count) % count;
+        this.menu.navigated = true;
+        options.chrome?.setMenu(renderMenu());
+        return true;
+      };
+
+      /** Wraps the caret to the end of the buffer, menu closed. */
+      const moveCaretEnd = (): void => {
+        closeMenu();
+        this.cursor = this.buffer.length;
+        render();
       };
 
       const onKey = (sequence: string | undefined, key: readline.Key): void => {
@@ -112,6 +218,12 @@ export class Prompt {
             case "d":
               if (this.buffer.length === 0) finish({ type: "eof" });
               else finish({ type: "line", text: this.buffer });
+              return;
+            case "o":
+              // Ctrl+O expands the last collapsed block; the prompt is redrawn
+              // afterwards because the expansion prints above the footer.
+              options.onExpand?.();
+              render();
               return;
             case "a":
               this.cursor = 0;
@@ -172,6 +284,34 @@ export class Prompt {
           options.onModeCycle?.();
           render();
           return;
+        }
+
+        // The completion menu owns the arrow keys and Tab while it is open, so
+        // history recall and literal tabs resume once it closes.
+        if (this.menu !== undefined) {
+          if (name === "up" && moveMenu(-1)) return;
+          if (name === "down" && moveMenu(1)) return;
+          if (name === "tab") {
+            accept();
+            return;
+          }
+          if (name === "escape") {
+            closeMenu();
+            return;
+          }
+          if ((name === "return" || name === "enter") && this.buffer.trim() !== "/") {
+            // Enter only takes the highlighted row when the user has actually
+            // chosen one with the arrows. Accepting the default on Enter would
+            // rewrite `/doctor` into `/doctor src/cli/Doctor.ts` as the user
+            // submits, which is never what they asked for.
+            if (this.menu.navigated && accept()) {
+              // A row was picked deliberately, so Enter runs it in one press
+              // rather than leaving the completed text in the composer.
+              finish({ type: "line", text: this.buffer });
+              return;
+            }
+            closeMenu();
+          }
         }
 
         switch (name) {

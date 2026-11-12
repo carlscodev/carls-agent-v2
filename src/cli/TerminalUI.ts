@@ -122,7 +122,7 @@ export function bannerLines(info: BannerInfo): string[] {
     `${t.paint(t.colors.text.muted, tildePath(info.cwd))} ${t.paint(t.colors.text.faint, `· ${info.sessionId.slice(0, 8)}`)}`,
   ].map((line) => truncate(line, textWidth));
 
-  const hint = "type to ask · @ file · / commands · ctrl+p palette · shift+tab mode · ! shell · # note";
+  const hint = "type to ask · @ file · / commands · tab complete · ctrl+p palette · shift+tab mode · ! shell · # note";
   const hintLines = wrap(hint, textWidth).map((line) => t.paint(t.colors.text.faint, line));
 
   const lines: string[] = [];
@@ -244,6 +244,30 @@ export function turnSummaryLine(info: {
   ];
   if (info.tokens.length > 0) parts.push(t.paint(t.colors.text.faint, info.tokens));
   return `${mark} ${parts.join(t.paint(t.colors.text.faint, " · "))}`;
+}
+
+/**
+ * Live activity for the footer: a spinner frame, what the agent is doing, the
+ * elapsed clock and the step counter. Returns undefined when idle, so the footer
+ * drops the segment instead of showing a dead "working…".
+ *
+ * The frame is picked from wall-clock time rather than from a counter, so the
+ * animation stays smooth no matter how often the footer happens to repaint.
+ */
+export function activityFrame(
+  activity: { label: string; startedAt: number; step?: number; maxSteps?: number } | undefined,
+  now: number = Date.now(),
+): string | undefined {
+  if (activity === undefined) return undefined;
+  const t = theme();
+  const glyph = FRAMES[Math.floor(now / 90) % FRAMES.length] ?? "";
+  const elapsed = Math.max(0, now - activity.startedAt);
+  const clock = elapsed >= 1000 ? ` ${formatDuration(elapsed)}` : "";
+  const step =
+    activity.step !== undefined && activity.maxSteps !== undefined
+      ? ` ${activity.step}/${activity.maxSteps}`
+      : "";
+  return `${t.paint(t.colors.accent, glyph)} ${t.paint(t.colors.text.muted, activity.label)}${t.paint(t.colors.text.faint, `${step}${clock}`)}`;
 }
 
 export function printTurnSummary(info: {

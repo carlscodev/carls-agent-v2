@@ -1,4 +1,5 @@
 import { theme } from "./Theme.js";
+import { visibleWidth } from "./Text.js";
 
 /**
  * Renders assistant markdown for a terminal, line by line, so it can be used
@@ -12,10 +13,23 @@ export class MarkdownRenderer {
   private readonly out: NodeJS.WriteStream;
   /** Visible width of a code-block rule. */
   private readonly barWidth: number;
+  /** Whether the incomplete trailing line is drawn as it arrives. */
+  private liveTail = false;
+  /** True while a live tail is on screen and must be erased before the next write. */
+  private tailVisible = false;
 
   constructor(out: NodeJS.WriteStream = process.stdout, width?: number) {
     this.out = out;
     this.barWidth = Math.max(8, Math.min(60, width ?? (out.columns ?? 100) - 2));
+  }
+
+  /**
+   * Enables redrawing of the line still being received. Without it a long line
+   * (a minified file, a wide table row) stays invisible until its newline
+   * arrives, which reads as "the agent is doing nothing".
+   */
+  setLiveTail(on: boolean): void {
+    this.liveTail = on;
   }
 
   /** Feeds a stream chunk; complete lines are rendered immediately. */
@@ -28,10 +42,12 @@ export class MarkdownRenderer {
       this.renderLine(line);
       newline = this.buffer.indexOf("\n");
     }
+    this.renderTail();
   }
 
   /** Renders whatever is left without a trailing newline. */
   flush(): void {
+    this.clearTail();
     if (this.buffer.length > 0) {
       this.renderLine(this.buffer);
       this.buffer = "";
@@ -39,6 +55,39 @@ export class MarkdownRenderer {
     if (this.inFence) {
       this.closeFence();
     }
+  }
+
+  /** Erases the in-progress line, if one is drawn. */
+  private clearTail(): void {
+    if (!this.tailVisible) return;
+    this.out.write("\r\u001b[K");
+    this.tailVisible = false;
+  }
+
+  /**
+   * Draws the incomplete line in place. Only lines that fit on one row are drawn:
+   * a wrapped tail cannot be erased with a single carriage return, so a long line
+   * is left to appear whole when its newline lands.
+   */
+  private renderTail(): void {
+    // Redirected output has no cursor to move, so the control sequences would be
+    // written into the file verbatim.
+    if (!this.liveTail || this.out.isTTY !== true) return;
+    if (this.buffer.length === 0) {
+      this.clearTail();
+      return;
+    }
+    const t = theme();
+    const preview = this.inFence
+      ? `${t.paint(t.colors.border, "│")} ${t.paint(t.colors.markdown.code, this.buffer)}`
+      : this.inline(this.buffer);
+    const width = this.out.columns ?? 100;
+    if (visibleWidth(preview) >= width) {
+      this.clearTail();
+      return;
+    }
+    this.out.write(`\r\u001b[K${preview}`);
+    this.tailVisible = true;
   }
 
   /** Width of a code-block rule, never below the two corners. */
@@ -53,6 +102,9 @@ export class MarkdownRenderer {
   }
 
   private renderLine(line: string): void {
+    // A live tail occupies the current row; any complete line must erase it
+    // first, or the new text would be appended to the half-drawn line.
+    this.clearTail();
     const fence = line.match(/^\s*```(\w*)\s*$/);
     if (fence) {
       if (this.inFence) {
