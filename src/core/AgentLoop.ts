@@ -70,6 +70,12 @@ export interface AgentLoopDeps {
   systemPrompt: string;
   /** Base context without the signal; the loop clones it per run. */
   toolContext: Omit<ToolContext, "signal">;
+  /**
+   * Messages typed while the turn runs. Checked at every step boundary, which
+   * is the only safe place to extend the conversation: never between a
+   * `tool_use` and its `tool_result`.
+   */
+  takeSteering?: () => string[];
 }
 
 export interface RunOptions {
@@ -79,6 +85,8 @@ export interface RunOptions {
   onText?: (chunk: string) => void;
   /** Called after each tool finishes, for UI rendering. */
   onToolResult?: (name: string, result: ToolResult) => void;
+  /** Called when steering messages were folded into the conversation. */
+  onSteer?: (messages: string[]) => void;
   /** Called at the start of every model step, for progress UI. */
   onStep?: (step: number, maxSteps: number) => void;
   /** External abort, e.g. Ctrl+C in the REPL. */
@@ -324,6 +332,16 @@ export class AgentLoop {
         return { steps: step, finalText: "", stoppedReason: "aborted" };
       }
       options.onStep?.(step + 1, maxSteps);
+
+      // Steering lands before the next model call, so the model sees the new
+      // instruction with the observations from the step that just finished.
+      const steering = this.deps.takeSteering?.() ?? [];
+      for (const text of steering) {
+        const message: Message = { role: "user", content: [{ type: "text", text }] };
+        history.push(message);
+        this.deps.session.recordMessage(message);
+      }
+      if (steering.length > 0) options.onSteer?.(steering);
 
       if (this.deps.contextManager.shouldCompact(history)) {
         this.deps.logger.info("Context window 75%+ full: compacting conversation.");

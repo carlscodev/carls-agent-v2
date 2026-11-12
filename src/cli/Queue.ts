@@ -59,6 +59,11 @@ export interface TypedLinesOptions {
   echo?: boolean;
   /** Called instead of the built-in queued line, so the UI can place it. */
   onQueued?: (text: string, depth: number) => void;
+  /**
+   * Handles a submitted line instead of queueing it. Used for steering: the
+   * message joins the running turn instead of waiting for it.
+   */
+  onSubmit?: (text: string) => void;
 }
 
 /**
@@ -68,7 +73,14 @@ export interface TypedLinesOptions {
  * opening the prompt again. Enter queues, Escape discards what is typed, Ctrl+C
  * aborts the turn (the signal is re-raised, because raw mode eats it).
  */
-export function collectTypedLines(options: TypedLinesOptions): () => void {
+export interface TypedLinesHandle {
+  stop(): void;
+  /** Releases stdin while another prompt owns it (an approval, for example). */
+  pause(): void;
+  resume(): void;
+}
+
+export function collectTypedLines(options: TypedLinesOptions): TypedLinesHandle {
   const { input, output } = options;
   const glyph = options.glyph ?? "⏳ ";
   readline.emitKeypressEvents(input);
@@ -77,6 +89,7 @@ export function collectTypedLines(options: TypedLinesOptions): () => void {
   input.resume();
   let buffer = "";
   let stopped = false;
+  let paused = false;
 
   const echo = options.echo !== false;
   const paint = (): void => {
@@ -85,7 +98,7 @@ export function collectTypedLines(options: TypedLinesOptions): () => void {
   };
 
   const onKey = (sequence: string | undefined, key: readline.Key): void => {
-    if (stopped) return;
+    if (stopped || paused) return;
     const name = key.name ?? "";
     const seq = sequence ?? key.sequence ?? "";
 
@@ -108,6 +121,11 @@ export function collectTypedLines(options: TypedLinesOptions): () => void {
         buffer = "";
         if (text.length === 0) {
           output.write("\r\u001b[K");
+          return;
+        }
+        if (options.onSubmit !== undefined) {
+          output.write("\r\u001b[K");
+          options.onSubmit(text);
           return;
         }
         const depth = options.queue.push(text);
@@ -139,11 +157,19 @@ export function collectTypedLines(options: TypedLinesOptions): () => void {
   };
 
   input.on("keypress", onKey);
-  return () => {
-    if (stopped) return;
-    stopped = true;
-    input.off("keypress", onKey);
-    input.setRawMode?.(wasRaw);
-    output.write("\r\u001b[K");
+  return {
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      input.off("keypress", onKey);
+      input.setRawMode?.(wasRaw);
+      output.write("\r\u001b[K");
+    },
+    pause() {
+      paused = true;
+    },
+    resume() {
+      paused = false;
+    },
   };
 }

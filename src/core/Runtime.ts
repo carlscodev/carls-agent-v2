@@ -109,6 +109,8 @@ export class Runtime {
   /** Mutable so /setup can swap the client without a restart. */
   private provider: Provider;
   private readonly mcpClients: McpClient[] = [];
+  /** Instructions typed while a turn runs, consumed by the loop. */
+  private readonly steering: string[] = [];
   private readonly mcpSummary: { name: string; transport: string; tools: number; version?: string }[] = [];
 
   constructor(deps: RuntimeDeps, history: Message[] = []) {
@@ -228,6 +230,7 @@ export class Runtime {
       logger: this.logger,
       systemPrompt: buildSystemPrompt(this.config),
       toolContext: this.baseToolContext(),
+      takeSteering: () => this.takeSteering(),
     });
   }
 
@@ -421,6 +424,17 @@ export class Runtime {
 
   setMode(mode: PermissionMode): void {
     this.config.mode = mode;
+  }
+
+  /** Queues an instruction for the running turn's next step boundary. */
+  steer(text: string): void {
+    const trimmed = text.trim();
+    if (trimmed.length > 0) this.steering.push(trimmed);
+  }
+
+  /** Drains steering messages; the loop calls this at every step boundary. */
+  takeSteering(): string[] {
+    return this.steering.splice(0, this.steering.length);
   }
 
   /** Applies a preset's tool and command rules; the gate reads the same object. */

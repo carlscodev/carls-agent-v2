@@ -57,6 +57,7 @@ export class PermissionGate {
   private readonly config: ResolvedConfig;
   private readonly logger: Logger;
   private readonly prompt: PromptFn;
+  private pausePromptHandler: ((paused: boolean) => void) | undefined;
   /** False when a prompt function was injected, e.g. by a test or a script. */
   private readonly usesTerminalPrompt: boolean;
 
@@ -181,7 +182,15 @@ export class PermissionGate {
     if (request.preview.length > 0) {
       process.stderr.write(`${request.preview}\n`);
     }
-    const answer = (await this.prompt("Allow? [y]es / [n]o / [a]lways: ")).trim().toLowerCase();
+    // An approval prompt and the "type while it works" composer must not read
+    // stdin at the same time, or answering also steers the turn.
+    this.pausePromptHandler?.(true);
+    let answer: string;
+    try {
+      answer = (await this.prompt("Allow? [y]es / [n]o / [a]lways: ")).trim().toLowerCase();
+    } finally {
+      this.pausePromptHandler?.(false);
+    }
 
     if (answer === "a" || answer === "always") {
       this.alwaysAllowed.add(request.tool.name);
@@ -189,6 +198,11 @@ export class PermissionGate {
     }
     if (answer === "y" || answer === "yes") return "allow";
     return "deny";
+  }
+
+  /** Lets the UI release stdin while an approval question is on screen. */
+  setPromptPause(handler?: (paused: boolean) => void): void {
+    this.pausePromptHandler = handler;
   }
 
   private static async defaultPrompt(question: string): Promise<string> {

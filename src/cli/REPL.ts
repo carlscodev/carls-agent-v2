@@ -182,7 +182,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     spinner.start("thinking");
     // Typing during a turn queues the message instead of dropping it. The
     // composer owns stdin while it runs, so it must stop before the prompt.
-    const stopComposer = interactive
+    const composer = interactive
       ? collectTypedLines({
           input: process.stdin,
           output: process.stderr,
@@ -190,8 +190,11 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           // With the fixed layout the footer is redrawn constantly, so only the
           // final "queued" line is printed there.
           echo: !useChrome,
-          onQueued: (text, depth) => {
-            const line = `${pc.gray("↳ queued")} ${pc.gray(depth > 1 ? `(${depth}) ` : "")}${theme().paint(theme().colors.text.muted, text)}`;
+          // Enter steers: the message joins the running turn at its next step
+          // boundary. A steer that arrives after the last step is queued below.
+          onSubmit: (text) => {
+            runtime.steer(text);
+            const line = `${pc.gray("↳ steering")} ${theme().paint(theme().colors.text.muted, text)}`;
             if (useChrome) chrome.writeRegion(`${line}\n`);
             else process.stderr.write(`\r\u001b[K${line}\n`);
           },
@@ -199,9 +202,20 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           onInterrupt: () => process.kill(process.pid, "SIGINT"),
         })
       : undefined;
+    // Approvals read stdin line by line; the composer steps aside while one is
+    // on screen so a "y" cannot also become a steering message.
+    runtime.gate.setPromptPause((paused) => {
+      if (paused) composer?.pause();
+      else composer?.resume();
+    });
     try {
       const result = await runtime.runTurn(goal, {
         signal: activeAbort.signal,
+        onSteer: (messages) => {
+          const line = `${pc.yellow("↳")} ${pc.gray(`steering applied: ${messages.join(" · ")}`)}`;
+          if (useChrome) chrome.writeRegion(`\n${line}\n`);
+          else process.stderr.write(`\n${line}\n`);
+        },
         onStep: (step, max) => {
           if (!streamed) spinner.start(`thinking · step ${step}/${max}`);
         },
@@ -237,7 +251,10 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       markdown.flush();
       printError((error as Error).message);
     } finally {
-      stopComposer?.();
+      runtime.gate.setPromptPause(undefined);
+      composer?.stop();
+      // A steer that arrived too late to reach a step boundary still runs.
+      for (const leftover of runtime.takeSteering()) queue.push(leftover);
       busy = false;
       activeAbort = undefined;
       if (useChrome) {

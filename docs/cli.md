@@ -38,10 +38,15 @@ Print mode writes the answer to stdout and everything else to stderr, so
 While a turn is running the spinner shows the current step and elapsed seconds.
 `Esc`/`Ctrl+C` aborts the turn without ending the session.
 
-Typing while the agent works **queues** the message instead of losing it: press
-Enter to queue, Escape to discard what you typed, Ctrl+C to abort the turn. The
-footer shows `↑n queued`, and queued prompts run in order when the current turn
-finishes — each one expands its own `@file` mentions.
+Typing while the agent works **steers** it: Enter sends the line into the turn
+that is already running, so it reaches the model at the next step boundary with
+all the observations gathered so far — no need to abort and repeat yourself.
+Escape discards what you typed, Ctrl+C aborts the turn.
+
+A steer that arrives after the model's last step still runs: it becomes a new
+turn, in order, and the footer shows `↑n queued` meanwhile. Each queued prompt
+expands its own `@file` mentions. While an approval question is on screen the
+composer steps aside, so answering `y` cannot also steer the turn.
 
 ## Commands
 

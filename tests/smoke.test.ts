@@ -681,6 +681,71 @@ describe("AgentLoop (scripted provider)", () => {
     expect(reloaded.length).toBeGreaterThanOrEqual(4);
   });
 
+  it("folds a steering message into the next step of the same turn", async () => {
+    const { AgentLoop } = await import("../src/core/AgentLoop.js");
+    const { CostTracker } = await import("../src/core/CostTracker.js");
+    const { Hooks } = await import("../src/core/Hooks.js");
+    const { BashExecution } = await import("../src/tools/BashExecution.js");
+
+    const registry = new ToolRegistry();
+    registry.register(new BashExecution());
+    const config = loadConfig({ yolo: true, maxSteps: 5 }, dir);
+    const session = new SessionStore(dir, config.model, undefined, join(dir, "sessions"));
+    const requests: Message[][] = [];
+    const scripted: import("../src/types/llm.js").LLMResponse[] = [
+      {
+        content: [{ type: "tool_use", id: "a", name: "bash", input: { command: "true" } }],
+        stopReason: "tool_use",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+      { content: [{ type: "text", text: "done" }], stopReason: "end_turn", usage: { inputTokens: 10, outputTokens: 5 } },
+    ];
+    const provider: import("../src/types/llm.js").Provider = {
+      name: "scripted",
+      async complete(args) {
+        requests.push(args.messages.map((m) => ({ role: m.role, content: [...m.content] })));
+        const next = scripted.shift();
+        if (next === undefined) throw new Error("scripted provider exhausted");
+        return next;
+      },
+    };
+
+    let polls = 0;
+    const loop = new AgentLoop({
+      provider,
+      registry,
+      gate: new PermissionGate(config, logger, async () => "y"),
+      contextManager: new ContextManager({ contextWindow: 200000, compactThreshold: 0.75, truncateLimit: 8000 }),
+      session,
+      costTracker: new CostTracker(config.model),
+      hooks: new Hooks(config.hooks, logger, dir),
+      config,
+      logger,
+      systemPrompt: "test",
+      toolContext: { cwd: dir, config, session, logger },
+      // The user typed a correction while the first step was running, so it is
+      // only available once the first step is over.
+      takeSteering: () => (polls++ === 1 ? ["focus on the failing test"] : []),
+    });
+
+    const steered: string[][] = [];
+    const history: Message[] = [{ role: "user", content: [{ type: "text", text: "run the tests" }] }];
+    const result = await loop.run(history, "run the tests", { silent: true, onSteer: (messages) => steered.push(messages) });
+
+    expect(result.stoppedReason).toBe("completed");
+    expect(steered).toEqual([["focus on the failing test"]]);
+    const secondRequest = requests[1] ?? [];
+    const steeredMessage = secondRequest.find(
+      (message) =>
+        message.role === "user" &&
+        message.content.some((block) => block.type === "text" && block.text === "focus on the failing test"),
+    );
+    expect(steeredMessage).toBeDefined();
+    // It arrives after the tool result, never between the pair.
+    const flat = secondRequest.flatMap((message) => message.content);
+    expect(flat[flat.length - 1]?.type).toBe("text");
+  });
+
   it("stops at max_steps when the model never finishes", async () => {
     const { AgentLoop } = await import("../src/core/AgentLoop.js");
     const { CostTracker } = await import("../src/core/CostTracker.js");
@@ -2209,6 +2274,41 @@ describe("prompt queue", () => {
     expect(queue.length).toBe(0);
   });
 
+  it("ignores keys while an approval prompt owns stdin", async () => {
+    const { PromptQueue, collectTypedLines } = await import("../src/cli/Queue.js");
+    const { PassThrough } = await import("node:stream");
+    const input = new PassThrough() as unknown as NodeJS.ReadStream;
+    const output = new PassThrough() as unknown as NodeJS.WriteStream;
+    output.on("data", () => undefined);
+    const queue = new PromptQueue();
+    const handle = collectTypedLines({ input, output, queue });
+    input.emit("keypress", "a", { name: "a" });
+    handle.pause();
+    input.emit("keypress", "y", { name: "y" });
+    input.emit("keypress", "\r", { name: "return" });
+    expect(queue.length).toBe(0);
+    handle.resume();
+    input.emit("keypress", "\r", { name: "return" });
+    handle.stop();
+    expect(queue.list()).toEqual(["a"]);
+  });
+
+  it("hands a submitted line to the steering callback instead of queueing", async () => {
+    const { PromptQueue, collectTypedLines } = await import("../src/cli/Queue.js");
+    const { PassThrough } = await import("node:stream");
+    const input = new PassThrough() as unknown as NodeJS.ReadStream;
+    const output = new PassThrough() as unknown as NodeJS.WriteStream;
+    output.on("data", () => undefined);
+    const queue = new PromptQueue();
+    const steered: string[] = [];
+    const handle = collectTypedLines({ input, output, queue, onSubmit: (text) => steered.push(text) });
+    input.emit("keypress", "r", { name: "r" });
+    input.emit("keypress", "\r", { name: "return" });
+    handle.stop();
+    expect(steered).toEqual(["r"]);
+    expect(queue.length).toBe(0);
+  });
+
   it("collects typed lines while a turn runs", async () => {
     const { PromptQueue, collectTypedLines } = await import("../src/cli/Queue.js");
     const { PassThrough } = await import("node:stream");
@@ -2217,7 +2317,7 @@ describe("prompt queue", () => {
     output.on("data", () => undefined);
     const queue = new PromptQueue();
     let interrupts = 0;
-    const stop = collectTypedLines({ input, output, queue, onInterrupt: () => (interrupts += 1) });
+    const handle = collectTypedLines({ input, output, queue, onInterrupt: () => (interrupts += 1) });
 
     const press = (sequence: string, key: Record<string, unknown>): void => {
       input.emit("keypress", sequence, key);
@@ -2229,7 +2329,7 @@ describe("prompt queue", () => {
     press("\b", { name: "backspace" });
     press("\r", { name: "return" });
     press("\u0003", { name: "c", ctrl: true });
-    stop();
+    handle.stop();
 
     expect(queue.list()).toEqual(["hi"]);
     expect(interrupts).toBe(1);
@@ -2293,6 +2393,61 @@ describe("agent permission blocks", () => {
       ).toBe("deny");
       const bash = new BashExecution();
       expect(await gate.authorize({ tool: bash, input: { command: "rm -rf /tmp/x" }, preview: "" })).toBe("deny");
+    } finally {
+      if (previous === undefined) delete process.env.CARLS_SYSTEM_CONFIG;
+      else process.env.CARLS_SYSTEM_CONFIG = previous;
+    }
+  });
+
+  it("releases the composer while an approval is on screen", async () => {
+    const { loadConfig } = await import("../src/config/Config.js");
+    const { PermissionGate } = await import("../src/security/PermissionGate.js");
+    const workspace = join(dir, "permission-pause");
+    await mkdir(workspace, { recursive: true });
+    const config = loadConfig({ mode: "ask" }, workspace);
+    const pauses: boolean[] = [];
+    let asked = 0;
+    const gate = new PermissionGate(config, new Logger("error"), async () => {
+      asked += 1;
+      return "n";
+    });
+    gate.setPromptPause((paused) => pauses.push(paused));
+    expect(await gate.authorize({ tool: new FileEdit(), input: { path: "a.ts" }, preview: "" })).toBe("deny");
+    expect(asked).toBe(1);
+    expect(pauses).toEqual([true, false]);
+  });
+
+  it("a preset deny beats a config allow, and yolo is the documented exception", async () => {
+    const { parsePreset, applyPreset } = await import("../src/agents/Presets.js");
+    const { loadConfig } = await import("../src/config/Config.js");
+    const { PermissionGate } = await import("../src/security/PermissionGate.js");
+    const workspace = join(dir, "permission-precedence");
+    await mkdir(workspace, { recursive: true });
+    const previous = process.env.CARLS_SYSTEM_CONFIG;
+    process.env.CARLS_SYSTEM_CONFIG = join(workspace, "missing.json");
+    try {
+      const preset = parsePreset(
+        "locked",
+        '---\npermission:\n  edit: deny\n  bash:\n    "git status": deny\n---\nbody',
+        "project",
+        "/tmp/locked.md",
+      );
+      // The config says the opposite of the preset, on purpose.
+      const base = loadConfig({}, workspace);
+      base.permissions.allow = ["git status"];
+      base.permissions.toolAllow = ["edit_file", "write_file"];
+      const next = applyPreset(base, preset);
+
+      const gate = new PermissionGate(next, new Logger("error"), async () => "y");
+      expect(await gate.authorize({ tool: new FileEdit(), input: { path: "a.ts" }, preview: "" })).toBe("deny");
+      expect(
+        await gate.authorize({ tool: new BashExecution(), input: { command: "git status" }, preview: "" }),
+      ).toBe("deny");
+
+      // yolo keeps its meaning: everything runs, deny lists included.
+      const yolo = applyPreset(loadConfig({ yolo: true }, workspace), preset);
+      const yoloGate = new PermissionGate(yolo, new Logger("error"), async () => "y");
+      expect(await yoloGate.authorize({ tool: new FileEdit(), input: { path: "a.ts" }, preview: "" })).toBe("allow");
     } finally {
       if (previous === undefined) delete process.env.CARLS_SYSTEM_CONFIG;
       else process.env.CARLS_SYSTEM_CONFIG = previous;
