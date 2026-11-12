@@ -1,6 +1,6 @@
 {
   "name": "carls-code",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Autonomous AI coding agent CLI harness (Gather-Act-Verify, compaction, sub-agents, permission gate).",
   "type": "module",
   "license": "MIT",
