@@ -136,7 +136,14 @@ export async function checkForUpdate(options: UpdateCheckOptions = {}): Promise<
   const base = apiBase(options);
   const current = packageVersion();
 
-  let found = releaseFromPayload(await getJson(`${base}/releases/latest`, timeoutMs));
+  // A repo that publishes a tag but no Release answers 404 here; that is not a
+  // failure, it is the signal to fall back to the tags endpoint.
+  let found: ReturnType<typeof releaseFromPayload>;
+  try {
+    found = releaseFromPayload(await getJson(`${base}/releases/latest`, timeoutMs));
+  } catch {
+    found = undefined;
+  }
   if (found === undefined) {
     found = tagFromPayload(await getJson(`${base}/tags?per_page=1`, timeoutMs));
   }

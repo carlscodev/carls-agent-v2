@@ -1768,6 +1768,31 @@ describe("updater", () => {
     expect(win.args).toContain("-Yes");
   });
 
+  it("falls back to a tag when the repo publishes no release", async () => {
+    const { checkForUpdate } = await import("../src/update/Updater.js");
+    const server = createServer((req, res) => {
+      // GitHub answers 404 for /releases/latest when only tags exist.
+      if (req.url === "/releases/latest") {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ message: "Not Found" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify([{ name: "v0.2.0" }]));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const check = await checkForUpdate({ apiBase: `http://127.0.0.1:${port}` });
+      expect(check.tag).toBe("v0.2.0");
+      expect(check.latest).toBe("0.2.0");
+      // The installed build is 0.2.0, so the same tag is not an upgrade.
+      expect(check.available).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
   it("compares against the GitHub release API", async () => {
     const { checkForUpdate } = await import("../src/update/Updater.js");
     const server = createServer((_req, res) => {
