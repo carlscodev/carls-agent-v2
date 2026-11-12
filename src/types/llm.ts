@@ -48,6 +48,12 @@ export interface CompletionArgs {
   effort?: "minimal" | "low" | "medium" | "high";
   signal?: AbortSignal;
   onText?: (chunk: string) => void;
+  /**
+   * Reasoning deltas from a thinking model (`reasoning_content`). Kept separate
+   * from `onText` so the UI can render it as its own dim block instead of
+   * splicing the model's private scratchpad into the answer.
+   */
+  onReasoning?: (chunk: string) => void;
 }
 
 export interface Provider {

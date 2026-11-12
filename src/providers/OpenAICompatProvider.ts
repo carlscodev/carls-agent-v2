@@ -6,7 +6,8 @@ import type {
   Provider,
   StopReason,
 } from "../types/llm.js";
-import { withRetry, httpError } from "./retry.js";
+import { withRetry, httpError, FatalError } from "./retry.js";
+import { estimateTokens } from "../utils/tokens.js";
 
 interface OpenAIToolCall {
   id: string;
@@ -25,9 +26,28 @@ interface OpenAIChatResponse {
   choices: {
     message: {
       content: string | null;
+      /** Present on thinking models (DeepSeek, Qwen, GLM): the scratchpad. */
+      reasoning_content?: string | null;
       tool_calls?: OpenAIToolCall[];
     };
     finish_reason: string | null;
+  }[];
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
+}
+
+/** One `data:` frame of a chat-completions stream. */
+interface OpenAIStreamChunk {
+  choices?: {
+    delta?: {
+      content?: string | null;
+      reasoning_content?: string | null;
+      tool_calls?: {
+        index?: number;
+        id?: string;
+        function?: { name?: string; arguments?: string };
+      }[];
+    };
+    finish_reason?: string | null;
   }[];
   usage?: { prompt_tokens?: number; completion_tokens?: number };
 }
@@ -85,6 +105,11 @@ export interface OpenAICompatOptions {
    * Ollama /v1 shim do not, and a strict server rejects the unknown field.
    */
   supportsReasoningEffort?: boolean;
+  /**
+   * Whether to ask for a token stream. On by default; a caller can turn it off
+   * for an endpoint that ignores `stream` or rejects `stream_options`.
+   */
+  streaming?: boolean;
   onRetry?: (attempt: number, delayMs: number, error: unknown) => void;
 }
 
@@ -94,6 +119,7 @@ export class OpenAICompatProvider implements Provider {
   private readonly baseUrl: string;
   private readonly onRetry?: (attempt: number, delayMs: number, error: unknown) => void;
   private readonly supportsReasoningEffort: boolean;
+  private readonly streaming: boolean;
 
   constructor(
     apiKey: string,
@@ -105,6 +131,7 @@ export class OpenAICompatProvider implements Provider {
     this.baseUrl = (baseUrl ?? "https://api.openai.com/v1").replace(/\/$/, "");
     this.name = "openai-compat";
     this.supportsReasoningEffort = options.supportsReasoningEffort === true;
+    this.streaming = options.streaming !== false;
     const retry = onRetry ?? options.onRetry;
     if (retry !== undefined) this.onRetry = retry;
   }
