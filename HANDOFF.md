@@ -10,7 +10,8 @@ report.
 | --- | --- |
 | Repository | `https://github.com/carlscodev/carls-agent-v2` (branch `main`) |
 | Local branch | `freebuff/07a410415a017967652d4d91` |
-| Remote to push to | `cloud_git push` (server-side credentials, has write to `carlscodev`); `git push mine HEAD:main` also works via the `BerunHaider` mirror. The `gh` token in the shell does **not** have write to `carlscodev` |
+| Remote to push to | `cloud_git push` — the only write path to `carlscodev`. The shell's `gh` token is read-only there, and the `BerunHaider` mirror is retired |
+| Official download | `https://github.com/carlscodev/carls-agent-v2` — README one-liners, `scripts/install.sh`, `scripts/install.ps1` and `UPDATE_REPO` in `src/update/Updater.ts` all point here |
 | Version | `0.2.0` |
 | Checks | `npm run typecheck` → clean, `npm test` → 170/170, `npm run build` → clean |
 
@@ -64,6 +65,27 @@ the CI/release workflows and the offline onboarding mode.
 - Commit gate: husky runs `npm run typecheck && npm test` from
   `.husky/pre-commit`; `git commit --no-verify` skips it. `"prepare": "husky ||
   true"` keeps tarball installs (which have no `.git`) working.
+
+## Publishing an update
+
+`carls update`, `carls update --check` and the auto-update path read
+`https://api.github.com/repos/carlscodev/carls-agent-v2`: first
+`/releases/latest`, then `/tags?per_page=1` as a fallback, so a repository that
+publishes tags but no Release still updates. **That repo has no tags and no
+releases yet**, so the check reaches the network and reports that nothing is
+published. To cut a release, from an account (or token) with write access to
+`carlscodev`:
+
+```bash
+npm version patch --no-git-tag-version   # bump package.json
+# commit, push to main, then:
+git tag v0.2.1 && git push origin v0.2.1
+gh release create v0.2.1 --repo carlscodev/carls-agent-v2 --generate-notes
+```
+
+`.github/workflows/release.yml` does this on a tag push, but Actions is disabled
+on `carlscodev`, so today the tag has to be pushed by hand. `cloud_git` can only
+push a branch, not a tag; the `gh` token has no write there.
 
 ## Known limits and blockers
 

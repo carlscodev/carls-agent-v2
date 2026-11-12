@@ -7,7 +7,7 @@
 # prefix that every user can reach.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/BerunHaider/carls-agent-v2/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/carlscodev/carls-agent-v2/main/scripts/install.sh | bash
 #   ./scripts/install.sh                    interactive panel
 #   ./scripts/install.sh --yes              accept all defaults, no prompts
 #   ./scripts/install.sh --prefix /opt/carls --mode build
@@ -44,7 +44,7 @@ carls_script_dir="$(cd "$(dirname "$0")" && pwd)"
 # `curl ... | bash` leaves $0 = bash, so neither scripts/lib/ nor src/ exists
 # next to the script and the normal install path cannot work. Pull the ref once
 # and re-exec the real script from inside the downloaded tree.
-CARLS_REPO="${CARLS_REPO:-BerunHaider/carls-agent-v2}"
+CARLS_REPO="${CARLS_REPO:-carlscodev/carls-agent-v2}"
 CARLS_REF="${CARLS_REF:-main}"
 
 # --ref must be honoured before the tree exists, so scan it here; the parser
