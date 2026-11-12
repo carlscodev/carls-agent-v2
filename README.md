@@ -101,8 +101,8 @@ claims something works without running it.
 ## Commands
 
 Inside the session: `/` or `Ctrl+P` opens the palette, `Shift+Tab` cycles the
-permission mode, `!` runs a shell command, `#` adds a note without calling the
-model.
+permission mode, `@` picks a file and attaches its contents to the message, `!`
+runs a shell command, `#` adds a note without calling the model.
 
 | Command | Purpose |
 | --- | --- |

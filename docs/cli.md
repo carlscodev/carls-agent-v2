@@ -30,6 +30,7 @@ Print mode writes the answer to stdout and everything else to stderr, so
 | `/` | command palette (also `Ctrl+P`) |
 | `!<command>` | run a shell command in the workspace, no model call |
 | `#<note>` | append a note to the session context, no model call |
+| `@` | pick a file and attach its contents to the message |
 | `Shift+Tab` | cycle the permission mode |
 | `Ctrl+C` | interrupt the running turn; twice to exit |
 

@@ -2118,3 +2118,71 @@ describe("local model support", () => {
     expect(registry.restrictedTo(["read_file", "does_not_exist"]).names()).toEqual(["read_file"]);
   });
 });
+
+describe("@file mentions", () => {
+  it("parses mentions only at a word boundary", async () => {
+    const { parseMentions } = await import("../src/cli/Mentions.js");
+    expect(parseMentions("explain @src/a.ts and @docs/b.md, please")).toEqual(["src/a.ts", "docs/b.md"]);
+    expect(parseMentions("mail me at someone@example.com")).toEqual([]);
+    expect(parseMentions("@same.ts twice @same.ts")).toEqual(["same.ts"]);
+    expect(parseMentions("trailing @")).toEqual([]);
+  });
+
+  it("attaches the file content to the message", async () => {
+    const { expandMentions } = await import("../src/cli/Mentions.js");
+    const root = join(dir, "mention");
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "hello.ts"), "export const x = 1;\n");
+
+    const result = expandMentions("look at @hello.ts", root);
+    expect(result.attached).toEqual(["hello.ts"]);
+    expect(result.text.startsWith("look at @hello.ts")).toBe(true);
+    expect(result.text).toContain('<file path="hello.ts">');
+    expect(result.text).toContain("export const x = 1;");
+  });
+
+  it("refuses paths outside the workspace and binary files", async () => {
+    const { expandMentions } = await import("../src/cli/Mentions.js");
+    const root = join(dir, "mention-guard");
+    await mkdir(root, { recursive: true });
+    await writeFile(join(dir, "mention-secret.txt"), "do-not-leak");
+    await writeFile(join(root, "blob.dat"), Buffer.from([1, 0, 2, 3]));
+
+    const result = expandMentions("read @../mention-secret.txt and @blob.dat", root);
+    expect(result.attached).toEqual([]);
+    expect(result.skipped.map((entry) => entry.reason)).toEqual(["outside the workspace", "binary file"]);
+    expect(result.text).not.toContain("do-not-leak");
+  });
+
+  it("truncates a mention that would eat the context window", async () => {
+    const { expandMentions } = await import("../src/cli/Mentions.js");
+    const root = join(dir, "mention-trunc");
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "big.ts"), "x".repeat(5000));
+
+    const result = expandMentions("see @big.ts", root, {
+      perFileChars: 200,
+      totalChars: 500,
+      maxFiles: 2,
+      maxFileBytes: 8192,
+    });
+    expect(result.attached).toEqual(["big.ts"]);
+    expect(result.text).toContain("… truncated");
+    expect(result.text.length).toBeLessThan(400);
+  });
+
+  it("lists workspace files without build output or dependencies", async () => {
+    const { listWorkspaceFiles } = await import("../src/cli/Mentions.js");
+    const root = join(dir, "mention-list");
+    await mkdir(join(root, "src"), { recursive: true });
+    await mkdir(join(root, "node_modules", "left-pad"), { recursive: true });
+    await writeFile(join(root, "package.json"), "{}");
+    await writeFile(join(root, "src", "index.ts"), "export {};\n");
+    await writeFile(join(root, "node_modules", "left-pad", "index.js"), "module.exports = {};\n");
+
+    const files = listWorkspaceFiles(root);
+    expect(files).toContain("package.json");
+    expect(files).toContain("src/index.ts");
+    expect(files.some((path) => path.includes("node_modules"))).toBe(false);
+  });
+});

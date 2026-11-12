@@ -16,6 +16,8 @@ import { MODE_CYCLE } from "../config/Config.js";
 import { MarkdownRenderer } from "./Markdown.js";
 import { theme } from "./Theme.js";
 import { openCommandPalette } from "./CommandPalette.js";
+import { expandMentions, listWorkspaceFiles } from "./Mentions.js";
+import { selectList } from "./SelectList.js";
 
 export interface SessionOptions {
   overrides: Partial<ResolvedConfig>;
@@ -99,6 +101,24 @@ export async function runRepl(options: SessionOptions): Promise<number> {
 
   /** `❯` marks the input everywhere, so the transcript and the prompt agree. */
   const promptGlyph = (): string => `${theme().paint(theme().colors.accent, "❯")} `;
+
+  /**
+   * File picker behind `@`. It lists what git tracks and lets the user filter by
+   * typing, which is faster than any fuzzy scoring the user cannot see.
+   */
+  const pickMention = async (): Promise<string | undefined> => {
+    const files = listWorkspaceFiles(runtime.config.cwd);
+    if (files.length === 0) {
+      printInfo("No files to mention in this workspace.");
+      return undefined;
+    }
+    const t = theme();
+    const choice = await selectList({
+      title: `${t.paint(t.colors.accent, "Mention a file")} ${t.paint(t.colors.text.faint, `${files.length} files`)}`,
+      items: files.map((path) => ({ id: path, label: path })),
+    });
+    return choice?.id;
+  };
 
   const tokenCount = (tokens: number): string =>
     tokens >= 1000 ? `${(tokens / 1000).toFixed(tokens >= 10000 ? 0 : 1)}k` : String(Math.round(tokens));
@@ -202,16 +222,33 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   };
 
   try {
+    // Text to resume the prompt with: a mention re-opens the line the user was
+    // editing instead of starting over.
+    let resume: string | undefined;
     for (;;) {
       let input: string;
       if (interactive) {
         const result = await prompt.read({
           prompt: promptGlyph(),
+          ...(resume !== undefined ? { initial: resume } : {}),
           onModeCycle: cycleMode,
           onPalette: () => true,
           ...(useChrome ? { chrome } : {}),
         });
+        resume = undefined;
         if (result.type === "eof") break;
+        if (result.type === "mention") {
+          // The picker is full-screen, so release the scrolling region around it.
+          if (useChrome) chrome.suspend();
+          let picked: string | undefined;
+          try {
+            picked = await pickMention();
+          } finally {
+            if (useChrome) chrome.resume();
+          }
+          resume = picked === undefined ? result.draft : `${result.draft}@${picked} `;
+          continue;
+        }
         if (result.type === "palette") {
           // The palette is a full-screen selector, so the scrolling region has to
           // be released first or its frame lands inside the fixed header area.
@@ -299,8 +336,18 @@ export async function runRepl(options: SessionOptions): Promise<number> {
         continue;
       }
 
+      // `@path` becomes the file's content in this message, so the model does
+      // not have to spend a tool call on a file the user already pointed at.
+      const expanded = expandMentions(input, runtime.config.cwd);
+      if (expanded.attached.length > 0) {
+        printInfo(`attached ${expanded.attached.join(", ")}`);
+      }
+      for (const skip of expanded.skipped) {
+        printInfo(`could not attach ${skip.path} (${skip.reason})`);
+      }
+
       lastGoal = input;
-      await runGoal(input);
+      await runGoal(expanded.text);
     }
   } finally {
     process.off("SIGINT", onSigint);

@@ -9,10 +9,14 @@ export type PromptResult =
   | { type: "eof" }
   | { type: "mode-cycle" }
   | { type: "help" }
-  | { type: "palette"; filter?: string };
+  | { type: "palette"; filter?: string }
+  /** The user typed `@` at the start of a word, asking for a file mention. */
+  | { type: "mention"; draft: string };
 
 interface PromptOptions {
   prompt: string;
+  /** Text to start editing with, so a mention can resume the same line. */
+  initial?: string;
   history?: string[];
   /** Called when the user cycles the permission mode with Shift+Tab. */
   onModeCycle?: () => string | undefined;
@@ -20,6 +24,8 @@ interface PromptOptions {
   chrome?: Chrome;
   /** Called when the user asks for the command palette (Ctrl+P or a bare `/`). */
   onPalette?: (filter: string) => boolean;
+  /** Set to false to type `@` literally (handled by the REPL when picking files). */
+  mentions?: boolean;
 }
 
 /**
@@ -55,8 +61,8 @@ export class Prompt {
     const wasRaw = this.input.isRaw === true;
     this.input.setRawMode?.(true);
     this.input.resume();
-    this.buffer = "";
-    this.cursor = 0;
+    this.buffer = options.initial ?? "";
+    this.cursor = this.buffer.length;
     this.historyIndex = this.history.length;
     this.draft = "";
 
@@ -217,6 +223,16 @@ export class Prompt {
             return;
           default:
             break;
+        }
+
+        // `@` at a word boundary asks for a file mention; the REPL owns the
+        // picker, so the line is handed back with everything typed so far.
+        if (seq === "@" && options.mentions !== false) {
+          const before = this.buffer.slice(this.cursor - 1, this.cursor);
+          if (this.cursor === 0 || /\s/.test(before)) {
+            finish({ type: "mention", draft: this.buffer.slice(0, this.cursor) });
+            return;
+          }
         }
 
         if (seq.length === 0) return;

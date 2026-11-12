@@ -15,6 +15,7 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 | Sub-agents | `delegate_task`, read-only, no nesting, structured report |
 | Sessions | persisted transcripts, `/resume`, `/sessions` picker |
 | Undo / redo | per-file snapshots behind `/undo`, session redo stack behind `/redo` |
+| `@file` mentions | `@` opens a picker over tracked files; the content rides along in the message, capped at 8 files / 60k chars |
 | Providers | 33 bundled ids, custom gateway via `baseUrl`, Ollama/LM Studio/vLLM/llama.cpp |
 | Models | `/models` against the live endpoint, effort plumbing |
 | Permissions | 6 modes, allow/deny lists, diff preview, `Shift+Tab` |
@@ -34,24 +35,22 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 
 ## Missing, in the order I would build it
 
-1. **`@file` mentions.** `@` in the prompt opens a fuzzy file picker and attaches
-   the file to the message. Today the model has to spend a tool call on it.
-2. **Custom agent definitions.** The six permission modes are fixed. A
+1. **Custom agent definitions.** The six permission modes are fixed. A
    `.agents/agents/<name>.json` with its own prompt, tool set and permission
    policy would let a project define `reviewer`, `migrator`, `docs` and switch
    with `Tab`.
-3. **LSP diagnostics.** An `lsp` tool that reports errors and hover info after an
+2. **LSP diagnostics.** An `lsp` tool that reports errors and hover info after an
    edit would catch whole classes of mistakes without running a build.
-4. **`websearch` / `webfetch`.** `network_request` exists but returns raw HTML;
+3. **`websearch` / `webfetch`.** `network_request` exists but returns raw HTML;
    a reader-mode fetch and a search tool are not implemented.
-5. **Session tabs and a sidebar.** One session on screen at a time today.
-6. **External editor handoff** (`/editor`, `$EDITOR`) for long prompts.
-7. **Queue and steer.** Submitting while a turn runs queues nothing yet.
-8. **Headless server + remote client.** The runtime is embeddable, but there is
+4. **Session tabs and a sidebar.** One session on screen at a time today.
+5. **External editor handoff** (`/editor`, `$EDITOR`) for long prompts.
+6. **Queue and steer.** Submitting while a turn runs queues nothing yet.
+7. **Headless server + remote client.** The runtime is embeddable, but there is
    no HTTP/WS server mode.
-9. **Custom keybinds and per-project TUI config.**
-10. **Export/share.** No `/export`, no share links.
-11. **Plugins.** No plugin API; MCP tools, skills and hooks are the extension
+8. **Custom keybinds and per-project TUI config.**
+9. **Export/share.** No `/export`, no share links.
+10. **Plugins.** No plugin API; MCP tools, skills and hooks are the extension
     points.
 
 ## Ground rules for closing the list

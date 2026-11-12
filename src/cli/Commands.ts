@@ -792,6 +792,7 @@ export function printCommandHelp(): void {
     `${"/ or Ctrl+P".padEnd(34)} ${pc.gray("open the filterable command palette")}`,
     `${"!<command>".padEnd(34)} ${pc.gray("run a shell command in the workspace")}`,
     `${"# note".padEnd(34)} ${pc.gray("added to the session context")}`,
+    `${"@file".padEnd(34)} ${pc.gray("pick a file and attach its contents to the message")}`,
     `${"Shift+Tab".padEnd(34)} ${pc.gray("cycle the permission mode")}`,
   ]);
 }

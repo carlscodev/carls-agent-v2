@@ -120,7 +120,7 @@ export function bannerLines(info: BannerInfo): string[] {
     `${t.paint(t.colors.text.muted, tildePath(info.cwd))} ${t.paint(t.colors.text.faint, `· ${info.sessionId.slice(0, 8)}`)}`,
   ].map((line) => truncate(line, textWidth));
 
-  const hint = "type to ask · / commands · ctrl+p palette · shift+tab mode · ! shell · # note";
+  const hint = "type to ask · @ file · / commands · ctrl+p palette · shift+tab mode · ! shell · # note";
   const hintLines = wrap(hint, textWidth).map((line) => t.paint(t.colors.text.faint, line));
 
   const lines: string[] = [];
