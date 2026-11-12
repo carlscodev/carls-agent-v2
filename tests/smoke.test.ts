@@ -2119,6 +2119,154 @@ describe("local model support", () => {
   });
 });
 
+describe("session export", () => {
+  it("renders a transcript with tool calls and results", async () => {
+    const { renderTranscript } = await import("../src/cli/Export.js");
+    const messages = [
+      { role: "system" as const, content: [{ type: "text" as const, text: "ignored" }] },
+      { role: "user" as const, content: [{ type: "text" as const, text: "fix the bug" }] },
+      {
+        role: "assistant" as const,
+        content: [
+          { type: "text" as const, text: "Looking at it." },
+          { type: "tool_use" as const, id: "t1", name: "read_file", input: { path: "src/a.ts" } },
+        ],
+      },
+      {
+        role: "user" as const,
+        content: [{ type: "tool_result" as const, tool_use_id: "t1", content: "1\tconst a = 1;", is_error: false }],
+      },
+      { role: "user" as const, content: [{ type: "tool_result" as const, tool_use_id: "t2", content: "boom", is_error: true }] },
+    ];
+    const md = renderTranscript(messages, {
+      sessionId: "s1",
+      model: "gpt-4o",
+      cwd: "/work",
+      at: "2026-01-01T00:00:00.000Z",
+    });
+    expect(md).toContain("# carls session s1");
+    expect(md).toContain("## user");
+    expect(md).toContain("fix the bug");
+    expect(md).toContain("### tool call · read_file");
+    expect(md).toContain('"path": "src/a.ts"');
+    expect(md).toContain("const a = 1;");
+    expect(md).toContain("### tool result · error");
+    expect(md).not.toContain("ignored");
+  });
+
+  it("writes the transcript to disk", async () => {
+    const { writeTranscript } = await import("../src/cli/Export.js");
+    const target = join(dir, "export", "session.md");
+    const result = await writeTranscript(
+      target,
+      [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      { sessionId: "s2", model: "gpt-4o", cwd: dir },
+    );
+    expect(result.path).toBe(target);
+    expect(result.bytes).toBeGreaterThan(0);
+    expect(await readFile(target, "utf8")).toContain("hello");
+  });
+});
+
+describe("workspace path guard", () => {
+  it("fails closed when the real path cannot be resolved", async () => {
+    const { assertNoSymlinkEscape } = await import("../src/utils/paths.js");
+    const missingRoot = join(dir, "guard-missing-root");
+    const problem = assertNoSymlinkEscape(missingRoot, join(missingRoot, "file.txt"));
+    expect(problem).toContain("could not resolve");
+
+    // A resolvable path inside the workspace is still allowed.
+    await mkdir(join(dir, "guard-ok"), { recursive: true });
+    await writeFile(join(dir, "guard-ok", "file.txt"), "x");
+    expect(assertNoSymlinkEscape(join(dir, "guard-ok"), join(dir, "guard-ok", "file.txt"))).toBeUndefined();
+  });
+});
+
+describe("web tools", () => {
+  it("reduces HTML to readable text", async () => {
+    const { htmlToText, pageTitle, decodeEntities } = await import("../src/tools/WebOps.js");
+    const html =
+      "<html><head><title>Docs &amp; API</title><style>body{color:red}</style></head>" +
+      "<body><script>steal()</script><h1>Install</h1><p>Run <code>npm i</code> &lt;now&gt;.</p>" +
+      "<ul><li>one</li><li>two</li></ul></body></html>";
+    const text = htmlToText(html);
+    expect(text).not.toContain("steal");
+    expect(text).not.toContain("color:red");
+    expect(text).toContain("Install");
+    expect(text).toContain("Run npm i <now>.");
+    expect(text).toContain("· one");
+    expect(pageTitle(html)).toBe("Docs & API");
+    expect(decodeEntities("&#65;&#x42;&nbsp;&mdash;&bogus;")).toBe("AB —&bogus;");
+  });
+
+  it("fetches a page as text and truncates it", async () => {
+    const { WebFetch } = await import("../src/tools/WebOps.js");
+    const server = createServer((req, res) => {
+      if (req.url === "/missing") {
+        res.writeHead(404, { "content-type": "text/html" }).end("<h1>gone</h1>");
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<html><head><title>Release notes</title></head><body><h1>v2</h1><p>${"word ".repeat(200)}</p><script>x()</script></body></html>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const tool = new WebFetch();
+      const ok = await tool.run({ url: `http://127.0.0.1:${port}/`, max_chars: 80 }, makeContext());
+      expect(ok.ok).toBe(true);
+      expect(ok.output).toContain("title: Release notes");
+      expect(ok.output).toContain("truncated at 80 characters");
+      expect(ok.output).not.toContain("x()");
+
+      const missing = await tool.run({ url: `http://127.0.0.1:${port}/missing` }, makeContext());
+      expect(missing.ok).toBe(false);
+      expect(missing.error).toContain("HTTP 404");
+
+      const bad = await tool.run({ url: "file:///etc/passwd" }, makeContext());
+      expect(bad.ok).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("parses results and searches through the configured endpoint", async () => {
+    const { parseSearchResults, WebSearch } = await import("../src/tools/WebOps.js");
+    const page = [
+      '<div class="result"><a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fnodejs.org%2Fen%2F&amp;rut=abc">Node.js &mdash; Run JavaScript</a>',
+      '<a class="result__snippet">A JavaScript runtime built on V8.</a></div>',
+      '<div class="result"><a class="result__a" href="https://example.test/two">Second</a>',
+      '<a class="result__snippet">Another hit.</a></div>',
+    ].join("");
+
+    const hits = parseSearchResults(page, 5);
+    expect(hits.map((hit) => hit.url)).toEqual(["https://nodejs.org/en/", "https://example.test/two"]);
+    expect(hits[0]?.title).toBe("Node.js — Run JavaScript");
+    expect(hits[1]?.snippet).toBe("Another hit.");
+
+    let asked = "";
+    const server = createServer((req, res) => {
+      asked = req.url ?? "";
+      res.writeHead(200, { "content-type": "text/html" }).end(page);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const previous = process.env.CARLS_SEARCH_ENDPOINT;
+    process.env.CARLS_SEARCH_ENDPOINT = `http://127.0.0.1:${port}/html/`;
+    try {
+      const result = await new WebSearch().run({ query: "node runtime", max_results: 1 }, makeContext());
+      expect(result.ok).toBe(true);
+      expect(asked).toContain("q=node%20runtime");
+      expect(result.output).toContain("https://nodejs.org/en/");
+      expect(result.output).not.toContain("example.test/two");
+    } finally {
+      if (previous === undefined) delete process.env.CARLS_SEARCH_ENDPOINT;
+      else process.env.CARLS_SEARCH_ENDPOINT = previous;
+      server.close();
+    }
+  });
+});
+
 describe("agent presets", () => {
   const preset = [
     "---",

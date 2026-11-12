@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { AutoUpdateMode } from "../config/Config.js";
+import type { AutoUpdateMode } from "../types/update.js";
 import { packageVersion } from "../core/Runtime.js";
 import { isWindows, userDataDir } from "../utils/platform.js";
 

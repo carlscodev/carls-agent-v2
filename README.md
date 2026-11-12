@@ -93,7 +93,7 @@ claims something works without running it.
 | Context | token budget, 75% compaction, checkpoint summaries, bounded observations |
 | Sub-agents | isolated read-only exploration with a structured report |
 | Permissions | six modes from read-only to full auto, allow/deny lists, diff preview |
-| Tools | 48 built-in plus MCP, every schema derived from zod |
+| Tools | 50 built-in plus MCP, every schema derived from zod |
 | MCP | stdio, SSE, Streamable HTTP, `/mcp` inspection |
 | Skills | reusable procedures in three layers, with a usage ledger |
 | TUI | fixed header, scrolling region, streaming markdown, real diffs, command palette |
@@ -113,6 +113,7 @@ runs a shell command, `#` adds a note without calling the model.
 | `/compact`, `/clear`, `/resume` | context and sessions |
 | `/agent <goal>` | run a sub-agent and print its conclusion |
 | `/agents [name]` | switch the agent preset from `.agents/agents/*.md` |
+| `/export [path]` | write the session transcript to markdown |
 | `/tools`, `/mcp`, `/skills` | what the agent can use |
 | `/setup`, `/providers`, `/doctor` | configuration and diagnostics |
 | `/update [--check]` | install or check for a newer release |

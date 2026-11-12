@@ -71,8 +71,10 @@ export function assertNoSymlinkEscape(
   try {
     realRoot = realpathSync(resolvePath(cwd, "."));
     realProbe = realpathSync(probe);
-  } catch {
-    return undefined;
+  } catch (error) {
+    // Fail closed. If the real path cannot be established, containment cannot
+    // be proven, and "probably inside" is not a reason to open a file.
+    return `refusing to touch "${target}": could not resolve its real path (${(error as Error).message.split("\n")[0] ?? "unknown error"}).`;
   }
   if (isInside(realRoot, realProbe)) return undefined;
   return `refusing to touch "${target}": it resolves through a symlink to "${realProbe}", outside the workspace (${realRoot}).`;

@@ -41,7 +41,7 @@ function sectionFor(name: string): string {
   if (["/models", "/model", "/effort", "/mode", "/agent", "/agents"].includes(name)) return "Agent";
   if (["/status", "/cost", "/config", "/doctor", "/providers"].includes(name)) return "Diagnostics";
   if (["/undo", "/diff", "/files", "/todo", "/compact", "/clear"].includes(name)) return "Workspace";
-  if (["/sessions", "/resume", "/retry", "/init", "/setup"].includes(name)) return "Project";
+  if (["/sessions", "/resume", "/retry", "/init", "/setup", "/export"].includes(name)) return "Project";
   if (["/skills", "/tools"].includes(name)) return "Capabilities";
   return "Other";
 }

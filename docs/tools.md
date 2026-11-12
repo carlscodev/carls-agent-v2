@@ -44,6 +44,8 @@ and in order. `⇉` marks the parallel-safe ones in `/tools`.
 
 | Tool | What it does |
 | --- | --- |
+| `web_fetch` ⇉ | fetch a URL and return readable text (scripts, styles and markup stripped) plus the title; `raw` for JSON |
+| `web_search` ⇉ | keyless DuckDuckGo search: titles, URLs and snippets; `CARLS_SEARCH_ENDPOINT` points it at a mirror |
 | `network_request` | HTTP with method, headers, body |
 | `http_download` | stream a URL to a file |
 | `browser_open`, `browser_text`, `browser_click`, `browser_type`, `browser_screenshot`, `browser_eval`, `browser_close` | drive a headless page |

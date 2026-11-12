@@ -54,6 +54,7 @@ While a turn is running the spinner shows the current step and elapsed seconds.
 | `/clear` | start a fresh session |
 | `/undo [n]`, `/redo [n]` | revert the last edits, or re-apply what an undo removed |
 | `/agents [name]` | switch the agent preset from `.agents/agents/*.md` |
+| `/export [path]` | write the session transcript to a markdown file |
 | `/files`, `/diff` | files the agent touched, and the working-tree diff |
 | `/todo` | the agent's current plan |
 | `/agent <goal>` | run an isolated sub-agent and print its conclusion |

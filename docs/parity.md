@@ -17,12 +17,14 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 | Undo / redo | per-file snapshots behind `/undo`, session redo stack behind `/redo` |
 | `@file` mentions | `@` opens a picker over tracked files; the content rides along in the message, capped at 8 files / 60k chars. Works in the REPL and in `carls -p` |
 | Agent presets | `.agents/agents/<name>.md` with mode/tools/model/effort frontmatter; `--agent <name>` and `/agents` |
+| Web reading | `web_fetch` (HTML reduced to text, title included) and `web_search` over DuckDuckGo's keyless HTML endpoint |
+| Export | `/export [path]` writes the transcript as markdown, tool calls and results included |
 | Providers | 33 bundled ids, custom gateway via `baseUrl`, Ollama/LM Studio/vLLM/llama.cpp |
 | Models | `/models` against the live endpoint, effort plumbing |
 | Permissions | 6 modes, allow/deny lists, diff preview, `Shift+Tab` |
 | MCP | stdio, SSE and Streamable HTTP, remote auth, `/mcp` |
 | Skills | discovery from 3 layers, usage ledger, review queue, `save_skill` |
-| Tools | 48 built-in, plus MCP tools, all zod-schema'd |
+| Tools | 50 built-in, plus MCP tools, all zod-schema'd |
 | Hooks | `preToolUse` / `postToolUse` / session events |
 | Plan / todo | `todo_write`, `/todo` |
 | Terminal UI | fixed header, scrolling region, boxed panels, diffs, markdown stream, palette |
@@ -38,16 +40,14 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 
 1. **LSP diagnostics.** An `lsp` tool that reports errors and hover info after an
    edit would catch whole classes of mistakes without running a build.
-2. **`websearch` / `webfetch`.** `network_request` exists but returns raw HTML;
-   a reader-mode fetch and a search tool are not implemented.
-3. **Session tabs and a sidebar.** One session on screen at a time today.
-4. **External editor handoff** (`/editor`, `$EDITOR`) for long prompts.
-5. **Queue and steer.** Submitting while a turn runs queues nothing yet.
-6. **Headless server + remote client.** The runtime is embeddable, but there is
+2. **Session tabs and a sidebar.** One session on screen at a time today.
+3. **External editor handoff** (`/editor`, `$EDITOR`) for long prompts.
+4. **Queue and steer.** Submitting while a turn runs queues nothing yet.
+5. **Headless server + remote client.** The runtime is embeddable, but there is
    no HTTP/WS server mode.
-7. **Custom keybinds and per-project TUI config.**
-8. **Export/share.** No `/export`, no share links.
-9. **Plugins.** No plugin API; MCP tools, skills and hooks are the extension
+6. **Custom keybinds and per-project TUI config.**
+7. **Share links.** `/export` writes a local file; there is no hosted share URL.
+8. **Plugins.** No plugin API; MCP tools, skills and hooks are the extension
     points.
 
 ## Ground rules for closing the list

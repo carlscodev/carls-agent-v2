@@ -141,6 +141,10 @@ function titleFor(name: string, input: unknown): string {
       return `Git diff${str("path").length > 0 ? ` ${short(str("path"))}` : ""}`;
     case "network_request":
       return `${str("method") || "GET"} ${truncate(str("url"), 70)}`;
+    case "web_fetch":
+      return `Fetch ${truncate(str("url"), 70)}`;
+    case "web_search":
+      return `Search ${truncate(str("query"), 60)}`;
     case "env_get":
       return `Env ${str("name") || str("prefix")}`;
     case "sleep_wait":

@@ -129,6 +129,7 @@ stdout. `preToolUse` can block a call by exiting with code 2 or printing
 | `CARLS_MCP_TOKEN` | bearer token for remote MCP servers |
 | `CARLS_NO_UPDATE_CHECK=1` | never check GitHub for a newer release |
 | `CARLS_UPDATE_API` | override the release API root (mirrors, tests) |
+| `CARLS_SEARCH_ENDPOINT` | override the `web_search` endpoint (mirrors, tests) |
 | `CARLS_PREFIX`, `CARLS_REPO`, `CARLS_REF` | installer prefix, repository, and ref/tag to install |
 | `NO_COLOR` | disable colour |
 

@@ -52,6 +52,7 @@ import {
   SleepWait,
   SystemInfo,
 } from "../tools/SystemOps.js";
+import { WebFetch, WebSearch } from "../tools/WebOps.js";
 import {
   BrowserClick,
   BrowserClose,
@@ -156,6 +157,8 @@ export class Runtime {
       new SystemInfo(),
       new NetworkRequest(),
       new HttpDownload(),
+      new WebFetch(),
+      new WebSearch(),
       new EnvGet(),
       new EnvSet(),
       new SleepWait(),
@@ -472,7 +475,8 @@ export function buildSystemPrompt(config: ResolvedConfig): string {
       "or delegate_task you already know you need in the SAME turn instead of one after another.",
       "Use the specialised tools instead of bash when one exists: multi_read and write_many batch file I/O,",
       "apply_patch applies a unified diff, tree_view and list_dir map a project, git_* cover version control,",
-      "network_request and http_download handle HTTP, computer_use and browser_* drive a desktop or a page,",
+      "web_search and web_fetch read the web (fetch returns text, not markup), network_request and http_download",
+      "handle raw HTTP, computer_use and browser_* drive a desktop or a page,",
       "and secret_scan checks for leaked credentials before you commit.",
       "Stop and summarise once the goal is met or you are blocked.",
     ].join("\n"),

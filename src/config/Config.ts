@@ -35,15 +35,8 @@ export type Effort = "minimal" | "low" | "medium" | "high";
 
 export const EFFORTS: Effort[] = ["minimal", "low", "medium", "high"];
 
-/**
- * How a newly detected release is handled at startup.
- * - auto:   install it in place, at most once per version (default).
- * - notify: print a one-line notice and leave the decision to the user.
- * - off:    never check for releases.
- */
-export type AutoUpdateMode = "auto" | "notify" | "off";
-
-export const AUTO_UPDATE_MODES: AutoUpdateMode[] = ["auto", "notify", "off"];
+export type { AutoUpdateMode } from "../types/update.js";
+import type { AutoUpdateMode } from "../types/update.js";
 
 export interface HooksConfig {
   preToolUse: string[];

@@ -19,6 +19,7 @@ import { loadConfig, specFor } from "../config/Config.js";
 import { apiKeyEnvFor } from "../config/Config.js";
 import { runUpdate } from "../update/Updater.js";
 import { applyPreset, discoverAgents, findAgent } from "../agents/Presets.js";
+import { writeTranscript } from "./Export.js";
 
 export interface CommandContext {
   runtime: Runtime;
@@ -477,6 +478,29 @@ export const COMMANDS: CommandSpec[] = [
       );
       printPanel("Modified files", rows);
       printInfo("Use /undo to revert the most recent edit.");
+      return false;
+    },
+  },
+  {
+    name: "/export",
+    usage: "/export [path]",
+    summary: "Write this session's transcript to a markdown file",
+    run: async (args, ctx) => {
+      if (ctx.runtime.history.length === 0) {
+        printInfo("Nothing to export yet.");
+        return false;
+      }
+      const target = args[0] ?? join(ctx.runtime.config.cwd, `carls-${ctx.runtime.session.id}.md`);
+      try {
+        const result = await writeTranscript(target, ctx.runtime.history, {
+          sessionId: ctx.runtime.session.id,
+          model: ctx.runtime.config.model,
+          cwd: ctx.runtime.config.cwd,
+        });
+        printInfo(`exported ${result.bytes} bytes to ${result.path}`);
+      } catch (error) {
+        printError(`could not write ${target}: ${(error as Error).message}`);
+      }
       return false;
     },
   },
