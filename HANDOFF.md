@@ -8,9 +8,9 @@ report.
 
 | | |
 | --- | --- |
-| Repository | `https://github.com/BerunHaider/carls-agent-v2` (branch `main`) |
+| Repository | `https://github.com/carlscodev/carls-agent-v2` (branch `main`) |
 | Local branch | `freebuff/07a410415a017967652d4d91` |
-| Remote to push to | `mine` — `git push mine HEAD:main` (`cloud_git push` still points at the old `carlscodev` repo) |
+| Remote to push to | `cloud_git push` (server-side credentials, has write to `carlscodev`); `git push mine HEAD:main` also works via the `BerunHaider` mirror. The `gh` token in the shell does **not** have write to `carlscodev` |
 | Version | `0.2.0` |
 | Checks | `npm run typecheck` → clean, `npm test` → 170/170, `npm run build` → clean |
 
