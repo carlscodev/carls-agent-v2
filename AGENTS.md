@@ -92,6 +92,37 @@ and every layout collapses. Write the raw bytes to a file and strip ANSI to read
 the frames. `Ctrl+T` opens a tab, `Ctrl+X` closes one, `Ctrl+B` toggles the
 sidebar, and `/tab list` prints the open tabs.
 
+## Reinstalling on the development VM
+
+The live install is a root-owned prefix, not a checkout: `/opt/carls/app` (the
+built tree) with the launcher at `/opt/carls/bin/carls` and the config at
+`/opt/carls/.carlsrc.json`, symlinked to `/etc/carls/.carlsrc.json`. To deploy a
+new revision, ship the sources and run the repo's own installer so the layout
+stays consistent:
+
+```bash
+git archive --format=tar.gz -o /tmp/carls-src.tgz HEAD   # or tar the worktree
+scp -P 2222 /tmp/carls-src.tgz user@host:/tmp/
+ssh -p 2222 user@host '
+  set -e
+  sudo cp -a /opt/carls/.carlsrc.json /tmp/carlsrc.snapshot.json
+  rm -rf /tmp/carls-install && mkdir -p /tmp/carls-install
+  tar xzf /tmp/carls-src.tgz -C /tmp/carls-install
+  sudo rm -rf /opt/carls/app
+  cd /tmp/carls-install
+  sudo bash scripts/install.sh --yes --no-node --prefix /opt/carls
+  sudo cp -a /tmp/carlsrc.snapshot.json /opt/carls/.carlsrc.json
+  sudo chmod 644 /opt/carls/.carlsrc.json
+  sudo ln -sf /opt/carls/.carlsrc.json /etc/carls/.carlsrc.json
+  shred -u /tmp/carlsrc.snapshot.json
+'
+```
+
+The snapshot exists because `install.sh` rewrites `/opt/carls/.carlsrc.json`
+from the flags it was given, which would drop a provider key it cannot
+rediscover. Afterwards check `carls --version` and a one-shot run
+(`carls -p "reply OK" --yolo`).
+
 ## Definition of done
 
 - `npm run typecheck` clean, `npm test` green, `npm run build` if `dist/` matters.
