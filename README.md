@@ -114,6 +114,7 @@ runs a shell command, `#` adds a note without calling the model.
 | `/agent <goal>` | run a sub-agent and print its conclusion |
 | `/agents [name]` | switch the agent preset from `.agents/agents/*.md` |
 | `/export [path]` | write the session transcript to markdown |
+| `/editor [text]` | compose the prompt in `$VISUAL`/`$EDITOR` |
 | `/tools`, `/mcp`, `/skills` | what the agent can use |
 | `/setup`, `/providers`, `/doctor` | configuration and diagnostics |
 | `/update [--check]` | install or check for a newer release |
