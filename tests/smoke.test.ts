@@ -721,6 +721,20 @@ describe("AgentLoop (scripted provider)", () => {
     expect(reloaded.length).toBeGreaterThanOrEqual(4);
   });
 
+  it("advances the stored updatedAt so the session list orders by real recency", async () => {
+    const root = join(dir, "recency-sessions");
+    const older = new SessionStore("/work/a", "m", "older", root);
+    older.recordMessage({ role: "user", content: [{ type: "text", text: "first" }] });
+    await new Promise((r) => setTimeout(r, 5));
+    const newer = new SessionStore("/work/b", "m", "newer", root);
+    newer.recordMessage({ role: "user", content: [{ type: "text", text: "second" }] });
+
+    const listed = SessionStore.list(root);
+    expect(listed.map((entry) => entry.id)).toEqual(["newer", "older"]);
+    // The freshest meta record wins, not the one written at creation.
+    expect(listed[0]?.updatedAt.localeCompare(listed[1]?.updatedAt ?? "")).toBeGreaterThan(0);
+  });
+
   it("folds a steering message into the next step of the same turn", async () => {
     const { AgentLoop } = await import("../src/core/AgentLoop.js");
     const { CostTracker } = await import("../src/core/CostTracker.js");
@@ -2105,6 +2119,53 @@ describe("selectList", () => {
       const plain = line.replace(/\u001b\[[0-9;?]*[a-zA-Z]/g, "");
       expect(plain.length).toBeLessThanOrEqual(79);
     }
+  });
+
+  it("drops the group headings when every row belongs to one group", async () => {
+    // A single workspace is the common case; a lone "this directory" heading
+    // adds a row of noise and nothing to navigate.
+    const { output } = await drive(
+      ["q"],
+      [
+        { id: "a", label: "a", section: "this directory" },
+        { id: "b", label: "b", section: "this directory" },
+      ],
+    );
+    expect(output).not.toContain("this directory");
+    expect(output).not.toContain("\u25be");
+    expect(output).not.toContain("collapse");
+  });
+
+  it("never leaves a section heading alone at the bottom of a page", async () => {
+    // The page used to be cut by row, so a heading could land on the last line
+    // with its items pushed to the next page — a heading with nothing under it.
+    const many = Array.from({ length: 12 }, (_, i) => ({
+      id: `s${i}`,
+      label: `sess-${i}`,
+      section: i < 6 ? "A" : "B",
+    }));
+    const { output } = await drive(["\u001b[F", "q"], many);
+    const frames = output.split("\u001b[H").slice(1);
+    for (const frame of frames) {
+      const rows = frame
+        .split("\r\n")
+        .map((line) => line.replace(/\u001b\[[0-9;?]*[a-zA-Z]/g, "").trimEnd())
+        .filter((line) => line.length > 0);
+      const lastContent = rows[rows.length - 2] ?? "";
+      const isHeading = /[\u25be\u25b8]/.test(lastContent) && /\(\d+\)/.test(lastContent);
+      expect(isHeading).toBe(false);
+    }
+  });
+
+  it("counts items, not rows, in the position indicator", async () => {
+    const grouped = [
+      { id: "a/1", label: "a/1", section: "a" },
+      { id: "b/1", label: "b/1", section: "b" },
+    ];
+    const { output } = await drive(["q"], grouped);
+    // Two headings plus two items: a row count would read 1/4.
+    expect(output).toContain("1/2");
+    expect(output).not.toContain("1/4");
   });
 });
 

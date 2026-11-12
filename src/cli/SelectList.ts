@@ -46,6 +46,15 @@ const SHOW_CURSOR = "\u001b[?25h";
 const HOME = "\u001b[H";
 const CLEAR_BELOW = "\u001b[J";
 
+/** 1-based index of the item on the given row, ignoring headings. */
+function itemsUpTo(rows: Row[], rowIndex: number): number {
+  let seen = 0;
+  for (let i = 0; i <= rowIndex && i < rows.length; i++) {
+    if (rows[i]?.kind === "item") seen += 1;
+  }
+  return seen;
+}
+
 /** Ranks a subsequence match; lower is better, undefined means no match. */
 function fuzzyScore(query: string, haystack: string): number | undefined {
   if (query.length === 0) return 0;
@@ -100,11 +109,22 @@ export async function selectList(options: SelectListOptions): Promise<SelectItem
   const buildRows = (): Row[] => {
     const items = filtered();
     const filtering = query.length > 0;
+    const grouped = new Map<string, SelectItem[]>();
+    for (const item of items) {
+      const name = item.section ?? "";
+      const bucket = grouped.get(name);
+      if (bucket === undefined) grouped.set(name, [item]);
+      else bucket.push(item);
+    }
+    // A heading only earns its row when it separates two groups. With a single
+    // group the list reads as a plain flat list, which is what a one-workspace
+    // user almost always has.
+    const showHeadings = grouped.size > 1;
     const rows: Row[] = [];
     for (const section of sections) {
-      const mine = items.filter((item) => (item.section ?? "") === section);
+      const mine = grouped.get(section) ?? [];
       if (mine.length === 0) continue;
-      if (section.length > 0) {
+      if (showHeadings && section.length > 0) {
         rows.push({ kind: "section", section, count: mine.length });
         if (!filtering && collapsed.has(section)) continue;
       }
@@ -171,6 +191,13 @@ export async function selectList(options: SelectListOptions): Promise<SelectItem
     lines.push(pc.gray("\u2500".repeat(width)));
 
     const slice = rows.slice(offset, offset + page);
+    // A heading that lands on the last visible row would sit there with no item
+    // under it, reading as an empty group. Push it to the next page instead —
+    // unless the cursor is on it, since hiding the active row is worse.
+    while (slice.length > 1 && slice[slice.length - 1]?.kind === "section" && slice.some((row) => row.kind === "item")) {
+      if (offset + slice.length - 1 === index) break;
+      slice.pop();
+    }
     if (slice.length === 0) lines.push(pc.gray("  no matches"));
     for (let i = 0; i < slice.length; i++) {
       const row = slice[i];
@@ -198,13 +225,16 @@ export async function selectList(options: SelectListOptions): Promise<SelectItem
     for (let i = 0; i < previewLines; i++) {
       lines.push(truncate(pc.gray(`  ${preview[i] ?? ""}`), width));
     }
-    const position = rows.length > 0 ? `${index + 1}/${rows.length}` : "0/0";
+    // Count items, not rows: with headings in the list the row total would
+    // disagree with the "N items" in the title.
+    const position = `${itemsUpTo(rows, index)}/${total}`;
+    const hasHeadings = rows.some((row) => row.kind === "section");
     lines.push(
       truncate(
         pc.gray(
           [
             "\u2191\u2193 move",
-            "\u2190\u2192 collapse",
+            ...(hasHeadings ? ["\u2190\u2192 collapse"] : []),
             ...(options.extraHint !== undefined ? [options.extraHint] : []),
             "Enter open",
             "q cancel",

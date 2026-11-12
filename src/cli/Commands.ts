@@ -123,6 +123,9 @@ async function browseSessions(ctx: CommandContext, id: string | undefined): Prom
     return;
   }
   const here = ctx.runtime.config.cwd;
+  const home = process.env.HOME;
+  const shortCwd = (cwd: string): string =>
+    home !== undefined && home.length > 1 && cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
   const described = entries.map((entry) => {
     const messages = SessionStore.loadMessages(entry.id);
     const firstUser = messages.find((message) => message.role === "user");
@@ -144,8 +147,9 @@ async function browseSessions(ctx: CommandContext, id: string | undefined): Prom
     items: shown.map(({ entry, opening, turns }) => ({
       id: entry.id,
       label: entry.id,
-      detail: `${entry.cwd === here ? pc.cyan("●") + " " : ""}${entry.updatedAt.slice(0, 19)}`,
-      section: entry.cwd === here ? "this directory" : "elsewhere",
+      // The workspace lives on the row rather than in a group heading: a flat
+      // list needs no scrolling to a heading to tell two sessions apart.
+      detail: `${entry.cwd === here ? pc.cyan("●") : pc.gray("○")} ${shortCwd(entry.cwd)} · ${entry.updatedAt.slice(5, 16).replace("T", " ")}`,
       preview: [
         `${turns} turn${turns === 1 ? "" : "s"} · ${entry.model}`,
         opening.length > 0 ? opening : "(no messages yet)",

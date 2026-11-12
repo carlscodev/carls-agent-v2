@@ -60,11 +60,16 @@ export class SessionStore {
       if (!file.endsWith(".jsonl")) continue;
       const full = join(base, file);
       try {
-        const first = readFileSync(full, "utf8").split("\n", 1)[0] ?? "";
-        const record = JSON.parse(first) as SessionRecord;
-        if (record.type === "meta") {
-          entries.push({ ...(record.payload as SessionMeta), path: full });
+        // The log is append-only, so a session that kept going has several meta
+        // records; the last one carries the freshest `updatedAt`, which is what
+        // the "most recent first" ordering needs.
+        let meta: SessionMeta | undefined;
+        for (const line of readFileSync(full, "utf8").split("\n")) {
+          if (line.trim().length === 0) continue;
+          const record = JSON.parse(line) as SessionRecord;
+          if (record.type === "meta") meta = record.payload as SessionMeta;
         }
+        if (meta !== undefined) entries.push({ ...meta, path: full });
       } catch {
         continue;
       }
@@ -93,6 +98,9 @@ export class SessionStore {
 
   private touch(): void {
     this.meta = { ...this.meta, updatedAt: new Date().toISOString() };
+    // Persisted so `SessionStore.list()` can order by real recency; without this
+    // every session keeps the timestamp it was created with.
+    this.append({ type: "meta", payload: this.meta });
   }
 
   static loadMessages(id: string, rootDir?: string): Message[] {
