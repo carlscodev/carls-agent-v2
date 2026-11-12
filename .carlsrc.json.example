@@ -1,0 +1,22 @@
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-20250514",
+  "apiKeyEnv": "ANTHROPIC_API_KEY",
+  "maxSteps": 30,
+  "maxTokens": 8192,
+  "contextWindow": 200000,
+  "bashTimeoutMs": 60000,
+  "truncateLimit": 8000,
+  "compactThreshold": 0.75,
+  "permissions": {
+    "allow": ["npm test", "npm run *", "git status", "ls *"],
+    "deny": ["rm -rf *", "git push *"]
+  },
+  "hooks": {
+    "preToolUse": [],
+    "postToolUse": [],
+    "sessionStart": [],
+    "sessionEnd": []
+  },
+  "mcpServers": {}
+}

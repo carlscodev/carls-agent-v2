@@ -1,0 +1,76 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 30px; background: #0b0e14;
+    font-family: "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace; color: #cdd6f4; }
+  .hdr { font-size: 16px; color: #e6edf7; margin: 0 0 6px 4px; font-weight: 700; }
+  .sub { font-size: 12.5px; color: #7f8998; margin: 0 0 18px 4px; }
+  .badge { display:inline-block; font-size: 11.5px; padding: 3px 10px; border-radius: 999px;
+    background:#14351f; color:#4ade80; border:1px solid #1f6f3d; margin-left:10px; vertical-align: middle; }
+  .badge2 { background:#2a2440; color:#c084fc; border-color:#5b3f8f; }
+  .window { border: 1px solid #1f2533; border-radius: 10px; overflow: hidden;
+    margin-bottom: 24px; background: #0e1118; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+  .titlebar { display: flex; align-items: center; gap: 8px; padding: 10px 13px;
+    background: #161b26; border-bottom: 1px solid #1f2533; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; }
+  .r { background: #ff5f57; } .y { background: #febc2e; } .g { background: #28c840; }
+  .title { margin-left: 10px; font-size: 12px; color: #7f8998; }
+  pre { margin: 0; padding: 17px 19px; font-size: 13.5px; line-height: 1.58; white-space: pre-wrap; word-break: break-word; }
+  .dim { color: #6c7688; } .cyan { color: #22d3ee; } .green { color: #4ade80; }
+  .red { color: #f87171; } .yellow { color: #fbbf24; } .bold { font-weight: 700; }
+  .mag { color: #c084fc; } .white { color: #e6edf7; }
+</style>
+</head>
+<body>
+  <div class="hdr">carls-code — instalado y corriendo en el servidor remoto
+    <span class="badge">spent_usd: 0</span>
+    <span class="badge badge2">instabox · Debian · Node 24</span>
+    <div class="sub">ssh -p 2222 ibssh_brebtumms7rf2ghz5ytwwbssre@ssh.instabox.sh · api.apinex.bond · free/glm-5.3-flash</div>
+  </div>
+
+  <div class="window">
+    <div class="titlebar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="title">carls --yolo -p "Arregla el bug en math.js…"  ·  en el remoto</span>
+    </div>
+<pre><span class="dim">user@instabox-carls-agent-development:/data/home/demo$</span> <span class="white">carls --yolo -p "Arregla el bug en math.js…"</span>
+
+<span class="cyan">◆ read_file</span> <span class="dim">{"path":"/data/home/demo/math.js"}</span>
+<span class="cyan">◆ edit_file</span> <span class="dim">{</span><span class="red">"old_string":"  return a - b;"</span><span class="dim">,</span> <span class="green">"new_string":"  return a + b;"</span><span class="dim">}</span>
+<span class="cyan">◆ bash</span>      <span class="dim">{"command":"node -e \"import('./math.js').then(m =&gt; console.log(m.add(3, 5)))\""}</span>
+<span class="dim">8</span>
+Verificado: la resta (restada por error) ahora es suma y <span class="dim">import('./math.js')</span> devuelve <span class="green">8</span> para <span class="dim">add(3, 5)</span>.
+<span class="dim">· in 6,425 / out 178 tokens (no price data for free/glm-5.3-flash)</span></pre>
+  </div>
+
+  <div class="window">
+    <div class="titlebar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="title">carls --yolo  ·  REPL interactivo en el remoto (con reintento por rate limit)</span>
+    </div>
+<pre><span class="bold cyan">carls-code</span> <span class="dim">·</span> <span class="dim">openai/free/glm-5.3-flash</span> <span class="dim">[yolo]</span>
+<span class="dim">/data/home/demo</span>
+<span class="dim">session 20261112071016-1746</span>
+<span class="dim">Type your goal, /help for commands, Ctrl+C twice to quit.</span>
+
+<span class="cyan">carls&gt;</span> <span class="white">Anade a math.js una funcion mul(a,b) y verificala con node -e.</span>
+<span class="dim">⠴ thinking</span>
+<span class="cyan">◆ glob_files</span> <span class="dim">{"pattern":"**/math.js"}</span>
+<span class="dim">⠇ thinking</span>
+<span class="cyan">◆ read_file</span>   <span class="dim">{"path":"math.js"}</span>
+<span class="dim">⠋ thinking</span><span class="yellow">[warn]</span> <span class="dim">rate-limited (attempt 1); retrying in 10.0s · HTTP 429 (Retry-After honoured)</span>
+<span class="dim">⠧ thinking</span>
+<span class="cyan">◆ edit_file</span>   <span class="dim">{"path":"math.js",</span> <span class="green">+ "\nexport function mul(a, b) { return a * b; }"</span><span class="dim">}</span>
+<span class="dim">⠋ thinking</span>
+<span class="cyan">◆ bash</span>        <span class="dim">{"command":"node -e \"import('./math.js').then(m=&gt;console.log('mul(3,4)=', m.mul(3,4)))\""}</span>
+<span class="dim">mul(3,4)= 12</span>
+
+Añadida la función <span class="dim">`mul(a,b)`</span> que devuelve <span class="dim">`a * b`</span> y verificada con <span class="dim">node -e</span>: <span class="dim">`mul(3,4)`</span> = <span class="green">12</span>.
+<span class="dim">· cost in 8,331 / out 253 tokens (no price data for free/glm-5.3-flash)</span>
+<span class="cyan">carls&gt;</span> <span class="dim">▍</span></pre>
+  </div>
+</body>
+</html>

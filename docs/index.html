@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>carls-code — demo del CLI</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 24px;
+    background: #0b0e14; color: #cdd6f4;
+    font-family: "DejaVu Sans Mono", Menlo, Consolas, monospace;
+  }
+  h1 { font-size: 18px; margin: 0 0 6px; color: #e6edf7; }
+  p.sub { margin: 0 0 18px; color: #7f8998; font-size: 13px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tabs a {
+    font-size: 13px; padding: 7px 14px; border-radius: 8px;
+    background: #161b26; color: #9aa7bd; text-decoration: none;
+    border: 1px solid #1f2533;
+  }
+  .tabs a:hover { background: #1d2431; color: #e6edf7; }
+  img {
+    width: 100%; max-width: 1180px; display: block;
+    border: 1px solid #1f2533; border-radius: 10px;
+    box-shadow: 0 12px 34px rgba(0,0,0,.55);
+  }
+</style>
+</head>
+<body>
+  <h1>carls-code — demo del CLI</h1>
+  <p class="sub">Ejecución real contra https://api.apinex.bond/v1 · modelo free/gpt-6-luna · coste $0.00</p>
+  <div class="tabs">
+    <a href="remote-run.png">PNG remoto (instabox)</a>
+    <a href="remote-run.html">HTML remoto (fuente)</a>
+    <a href="cli-demo.png">PNG local</a>
+    <a href="cli-demo.html">HTML local (fuente)</a>
+  </div>
+  <img src="remote-run.png" alt="carls-code corriendo en el servidor remoto con apinex" style="margin-bottom:24px" />
+  <img src="cli-demo.png" alt="carls-code CLI local: modo one-shot y REPL interactivo" />
+</body>
+</html>
