@@ -99,6 +99,111 @@ function mapStopReason(reason: string | null, hasToolCalls: boolean): StopReason
   return "end_turn";
 }
 
+/**
+ * Parses a tool call's JSON arguments. A model that emits a truncated or
+ * malformed payload still yields a usable call: the raw text is preserved under
+ * `__raw` so the observation can report it instead of losing the call.
+ */
+function parseArguments(raw: string | undefined): unknown {
+  try {
+    return JSON.parse(raw || "{}");
+  } catch {
+    return { __raw: raw ?? "" };
+  }
+}
+
+/**
+ * Reassembles tool calls that a stream delivers in pieces.
+ *
+ * OpenAI-style streaming splits one call across many deltas: the first frame
+ * carries the id and name, later frames append argument fragments keyed by the
+ * call's `index`. Arguments are concatenated as text and parsed once at the end,
+ * because a partial JSON string is not parseable mid-flight.
+ */
+class ToolCallAccumulator {
+  private readonly calls = new Map<number, { id: string; name: string; args: string }>();
+
+  add(delta: NonNullable<NonNullable<OpenAIStreamChunk["choices"]>[number]["delta"]>["tool_calls"]): void {
+    for (const fragment of delta ?? []) {
+      const index = fragment.index ?? 0;
+      const current = this.calls.get(index) ?? { id: "", name: "", args: "" };
+      if (fragment.id !== undefined) current.id = fragment.id;
+      if (fragment.function?.name !== undefined) current.name = fragment.function.name;
+      if (fragment.function?.arguments !== undefined) current.args += fragment.function.arguments;
+      this.calls.set(index, current);
+    }
+  }
+
+  /** Finished calls in index order, ready to become `tool_use` blocks. */
+  build(): ContentBlock[] {
+    const out: ContentBlock[] = [];
+    for (const index of [...this.calls.keys()].sort((a, b) => a - b)) {
+      const call = this.calls.get(index);
+      if (call === undefined || call.name.length === 0) continue;
+      out.push({
+        type: "tool_use",
+        id: call.id.length > 0 ? call.id : `call_${index}`,
+        name: call.name,
+        input: parseArguments(call.args),
+      });
+    }
+    return out;
+  }
+}
+
+/** Mutable state carried across the frames of one stream. */
+interface StreamState {
+  text: string;
+  reasoning: string;
+  tools: ToolCallAccumulator;
+  finish: string | null;
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  sawUsage: boolean;
+}
+
+function newStreamState(): StreamState {
+  return { text: "", reasoning: "", tools: new ToolCallAccumulator(), finish: null, sawUsage: false };
+}
+
+/**
+ * Splits `buffer` into SSE frames, applying every complete one and returning the
+ * unconsumed remainder. A frame is terminated by a blank line; a partial frame
+ * stays in the buffer until the next read, so a chunk boundary mid-JSON is safe.
+ */
+function drainFrames(buffer: string, state: StreamState, args: CompletionArgs): string {
+  let rest = buffer;
+  for (;;) {
+    const match = rest.match(/\r?\n\r?\n/);
+    if (match === null || match.index === undefined) break;
+    const frame = rest.slice(0, match.index);
+    rest = rest.slice(match.index + match[0].length);
+    applyFrame(frame, state, args);
+  }
+  return rest;
+}
+
+/** Reads the `data:` payload out of one frame, or null when there is none. */
+function frameData(frame: string): string | null {
+  const lines = frame.split(/\r?\n/);
+  const data: string[] = [];
+  for (const line of lines) {
+    if (!line.startsWith("data:")) continue;
+    data.push(line.slice(5).replace(/^ /, ""));
+  }
+  return data.length === 0 ? null : data.join("\n");
+}
+
+// a
+function applyFrame(frame: string, state: StreamState, args: CompletionArgs): void {
+  const payload = frameData(frame);
+  if (payload === null) return;
+
+
+
+
+
+
+
 export interface OpenAICompatOptions {
   /**
    * Whether the endpoint accepts `reasoning_effort`. Local servers and the
@@ -140,7 +245,7 @@ export class OpenAICompatProvider implements Provider {
     const body: Record<string, unknown> = {
       model: args.model,
       max_tokens: args.maxTokens,
-      stream: false,
+      stream: this.streaming,
       messages: toOpenAIMessages(args.system, args.messages),
       tools: args.tools.map((schema) => ({
         type: "function" as const,
@@ -157,50 +262,112 @@ export class OpenAICompatProvider implements Provider {
       body.reasoning_effort = args.effort;
     }
 
-    const response = await withRetry(async () => {
-      const res = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify(body),
-        ...(args.signal !== undefined ? { signal: args.signal } : {}),
-      });
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        const retryAfterHeader = res.headers.get("retry-after");
-        const retryAfterMs =
-          retryAfterHeader !== null && Number.isFinite(Number.parseFloat(retryAfterHeader))
-            ? Math.max(0, Number.parseFloat(retryAfterHeader) * 1000)
-            : undefined;
-        throw httpError(
-          res.status,
-          `OpenAI-compat HTTP ${res.status}: ${text.slice(0, 500)}`,
-          retryAfterMs,
-        );
-      }
-      return (await res.json()) as OpenAIChatResponse;
-    }, this.onRetry !== undefined ? { onRetry: this.onRetry } : {});
+    return await withRetry(
+      () => this.requestOnce(body, args),
+      this.onRetry !== undefined ? { onRetry: this.onRetry } : {},
+    );
+  }
 
+  /**
+   * One HTTP round trip. The transport decides the reader: a streaming endpoint
+   * answers with `text/event-stream`, but plenty of gateways ignore `stream` and
+   * send a single JSON body, so the response — not the request — picks the path.
+   */
+  private async requestOnce(
+    body: Record<string, unknown>,
+    args: CompletionArgs,
+  ): Promise<LLMResponse> {
+    const res = await fetch(`${this.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${this.apiKey}`,
+        ...(this.streaming ? { accept: "text/event-stream" } : {}),
+      },
+      body: JSON.stringify(body),
+      ...(args.signal !== undefined ? { signal: args.signal } : {}),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      const retryAfterHeader = res.headers.get("retry-after");
+      const retryAfterMs =
+        retryAfterHeader !== null && Number.isFinite(Number.parseFloat(retryAfterHeader))
+          ? Math.max(0, Number.parseFloat(retryAfterHeader) * 1000)
+          : undefined;
+      throw httpError(
+        res.status,
+        `OpenAI-compat HTTP ${res.status}: ${text.slice(0, 500)}`,
+        retryAfterMs,
+      );
+    }
+    const contentType = res.headers.get("content-type") ?? "";
+    if (this.streaming && res.body !== null && /event-stream/i.test(contentType)) {
+      return await this.consumeStream(res, args);
+    }
+    const raw = await res.text();
+    // A stream-shaped body can arrive with a wrong content-type; sniff it so a
+    // mislabelled endpoint still streams instead of failing to parse.
+    if (this.streaming && /^\s*(data:|event:)/m.test(raw)) {
+      return this.consumeSse(raw, args);
+    }
+    return this.fromJson(JSON.parse(raw) as OpenAIChatResponse, args);
+  }
+
+  /** Consumes an `text/event-stream` body, forwarding deltas as they arrive. */
+  private async consumeStream(res: Response, args: CompletionArgs): Promise<LLMResponse> {
+    const body = res.body;
+    if (body === null) throw new FatalError("OpenAI-compat stream had no body.");
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    const state = newStreamState();
+    let buffer = "";
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        buffer = drainFrames(buffer, state, args);
+      }
+      buffer += decoder.decode();
+      drainFrames(`${buffer}\n`, state, args);
+    } finally {
+      reader.releaseLock();
+    }
+    return finishStream(state, args);
+  }
+
+  /** Same as `consumeStream` for a body already buffered as text. */
+  private consumeSse(raw: string, args: CompletionArgs): LLMResponse {
+    const state = newStreamState();
+    drainFrames(`${raw}\n`, state, args);
+    return finishStream(state, args);
+  }
+
+  /**
+   * Builds the response from a non-streaming JSON body. `onText` fires once with
+   * the whole answer: a caller that wants deltas needs the streaming path.
+   */
+  private fromJson(response: OpenAIChatResponse, args: CompletionArgs): LLMResponse {
     const choice = response.choices[0];
     if (!choice) {
       throw new Error("OpenAI-compat response contained no choices.");
     }
 
     const content: ContentBlock[] = [];
+    if (choice.message.reasoning_content) {
+      args.onReasoning?.(choice.message.reasoning_content);
+    }
     if (choice.message.content) {
       content.push({ type: "text", text: choice.message.content });
       args.onText?.(choice.message.content);
     }
     for (const call of choice.message.tool_calls ?? []) {
-      let parsed: unknown = {};
-      try {
-        parsed = JSON.parse(call.function.arguments || "{}");
-      } catch {
-        parsed = { __raw: call.function.arguments };
-      }
-      content.push({ type: "tool_use", id: call.id, name: call.function.name, input: parsed });
+      content.push({
+        type: "tool_use",
+        id: call.id,
+        name: call.function.name,
+        input: parseArguments(call.function.arguments),
+      });
     }
 
     return {
