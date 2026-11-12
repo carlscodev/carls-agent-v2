@@ -19,10 +19,17 @@ export class Spinner {
   start(label: string): void {
     this.label = label;
     if (!this.enabled || this.timer) return;
+    const startedAt = Date.now();
     this.timer = setInterval(() => {
       this.frame = (this.frame + 1) % FRAMES.length;
       const t = theme();
-      process.stderr.write(`\r${t.paint(t.colors.accent, FRAMES[this.frame] ?? "")} ${t.paint(t.colors.text.muted, this.label)}`);
+      // A long turn with no output looks frozen; the elapsed clock is the
+      // cheapest possible reassurance, and it costs one field.
+      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+      const clock = elapsed >= 1 ? ` ${t.paint(t.colors.text.faint, `${elapsed}s`)}` : "";
+      process.stderr.write(
+        `\r\u001b[K${t.paint(t.colors.accent, FRAMES[this.frame] ?? "")} ${t.paint(t.colors.text.muted, this.label)}${clock}`,
+      );
     }, 80);
   }
 
@@ -79,42 +86,52 @@ function tildePath(path: string): string {
  * terminal, adds a row Chrome does not know about, and shifts the whole layout
  * by one on every scroll.
  */
+/**
+ * The mark is a small framed face: the same character as the boot animation, so
+ * the home screen and the splash read as one product without borrowing anyone
+ * else's logo. Equal visual width per row keeps the text column straight.
+ */
+const MARK = ["╭───╮", "│◕ ◕│", "╰─┬─╯"] as const;
+
+/**
+ * Home screen, rendered as an array of lines so the fixed header can reuse it.
+ *
+ * Every line is kept within the terminal width. Chrome derives its scrolling
+ * region from `lines.length`, so a line one column too wide wraps in the
+ * terminal, adds a row Chrome does not know about, and shifts the whole layout
+ * by one on every scroll.
+ */
 export function bannerLines(info: BannerInfo): string[] {
   const t = theme();
   const columns = process.stderr.columns ?? 80;
-  const width = Math.max(40, Math.min(76, columns - 2));
-  // Two shapes, and they differ by one column because the header carries an
-  // extra rule character. Getting this wrong by one makes the terminal wrap the
-  // line, which adds a row Chrome does not know about and desyncs the layout.
-  const bodyInner = width - 3; // "│ " + content + "│"
-  const headInner = width - 4; // "╭─ " + content + "╮"
+  const width = Math.max(40, Math.min(88, columns - 2));
+  const gutter = MARK.length > 0 ? visibleWidth(MARK[0] ?? "") + 2 : 0;
+  const textWidth = Math.max(16, width - gutter);
 
-  const title = `${t.bold("carls-code")} ${t.paint(t.colors.text.faint, "·")} ${t.paint(t.colors.text.base, `${info.provider}/${info.model}`)}`;
-  const badges = [modeTag(info.mode)];
-  if (info.effort !== undefined) badges.push(t.paint(t.colors.accent, info.effort));
+  const meta = [modeTag(info.mode)];
+  if (info.effort !== undefined) meta.push(t.paint(t.colors.accent, info.effort));
   if (info.contextWindow !== undefined) {
-    badges.push(t.paint(t.colors.text.muted, `${Math.round(info.contextWindow / 1000)}k ctx`));
+    meta.push(t.paint(t.colors.text.muted, `${Math.round(info.contextWindow / 1000)}k ctx`));
   }
 
-  const fitted = truncate(title, headInner);
-  const rule = Math.max(0, headInner - visibleWidth(fitted));
+  const rows: string[] = [
+    `${t.bold("carls-code")} ${t.paint(t.colors.text.faint, "·")} ${t.paint(t.colors.text.base, `${info.provider}/${info.model}`)}`,
+    meta.join(t.paint(t.colors.text.faint, " · ")),
+    `${t.paint(t.colors.text.muted, tildePath(info.cwd))} ${t.paint(t.colors.text.faint, `· ${info.sessionId.slice(0, 8)}`)}`,
+  ].map((line) => truncate(line, textWidth));
+
+  const hint = "type to ask · / commands · ctrl+p palette · shift+tab mode · ! shell · # note";
+  const hintLines = wrap(hint, textWidth).map((line) => t.paint(t.colors.text.faint, line));
+
   const lines: string[] = [];
-  lines.push(`${t.paint(t.colors.border, "╭─ ")}${fitted}${t.paint(t.colors.border, "─".repeat(rule))}${t.paint(t.colors.border, "╮")}`);
-
-  const body = (text: string): string =>
-    `${t.paint(t.colors.border, "│ ")}${pad(text, bodyInner)}${t.paint(t.colors.border, "│")}`;
-  lines.push(body(badges.join(t.paint(t.colors.text.faint, " · "))));
-  lines.push(body(t.paint(t.colors.text.muted, truncate(tildePath(info.cwd), bodyInner))));
-  lines.push(body(t.paint(t.colors.text.faint, `session ${info.sessionId}`)));
-
-  const hint = "/ palette · Ctrl+P commands · Shift+Tab mode · ! shell · # note";
-  const hintLines = wrap(hint, headInner);
+  rows.forEach((row, index) => {
+    const mark = MARK[index] ?? "";
+    lines.push(`${t.paint(t.colors.border, pad(mark, gutter))}${row}`);
+  });
   hintLines.forEach((hintLine, index) => {
-    const lead = index === 0 ? "╰─ " : "   ";
-    const tail = index === hintLines.length - 1 ? "╯" : "";
-    lines.push(
-      `${t.paint(t.colors.border, lead)}${t.paint(t.colors.text.faint, pad(hintLine, headInner))}${t.paint(t.colors.border, tail)}`,
-    );
+    // The tips hang off the mark's chin, so the whole block reads as one shape.
+    const lead = index === 0 ? t.paint(t.colors.border, pad("  │", gutter)) : " ".repeat(gutter);
+    lines.push(`${lead}${hintLine}`);
   });
   return lines;
 }

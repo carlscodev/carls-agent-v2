@@ -97,15 +97,33 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     return next;
   };
 
+  /** `❯` marks the input everywhere, so the transcript and the prompt agree. */
+  const promptGlyph = (): string => `${theme().paint(theme().colors.accent, "❯")} `;
+
+  const tokenCount = (tokens: number): string =>
+    tokens >= 1000 ? `${(tokens / 1000).toFixed(tokens >= 10000 ? 0 : 1)}k` : String(Math.round(tokens));
+
+  /** One dense line: agent, model, context pressure, spend, location. */
   const statusLine = (): string => {
     const t = theme();
-    const parts = [modeTag(runtime.config.mode), t.paint(t.colors.text.muted, runtime.config.model)];
-    if (runtime.config.effort !== undefined) parts.push(t.paint(t.colors.accent, runtime.config.effort));
     const ratio = runtime.contextManager.usedRatio(runtime.history);
-    const pct = Math.min(100, ratio * 100);
-    const paint = pct > 85 ? t.colors.feedback.error : pct > 70 ? t.colors.feedback.warning : t.colors.text.faint;
-    parts.push(t.paint(paint, `${pct.toFixed(0)}% ctx`));
-    return `${t.paint(t.colors.border, "─")} ${parts.join(t.paint(t.colors.text.faint, " · "))}`;
+    const used = Math.round(ratio * runtime.config.contextWindow);
+    const paint =
+      ratio > 0.85 ? t.colors.feedback.error : ratio > 0.7 ? t.colors.feedback.warning : t.colors.text.faint;
+    const home = process.env.HOME;
+    const cwd =
+      home !== undefined && home.length > 1 && runtime.config.cwd.startsWith(home)
+        ? `~${runtime.config.cwd.slice(home.length)}`
+        : runtime.config.cwd;
+    const parts = [
+      modeTag(runtime.config.mode),
+      t.paint(t.colors.text.muted, `${runtime.config.provider}/${runtime.config.model}`),
+    ];
+    if (runtime.config.effort !== undefined) parts.push(t.paint(t.colors.accent, runtime.config.effort));
+    parts.push(t.paint(paint, `${tokenCount(used)}/${tokenCount(runtime.config.contextWindow)}`));
+    parts.push(t.paint(t.colors.text.faint, runtime.cost.format()));
+    parts.push(t.paint(t.colors.text.faint, cwd));
+    return parts.join(t.paint(t.colors.text.faint, " │ "));
   };
 
   const showStatus = (): void => {
@@ -188,7 +206,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       let input: string;
       if (interactive) {
         const result = await prompt.read({
-          prompt: `${theme().paint(theme().colors.accent, "carls>")} `,
+          prompt: promptGlyph(),
           onModeCycle: cycleMode,
           onPalette: () => true,
           ...(useChrome ? { chrome } : {}),
@@ -212,9 +230,9 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           // palette never needs to know how a command runs.
           input = chosen;
           if (useChrome) {
-            chrome.writeRegion(`${theme().paint(theme().colors.accent, "carls>")} ${chosen}\n`);
+            chrome.writeRegion(`${promptGlyph()}${theme().paint(theme().colors.text.muted, chosen)}\n`);
           } else {
-            process.stderr.write(`${theme().paint(theme().colors.accent, "carls>")} ${chosen}\n`);
+            process.stderr.write(`${promptGlyph()}${theme().paint(theme().colors.text.muted, chosen)}\n`);
           }
         } else {
         if (result.type === "interrupt") {
@@ -226,13 +244,13 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           if (result.type !== "line") continue;
           input = result.text.trim();
           if (useChrome) {
-            chrome.writeRegion(`${theme().paint(theme().colors.accent, "carls>")} ${input}\n`);
+            chrome.writeRegion(`${promptGlyph()}${input}\n`);
           } else {
-            process.stderr.write(`${theme().paint(theme().colors.accent, "carls>")} ${input}\n`);
+            process.stderr.write(`${promptGlyph()}${input}\n`);
           }
         }
       } else {
-        const line = await reader.next(pc.cyan("carls> "));
+        const line = await reader.next(pc.cyan("❯ "));
         if (line === null) break;
         input = line.trim();
       }

@@ -360,9 +360,13 @@ function renderTodos(todos: unknown[]): string {
   return indent(rows);
 }
 
-/** Adds a two-space gutter so a block reads as belonging to the line above it. */
+/**
+ * Hangs a block off a left rule so it reads as one card belonging to the call
+ * line above it, the way a diff in a review tool does.
+ */
 function indent(lines: string[]): string {
-  return lines.map((line) => `  ${line}`).join("\n");
+  const rule = theme().paint(theme().colors.border, "┃");
+  return lines.map((line) => `${rule} ${line}`).join("\n");
 }
 
 /** Appends an overflow marker and hard-cuts if the block is still too wide. */

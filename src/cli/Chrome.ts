@@ -145,7 +145,10 @@ export class Chrome {
     if (!this.enabled) return;
     const { promptRow } = this.layout;
     const width = this.out.columns ?? 80;
-    const line = fit(`${promptText}${buffer}`, width);
+    // An empty prompt shows what it accepts instead of a bare glyph; the cursor
+    // still sits right after the prompt, so the placeholder never gets in the way.
+    const ghost = buffer.length === 0 ? pc.gray("ask for a change, or / for commands") : "";
+    const line = fit(`${promptText}${buffer}${ghost}`, width);
     this.out.write(`${ESC}${promptRow};1H${ESC}2K${line}`);
     const used = visibleWidth(promptText) + cursor;
     const column = Math.min(width - 1, used) + 1;
