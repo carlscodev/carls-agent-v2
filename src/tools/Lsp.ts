@@ -37,25 +37,38 @@ export function specForPath(
   return undefined;
 }
 
-export class LspDiagnostics implements Tool<{ path: string }> {
-  readonly name = "lsp_diagnostics";
+interface LspInput {
+  path: string;
+  action?: "diagnostics" | "hover" | "definition" | undefined;
+  line?: number | undefined;
+  character?: number | undefined;
+}
+
+export class LspTool implements Tool<LspInput> {
+  readonly name = "lsp";
   readonly description =
-    "Ask the project's language server for errors and warnings in one file, without running a build. Requires lspServers in the config, e.g. {\"lspServers\": {\".ts\": {\"command\": \"typescript-language-server\", \"args\": [\"--stdio\"]}}}.";
+    "Ask the project's language server about one file: errors and warnings (diagnostics), the type or docs at a position (hover), or where a symbol is defined (definition). Needs lspServers in the config, e.g. {\"lspServers\": {\".ts\": {\"command\": \"typescript-language-server\", \"args\": [\"--stdio\"]}}}.";
   readonly readOnly = true;
   readonly category = "read" as const;
   private readonly schemaDef = z.object({
     path: z.string().describe("File to check, absolute or workspace-relative."),
+    action: z
+      .enum(["diagnostics", "hover", "definition"])
+      .optional()
+      .describe("What to ask for; defaults to diagnostics."),
+    line: z.number().int().positive().optional().describe("1-based line, for hover and definition."),
+    character: z.number().int().positive().optional().describe("1-based column, for hover and definition."),
   });
 
   schema(): ToolSchema {
     return { name: this.name, description: this.description, input_schema: zodToJsonSchema(this.schemaDef) };
   }
 
-  parse(input: unknown): { path: string } {
+  parse(input: unknown): LspInput {
     return this.schemaDef.parse(input);
   }
 
-  async run(input: { path: string }, ctx: ToolContext): Promise<ToolResult> {
+  async run(input: LspInput, ctx: ToolContext): Promise<ToolResult> {
     const target = guardPath(ctx, input.path);
     const display = toDisplayPath(ctx.cwd, target);
     const found = specForPath(ctx.config.lspServers, target);
@@ -76,10 +89,41 @@ export class LspDiagnostics implements Tool<{ path: string }> {
       return { ok: false, output: "", error: `could not read ${display}: ${(error as Error).message}` };
     }
 
+    const action = input.action ?? "diagnostics";
+    if (action !== "diagnostics" && (input.line === undefined || input.character === undefined)) {
+      return {
+        ok: false,
+        output: "",
+        error: `${action} needs a position: pass line and character (both 1-based).`,
+      };
+    }
+
     const client = new LspClient(found.spec, ctx.cwd);
     try {
       await client.initialize(found.spec, ctx.cwd, INIT_TIMEOUT_MS);
       const languageId = found.spec.languageId ?? found.key.replace(/^\./, "");
+
+      if (action === "hover") {
+        client.openDocument(target, text, languageId);
+        const content = await client.hover(target, input.line ?? 1, input.character ?? 1, DIAGNOSTICS_TIMEOUT_MS);
+        return content.length > 0
+          ? { ok: true, output: `${display}:${input.line}:${input.character}\n${content}` }
+          : { ok: false, output: "", error: `the language server returned no hover information at ${display}:${input.line}:${input.character}` };
+      }
+
+      if (action === "definition") {
+        client.openDocument(target, text, languageId);
+        const locations = await client.definition(target, input.line ?? 1, input.character ?? 1, DIAGNOSTICS_TIMEOUT_MS);
+        if (locations.length === 0) {
+          return { ok: false, output: "", error: `no definition found at ${display}:${input.line}:${input.character}` };
+        }
+        const lines = locations.map((location) => {
+          const shown = toDisplayPath(ctx.cwd, location.path);
+          return `${shown}:${location.line}:${location.character}`;
+        });
+        return { ok: true, output: `${locations.length} definition${locations.length === 1 ? "" : "s"}\n${lines.join("\n")}` };
+      }
+
       const diagnostics = await client.diagnosticsFor(target, text, languageId, DIAGNOSTICS_TIMEOUT_MS);
       if (diagnostics.length === 0) return { ok: true, output: `${display}: no diagnostics.` };
 

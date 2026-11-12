@@ -19,7 +19,8 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 | Agent presets | `.agents/agents/<name>.md` with mode/tools/model/effort frontmatter; `--agent <name>` and `/agents` |
 | Web reading | `web_fetch` (HTML reduced to text, title included) and `web_search` over DuckDuckGo's keyless HTML endpoint |
 | Export | `/export [path]` writes the transcript as markdown, tool calls and results included |
-| LSP diagnostics | `lsp_diagnostics` speaks JSON-RPC to the configured server and reports its diagnostics without a build |
+| LSP | `lsp` speaks JSON-RPC to the configured server: diagnostics, hover and definition, without a build |
+| External editor | `/editor` composes the prompt in `$VISUAL`/`$EDITOR` and hands it back to the input line |
 | Providers | 33 bundled ids, custom gateway via `baseUrl`, Ollama/LM Studio/vLLM/llama.cpp |
 | Models | `/models` against the live endpoint, effort plumbing |
 | Permissions | 6 modes, allow/deny lists, diff preview, `Shift+Tab` |
@@ -39,16 +40,15 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 
 ## Missing, in the order I would build it
 
-1. **Hover and code actions from the LSP.** Diagnostics are wired; hover, definition
-   and quick fixes are not.
+1. **Code actions from the LSP.** Diagnostics, hover and definition are wired;
+   quick fixes and rename are not.
 2. **Session tabs and a sidebar.** One session on screen at a time today.
-3. **External editor handoff** (`/editor`, `$EDITOR`) for long prompts.
-4. **Queue and steer.** Submitting while a turn runs queues nothing yet.
-5. **Headless server + remote client.** The runtime is embeddable, but there is
+3. **Queue and steer.** Submitting while a turn runs queues nothing yet.
+4. **Headless server + remote client.** The runtime is embeddable, but there is
    no HTTP/WS server mode.
-6. **Custom keybinds and per-project TUI config.**
-7. **Share links.** `/export` writes a local file; there is no hosted share URL.
-8. **Plugins.** No plugin API; MCP tools, skills and hooks are the extension
+5. **Custom keybinds and per-project TUI config.**
+6. **Share links.** `/export` writes a local file; there is no hosted share URL.
+7. **Plugins.** No plugin API; MCP tools, skills and hooks are the extension
     points.
 
 ## Ground rules for closing the list

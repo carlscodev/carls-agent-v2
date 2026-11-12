@@ -315,6 +315,10 @@ export async function runRepl(options: SessionOptions): Promise<number> {
               }
               await runGoal(lastGoal);
             },
+            // /editor hands its text back to the same prompt line.
+            composePrompt: (text: string) => {
+              resume = text;
+            },
           });
         } finally {
           if (useChrome) chrome.resume();

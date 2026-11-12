@@ -20,11 +20,14 @@ import { apiKeyEnvFor } from "../config/Config.js";
 import { runUpdate } from "../update/Updater.js";
 import { applyPreset, discoverAgents, findAgent } from "../agents/Presets.js";
 import { writeTranscript } from "./Export.js";
+import { composeInEditor, editorSpec } from "./Editor.js";
 
 export interface CommandContext {
   runtime: Runtime;
   /** Re-runs the most recent user message, used by /retry. */
   retryLast: () => Promise<void>;
+  /** Puts text back into the prompt line, used by /editor. */
+  composePrompt?: (text: string) => void;
 }
 
 export interface CommandSpec {
@@ -478,6 +481,35 @@ export const COMMANDS: CommandSpec[] = [
       );
       printPanel("Modified files", rows);
       printInfo("Use /undo to revert the most recent edit.");
+      return false;
+    },
+  },
+  {
+    name: "/editor",
+    usage: "/editor [text]",
+    summary: "Write the prompt in $VISUAL/$EDITOR instead of one line",
+    run: async (args, ctx) => {
+      const spec = editorSpec();
+      if (spec === undefined) {
+        printError("No editor configured. Set VISUAL or EDITOR, then run /editor again.");
+        return false;
+      }
+      const result = await composeInEditor({ initial: args.join(" "), spec });
+      if (result.error !== undefined) {
+        printError(result.error);
+        return false;
+      }
+      if (!result.changed || result.text.trim().length === 0) {
+        printInfo("Editor closed without changes.");
+        return false;
+      }
+      if (ctx.composePrompt === undefined) {
+        // No prompt to hand it to: print it, so nothing the user wrote is lost.
+        process.stderr.write(`${result.text.trim()}\n`);
+        return false;
+      }
+      ctx.composePrompt(result.text.trim());
+      printInfo("Loaded into the prompt; press Enter to send.");
       return false;
     },
   },

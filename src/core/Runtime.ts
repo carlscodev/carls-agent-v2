@@ -53,7 +53,7 @@ import {
   SystemInfo,
 } from "../tools/SystemOps.js";
 import { WebFetch, WebSearch } from "../tools/WebOps.js";
-import { LspDiagnostics } from "../tools/Lsp.js";
+import { LspTool } from "../tools/Lsp.js";
 import {
   BrowserClick,
   BrowserClose,
@@ -160,7 +160,7 @@ export class Runtime {
       new HttpDownload(),
       new WebFetch(),
       new WebSearch(),
-      new LspDiagnostics(),
+      new LspTool(),
       new EnvGet(),
       new EnvSet(),
       new SleepWait(),

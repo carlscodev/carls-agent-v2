@@ -2182,6 +2182,64 @@ describe("workspace path guard", () => {
   });
 });
 
+describe("external editor", () => {
+  it("picks the editor in the order a terminal respects", async () => {
+    const { editorSpec } = await import("../src/cli/Editor.js");
+    expect(editorSpec({ CARLS_EDITOR: "nano", VISUAL: "vi", EDITOR: "ed" }, "linux")?.command).toBe("nano");
+    expect(editorSpec({ VISUAL: "vi", EDITOR: "ed" }, "linux")?.command).toBe("vi");
+    expect(editorSpec({ EDITOR: "code --wait" }, "linux")).toEqual({ command: "code", args: ["--wait"] });
+    // No editor and no default on POSIX: the command explains it instead of guessing.
+    expect(editorSpec({}, "linux")).toBeUndefined();
+    expect(editorSpec({}, "win32")?.command).toBe("notepad");
+  });
+
+  it("returns what the editor saved", async () => {
+    const { composeInEditor } = await import("../src/cli/Editor.js");
+    const script = join(dir, "fake-editor.mjs");
+    await writeFile(
+      script,
+      [
+        'import { readFileSync, writeFileSync } from "node:fs";',
+        'const file = process.argv[2];',
+        'writeFileSync(file, `${readFileSync(file, "utf8").trim()}\\nand a second line`);',
+      ].join("\n"),
+    );
+    const result = await composeInEditor({
+      initial: "first line",
+      spec: { command: process.execPath, args: [script] },
+    });
+    expect(result.changed).toBe(true);
+    expect(result.text).toContain("and a second line");
+
+    const untouched = await composeInEditor({
+      initial: "same",
+      spec: { command: process.execPath, args: ["-e", "process.exit(0)"] },
+      timeoutMs: 5000,
+    });
+    expect(untouched.changed).toBe(false);
+
+    // The no-editor path must not inherit whatever this machine has configured.
+    const saved = {
+      CARLS_EDITOR: process.env.CARLS_EDITOR,
+      VISUAL: process.env.VISUAL,
+      EDITOR: process.env.EDITOR,
+    };
+    delete process.env.CARLS_EDITOR;
+    delete process.env.VISUAL;
+    delete process.env.EDITOR;
+    try {
+      const noEditor = await composeInEditor({ initial: "x" });
+      expect(noEditor.error).toBe("no editor is configured");
+      expect(noEditor.changed).toBe(false);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }, 20000);
+});
+
 describe("lsp diagnostics", () => {
   /** A language server that answers initialize and pushes one diagnostic. */
   async function writeFakeServer(name: string): Promise<string> {
@@ -2199,6 +2257,8 @@ describe("lsp diagnostics", () => {
         '    const message = JSON.parse(buffer.subarray(start, start + length).toString());',
         '    buffer = buffer.subarray(start + length);',
         '    if (message.method === "initialize") send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { textDocumentSync: 1 } } });',
+        '    if (message.method === "textDocument/hover") send({ jsonrpc: "2.0", id: message.id, result: { contents: { kind: "markdown", value: "**const a: number**" } } });',
+        '    if (message.method === "textDocument/definition") send({ jsonrpc: "2.0", id: message.id, result: [{ uri: message.params.textDocument.uri, range: { start: { line: 4, character: 2 }, end: { line: 4, character: 8 } } }] });',
         '    if (message.method === "textDocument/didOpen") {',
         '      send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri: message.params.textDocument.uri,',
         '        diagnostics: [{ range: { start: { line: 2, character: 4 }, end: { line: 2, character: 9 } }, severity: 1, source: "fake", code: 2322, message: "Type string is not assignable to number" }] } }); }',
@@ -2220,7 +2280,7 @@ describe("lsp diagnostics", () => {
   });
 
   it("reports what the language server pushes for the file", async () => {
-    const { LspDiagnostics } = await import("../src/tools/Lsp.js");
+    const { LspTool } = await import("../src/tools/Lsp.js");
     const workspace = join(dir, "lsp-workspace");
     await mkdir(workspace, { recursive: true });
     const script = await writeFakeServer("ok");
@@ -2232,15 +2292,30 @@ describe("lsp diagnostics", () => {
     context.config.cwd = workspace;
     context.config.lspServers = { ".ts": { command: process.execPath, args: [script] } };
 
-    const result = await new LspDiagnostics().run({ path: "file.ts" }, context);
+    const result = await new LspTool().run({ path: "file.ts" }, context);
     expect(result.ok).toBe(false);
     expect(result.output).toContain("1 diagnostic (1 error)");
     expect(result.output).toContain("file.ts:3:5 error: Type string is not assignable to number");
     expect(result.output).toContain("[2322]");
+
+    const hover = await new LspTool().run({ path: "file.ts", action: "hover", line: 1, character: 7 }, context);
+    expect(hover.ok).toBe(true);
+    expect(hover.output).toContain("**const a: number**");
+
+    const definition = await new LspTool().run(
+      { path: "file.ts", action: "definition", line: 1, character: 7 },
+      context,
+    );
+    expect(definition.ok).toBe(true);
+    expect(definition.output).toContain("file.ts:5:3");
+
+    const noPosition = await new LspTool().run({ path: "file.ts", action: "hover" }, context);
+    expect(noPosition.ok).toBe(false);
+    expect(noPosition.error).toContain("needs a position");
   }, 30000);
 
   it("explains how to configure a server when none is set", async () => {
-    const { LspDiagnostics } = await import("../src/tools/Lsp.js");
+    const { LspTool } = await import("../src/tools/Lsp.js");
     const workspace = join(dir, "lsp-unconfigured");
     await mkdir(workspace, { recursive: true });
     await writeFile(join(workspace, "file.py"), "print(1)\n");
@@ -2248,7 +2323,7 @@ describe("lsp diagnostics", () => {
       cwd: string;
     };
     context.config.cwd = workspace;
-    const result = await new LspDiagnostics().run({ path: "file.py" }, context);
+    const result = await new LspTool().run({ path: "file.py" }, context);
     expect(result.ok).toBe(false);
     expect(result.error).toContain("lspServers");
   });

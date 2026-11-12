@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /**
  * Minimal LSP client.
@@ -73,6 +73,21 @@ export function unframe(buffer: Buffer): { messages: RpcMessage[]; rest: Buffer 
     }
   }
   return { messages, rest };
+}
+
+/** Hover contents arrive as a string, MarkupContent, or an array of both. */
+export function hoverText(contents: unknown): string {
+  if (typeof contents === "string") return contents.trim();
+  if (Array.isArray(contents)) {
+    return contents
+      .map((entry) => hoverText(entry))
+      .filter((entry) => entry.length > 0)
+      .join("\n\n");
+  }
+  if (contents !== null && typeof contents === "object" && "value" in contents) {
+    return String((contents as { value?: unknown }).value ?? "").trim();
+  }
+  return "";
 }
 
 const SEVERITIES = ["error", "warning", "info", "hint"];
@@ -165,7 +180,9 @@ export class LspClient {
         params: {
           processId: process.pid,
           rootUri: pathToFileURL(root).toString(),
-          capabilities: { textDocument: { publishDiagnostics: { relatedInformation: false } } },
+          capabilities: {
+            textDocument: { publishDiagnostics: { relatedInformation: false }, hover: {}, definition: {} },
+          },
           ...(spec.initOptions !== undefined ? { initializationOptions: spec.initOptions } : {}),
         },
       },
@@ -195,6 +212,65 @@ export class LspClient {
       params: { textDocument: { uri, languageId, version: 1, text } },
     });
     return wait;
+  }
+
+  /** Sends didOpen without waiting; the server keeps the document until close. */
+  openDocument(path: string, text: string, languageId: string): string {
+    const uri = pathToFileURL(path).toString();
+    this.notify({
+      method: "textDocument/didOpen",
+      params: { textDocument: { uri, languageId, version: 1, text } },
+    });
+    return uri;
+  }
+
+  /** `textDocument/hover`, reduced to plain text lines. */
+  async hover(path: string, line: number, character: number, timeoutMs: number): Promise<string> {
+    const reply = await this.request(
+      {
+        method: "textDocument/hover",
+        params: {
+          textDocument: { uri: pathToFileURL(path).toString() },
+          position: { line: Math.max(0, line - 1), character: Math.max(0, character - 1) },
+        },
+      },
+      timeoutMs,
+    );
+    const result = reply.result as { contents?: unknown } | null | undefined;
+    return hoverText(result?.contents);
+  }
+
+  /** `textDocument/definition`, as file positions. */
+  async definition(
+    path: string,
+    line: number,
+    character: number,
+    timeoutMs: number,
+  ): Promise<{ path: string; line: number; character: number }[]> {
+    const reply = await this.request(
+      {
+        method: "textDocument/definition",
+        params: {
+          textDocument: { uri: pathToFileURL(path).toString() },
+          position: { line: Math.max(0, line - 1), character: Math.max(0, character - 1) },
+        },
+      },
+      timeoutMs,
+    );
+    const raw = reply.result;
+    const list = Array.isArray(raw) ? raw : raw === null || raw === undefined ? [] : [raw];
+    const locations: { path: string; line: number; character: number }[] = [];
+    for (const entry of list) {
+      const location = entry as { uri?: string; targetUri?: string; range?: { start?: DiagnosticPosition } };
+      const uri = location.uri ?? location.targetUri;
+      if (uri === undefined) continue;
+      locations.push({
+        path: fileURLToPath(uri),
+        line: (location.range?.start?.line ?? 0) + 1,
+        character: (location.range?.start?.character ?? 0) + 1,
+      });
+    }
+    return locations;
   }
 
   private finishAll(): void {
