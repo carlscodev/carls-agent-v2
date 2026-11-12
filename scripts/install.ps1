@@ -23,7 +23,7 @@
 #   -Yes              accept defaults, no prompts
 #
 # One-liner (no clone, no admin when Node.js is present):
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/carlscodev/carls-agent-v2/main/scripts/install.ps1))) -Yes
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/BerunHaider/carls-agent-v2/main/scripts/install.ps1))) -Yes
 #
 # The script is self-bootstrapping: downloaded on its own it fetches the
 # requested ref and re-runs the real installer from inside it.
@@ -50,7 +50,7 @@ $LogFile = Join-Path $env:TEMP "carls-install-$PID.log"
 # --------------------------------------------------------- remote bootstrap
 # `irm ... | iex` has no checkout beside it, so the sources the build needs are
 # missing. Download the ref once and run the real installer from that tree.
-$RepoSlug = if ($env:CARLS_REPO) { $env:CARLS_REPO } else { "carlscodev/carls-agent-v2" }
+$RepoSlug = if ($env:CARLS_REPO) { $env:CARLS_REPO } else { "BerunHaider/carls-agent-v2" }
 $TargetRef = if ($Ref) { $Ref } elseif ($env:CARLS_REF) { $env:CARLS_REF } else { "main" }
 
 if ($env:CARLS_BOOTSTRAPPED -ne "1") {

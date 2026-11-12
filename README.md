@@ -1,6 +1,6 @@
 # carls-code
 
-[![CI](https://github.com/carlscodev/carls-agent-v2/actions/workflows/ci.yml/badge.svg)](https://github.com/carlscodev/carls-agent-v2/actions/workflows/ci.yml)
+[![CI](https://github.com/BerunHaider/carls-agent-v2/actions/workflows/ci.yml/badge.svg)](https://github.com/BerunHaider/carls-agent-v2/actions/workflows/ci.yml)
 
 An autonomous coding agent that runs in your terminal. It reads your repository,
 makes the change, runs your tests, and keeps going until the work actually
@@ -32,13 +32,13 @@ and the provider SDKs.
 Linux and macOS, one line:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/carlscodev/carls-agent-v2/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/BerunHaider/carls-agent-v2/main/scripts/install.sh | bash
 ```
 
 Windows 10/11 (PowerShell, no admin needed when Node.js is present):
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/carlscodev/carls-agent-v2/main/scripts/install.ps1))) -Yes
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/BerunHaider/carls-agent-v2/main/scripts/install.ps1))) -Yes
 ```
 
 Both installers are self-bootstrapping: they download the requested ref

@@ -18,7 +18,7 @@ import { isWindows, userDataDir } from "../utils/platform.js";
  * the risky part is testable without executing it.
  */
 
-export const UPDATE_REPO = "carlscodev/carls-agent-v2";
+export const UPDATE_REPO = "BerunHaider/carls-agent-v2";
 export const UPDATE_RAW_BASE = `https://raw.githubusercontent.com/${UPDATE_REPO}`;
 
 /** How long a cached release check stays fresh. */
