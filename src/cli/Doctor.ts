@@ -5,6 +5,8 @@ import type { ResolvedConfig } from "../config/Config.js";
 import { specFor } from "../config/Config.js";
 import { fetchModels } from "../models/Catalog.js";
 import { discoverLocalBackends } from "../providers/discovery.js";
+import { compareVersions, readUpdateCache } from "../update/Updater.js";
+import { packageVersion } from "../core/Runtime.js";
 
 /**
  * Builds the diagnostic rows shown by `/doctor` and `carls --doctor`. Shared so
@@ -61,6 +63,30 @@ export async function collectDoctorRows(config: ResolvedConfig): Promise<string[
     }
   } catch (error) {
     bad("endpoint", (error as Error).message.slice(0, 90));
+  }
+
+  const mcpEntries = Object.entries(config.mcpServers);
+  if (mcpEntries.length === 0) {
+    rows.push(`${pc.gray("•")} ${"mcp".padEnd(12)} ${pc.gray("no servers configured")}`);
+  } else {
+    // A remote server that is down is the usual reason a tool goes missing, so
+    // name the transport here instead of only counting entries.
+    const summary = mcpEntries
+      .map(([name, server]) => `${name} (${server.transport ?? (server.url !== undefined ? "http" : "stdio")})`)
+      .join(", ");
+    rows.push(`${pc.green("✓")} ${"mcp".padEnd(12)} ${pc.gray(summary)}`);
+  }
+
+  const version = packageVersion();
+  const cached = readUpdateCache();
+  if (cached === undefined) {
+    rows.push(`${pc.gray("•")} ${"update".padEnd(12)} ${pc.gray(`carls ${version} · run carls --update-check`)}`);
+  } else if (compareVersions(cached.latest, version) > 0) {
+    rows.push(
+      `${pc.yellow("•")} ${"update".padEnd(12)} ${pc.gray(`${version} → ${cached.latest} available (carls update)`)}`,
+    );
+  } else {
+    rows.push(`${pc.green("✓")} ${"update".padEnd(12)} ${pc.gray(`${version} is current`)}`);
   }
 
   // Only probe localhost when the configured provider is not already local, so

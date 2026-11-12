@@ -27,6 +27,7 @@ const GLYPH = {
   shell: "$",
   todos: "#",
   subagent: "%",
+  mcp: "⌁",
   default: "•",
   ok: "✓",
   fail: "✖",
@@ -63,6 +64,9 @@ function glyphFor(name: string): { glyph: string; family: number } {
   if (name === "delegate_task" || name === "use_skill" || name === "save_skill") {
     return { glyph: GLYPH.subagent, family: FAMILY.subagent ?? 0 };
   }
+  // Remote tools are namespaced mcp__<server>__<tool>; they get their own glyph
+  // so a call reads as "that other server", not as an unknown tool.
+  if (parseMcpName(name) !== undefined) return { glyph: GLYPH.mcp, family: FAMILY.grep ?? 2 };
   return { glyph: GLYPH.default, family: 0 };
 }
 
@@ -144,6 +148,8 @@ function titleFor(name: string, input: unknown): string {
     case "computer_use":
       return `Computer ${str("action")}${str("key").length > 0 ? ` ${str("key")}` : ""}`;
     default: {
+      const mcp = parseMcpName(name);
+      if (mcp !== undefined) return `MCP ${mcp.server} · ${mcp.tool}`;
       const json = JSON.stringify(input);
       return json === undefined || json === "{}" ? name : `${name} ${truncate(json, 70)}`;
     }
@@ -376,6 +382,15 @@ function ellipsize(lines: string[], total: number, raw: string): string[] {
   }
   kept.push(theme().paint(theme().colors.text.faint, "… truncated"));
   return kept;
+}
+
+/** Splits `mcp__server__tool` into its parts; undefined for a local tool. */
+export function parseMcpName(name: string): { server: string; tool: string } | undefined {
+  if (!name.startsWith("mcp__")) return undefined;
+  const rest = name.slice("mcp__".length);
+  const separator = rest.indexOf("__");
+  if (separator <= 0 || separator + 2 >= rest.length) return undefined;
+  return { server: rest.slice(0, separator), tool: rest.slice(separator + 2) };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

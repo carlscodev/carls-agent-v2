@@ -1,7 +1,7 @@
 import type { ContentBlock, Message, Provider, ToolSchema } from "../types/llm.js";
 import type { AgentRunResult } from "../types/agent.js";
 import type { Checkpoint } from "../types/agent.js";
-import type { ToolContext, ToolResult } from "../types/tools.js";
+import type { Tool, ToolContext, ToolResult } from "../types/tools.js";
 import type { PermissionMode } from "../config/Config.js";
 import { toolCallLine, toolResultLine } from "../cli/ToolView.js";
 import type { ResolvedConfig } from "../config/Config.js";
@@ -14,6 +14,42 @@ import type { Logger } from "../utils/Logger.js";
 import { ContextManager } from "./ContextManager.js";
 import { redact } from "../utils/Logger.js";
 import pc from "picocolors";
+
+/**
+ * How many independent read-only calls one assistant turn may run at once.
+ * Exploration is dominated by wall-clock latency, not CPU: a turn that asks for
+ * grep + five reads + two sub-agents used to pay for every one of them in
+ * series. Six keeps a local endpoint and the permission gate comfortable.
+ */
+const MAX_PARALLEL_TOOLS = 6;
+
+/**
+ * Runs `fn` over every item with at most `limit` in flight, preserving the
+ * input order in the result so tool_result blocks still line up with the
+ * tool_use blocks that produced them.
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(limit, items.length)) },
+    async () => {
+      for (;;) {
+        const index = next++;
+        if (index >= items.length) return;
+        const item = items[index];
+        if (item === undefined) return;
+        results[index] = await fn(item);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
+}
 
 export interface AgentLoopDeps {
   provider: Provider;
@@ -72,6 +108,55 @@ export class AgentLoop {
   /** The registry whose schemas go to the model. */
   private advertised(): ToolRegistry {
     return this.deps.advertise ?? this.deps.registry;
+  }
+
+  /**
+   * True when a call can run alongside the other calls of the same turn. Only
+   * read-only tools qualify: a write or a shell command could change what a
+   * sibling call observes, so those stay ordered and alone.
+   */
+  private parallelSafe(name: string): boolean {
+    const tool: Tool | undefined = this.deps.registry.get(name);
+    return tool !== undefined && tool.readOnly;
+  }
+
+  /**
+   * Runs one tool call, renders it, and returns the observation block to feed
+   * back to the model. Never throws, so a batch of parallel calls cannot reject
+   * half-way and drop the results of the calls that already finished.
+   */
+  private async runToolUse(
+    toolUse: Extract<ContentBlock, { type: "tool_use" }>,
+    ctx: ToolContext,
+    options: RunOptions,
+    filesTouched: Set<string>,
+  ): Promise<ContentBlock> {
+    if (!options.silent) process.stderr.write(`\n${toolCallLine(toolUse.name, toolUse.input)}\n`);
+
+    let result: ToolResult;
+    try {
+      result = await this.executeTool(toolUse.name, toolUse.input, ctx);
+    } catch (error) {
+      result = { ok: false, output: "", error: `Tool ${toolUse.name} failed: ${(error as Error).message}` };
+    }
+
+    if (!options.silent) process.stderr.write(`${toolResultLine(toolUse.name, result)}\n`);
+    options.onToolResult?.(toolUse.name, result);
+
+    if (result.ok) {
+      const path = result.metadata?.path;
+      if (typeof path === "string") filesTouched.add(path);
+    }
+
+    const body = result.ok
+      ? result.output
+      : `${result.error ?? "error"}\n${result.output}`.trim();
+    return {
+      type: "tool_result",
+      tool_use_id: toolUse.id,
+      content: this.deps.contextManager.truncateObservation(redact(body)),
+      is_error: !result.ok,
+    };
   }
 
   private async summarize(
@@ -277,28 +362,26 @@ export class AgentLoop {
         return { steps: step + 1, finalText: text, stoppedReason: "completed" };
       }
 
+      // Consecutive read-only calls are independent, so they run together;
+      // a call with a side effect breaks the batch and runs on its own.
       const results: ContentBlock[] = [];
-      for (const toolUse of toolUses) {
-        if (!options.silent) process.stderr.write(`\n${toolCallLine(toolUse.name, toolUse.input)}\n`);
-        const result = await this.executeTool(toolUse.name, toolUse.input, ctx);
-        if (!options.silent) process.stderr.write(`${toolResultLine(toolUse.name, result)}\n`);
-        options.onToolResult?.(toolUse.name, result);
-
-        if (result.ok) {
-          const path = result.metadata?.path;
-          if (typeof path === "string") filesTouched.add(path);
+      for (let index = 0; index < toolUses.length; ) {
+        const first = toolUses[index];
+        if (first === undefined) break;
+        const batch = [first];
+        if (this.parallelSafe(first.name)) {
+          while (index + batch.length < toolUses.length) {
+            const next = toolUses[index + batch.length];
+            if (next === undefined || !this.parallelSafe(next.name)) break;
+            batch.push(next);
+          }
         }
+        index += batch.length;
 
-        const body = result.ok
-          ? result.output
-          : `${result.error ?? "error"}\n${result.output}`.trim();
-        const observation = this.deps.contextManager.truncateObservation(redact(body));
-        results.push({
-          type: "tool_result",
-          tool_use_id: toolUse.id,
-          content: observation,
-          is_error: !result.ok,
-        });
+        const blocks = await mapWithConcurrency(batch, MAX_PARALLEL_TOOLS, (toolUse) =>
+          this.runToolUse(toolUse, ctx, options, filesTouched),
+        );
+        results.push(...blocks);
       }
 
       const userMessage: Message = { role: "user", content: results };

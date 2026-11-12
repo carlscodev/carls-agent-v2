@@ -16,7 +16,10 @@ Eight subsystems make the difference between a toy and a harness:
 1. **Gather-Act-Verify loop** (`src/core/AgentLoop.ts`). Each turn the agent
    explores with read-only tools, applies a change, then runs the project's
    tests, linter or compiler and fixes failures until they pass or it hits
-   `--max-steps`.
+   `--max-steps`. Independent read-only calls issued in the same turn (reads,
+   greps, globs, sub-agents) execute in parallel up to six at a time, so a turn
+   pays for its slowest observation instead of the sum of all of them; anything
+   with a side effect stays strictly ordered.
 2. **Context compactor** (`src/core/ContextManager.ts`). Tracks an estimated
    token budget. Past 75% of the window it folds earlier turns into a
    structured checkpoint (goal, files touched, errors resolved, next step) and
@@ -56,11 +59,44 @@ truecolor to 256 colours automatically and is dropped entirely under
 
 ## Install
 
-One command, any Linux, no exceptions:
+Public repository: **https://github.com/carlscodev/carls-agent-v2**
+
+### Linux and macOS, one line
 
 ```bash
-./scripts/install.sh
+curl -fsSL https://raw.githubusercontent.com/carlscodev/carls-agent-v2/main/scripts/install.sh | bash
 ```
+
+Unattended, with a provider preset and no prompts:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/carlscodev/carls-agent-v2/main/scripts/install.sh \
+  | bash -s -- --yes --provider anthropic
+```
+
+`wget` works too: `wget -qO- https://raw.githubusercontent.com/carlscodev/carls-agent-v2/main/scripts/install.sh | bash`.
+Pin a release instead of the moving `main` with `--ref v0.2.0`.
+
+### Windows 10 and 11, one line
+
+PowerShell — no administrator rights needed when Node.js is already installed:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/carlscodev/carls-agent-v2/main/scripts/install.ps1))) -Yes
+```
+
+Or save it and pass flags:
+
+```powershell
+irm https://raw.githubusercontent.com/carlscodev/carls-agent-v2/main/scripts/install.ps1 -OutFile "$env:TEMP\carls-install.ps1"
+& "$env:TEMP\carls-install.ps1" -Provider nvidia
+& "$env:TEMP\carls-install.ps1" -Uninstall
+```
+
+Both installers are self-bootstrapping: piped or saved on its own, the script
+downloads the requested tag or branch (`--ref`, default `main`), builds it and
+installs it, so no clone is needed. From a checkout, `./scripts/install.sh` and
+`.\scripts\install.ps1` install that working tree instead.
 
 The installer detects the distribution and package manager, installs Node.js
 (from the distro when possible, otherwise the official static build), compiles
@@ -76,15 +112,26 @@ shared config at `/opt/carls/.carlsrc.json` is world-readable by design, so a ke
 placed there is visible to every account: leave `apiKey` out and export the
 provider's variable instead, which is what `--doctor` recommends.
 
-On Windows 10 and 11, run the PowerShell installer. It needs no administrator
-rights when Node.js is already present, and otherwise installs it with winget,
-Chocolatey or the official MSI:
+On Windows the installer uses winget, then Chocolatey, then the official MSI when
+Node.js is missing, writes a `carls.cmd` shim into `%LOCALAPPDATA%\carls\bin`,
+adds it to the user `PATH` and restricts the config ACL.
 
-```powershell
-.\scripts\install.ps1
-.\scripts\install.ps1 -Provider nvidia -ApiKey $env:NVIDIA_API_KEY
-.\scripts\install.ps1 -Uninstall
+## Update
+
+`carls update` compares the installed version with the latest GitHub release and
+reinstalls that exact tag when a newer one exists, so an update can never land on
+a different build than the one it reported. Nothing else to learn:
+
+```bash
+carls update              # install the latest release
+carls update --check      # only report current vs latest
+carls update --ref v0.2.0 # reinstall a specific tag
 ```
+
+Inside the REPL it is `/update [--check]`. Once a day the interactive startup
+prints one line on stderr when a newer release exists; set
+`CARLS_NO_UPDATE_CHECK=1` to silence the check entirely. `/doctor` shows the
+cached answer without going to the network.
 
 Manual install (any platform):
 
@@ -139,6 +186,8 @@ carls --help
 | `/todo` | The agent's current plan |
 | `/agent <goal>` | Run an isolated sub-agent and print its conclusion |
 | `/tools`, `/diff`, `/sessions`, `/resume`, `/clear`, `/compact`, `/retry` | Inspection and session control |
+| `/mcp` | Connected MCP servers, their transport and their tool counts |
+| `/update [--check]` | Install the latest release, or only report whether one exists |
 | `/setup`, `/providers` | Re-run the provider wizard, or list every provider with its credential variable |
 | `/theme [dark\|light]` | Show or switch the colour theme |
 | `/config`, `/doctor`, `/init`, `/cost`, `/help`, `/exit` | Setup and housekeeping |
@@ -208,10 +257,31 @@ systemd); use the env var when you prefer to keep secrets out of the file.
   },
   "hooks": { "preToolUse": ["node scripts/guard.mjs"], "postToolUse": [] },
   "mcpServers": {
-    "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] }
+    "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] },
+    "docs": { "url": "https://example.com/mcp" },
+    "legacy": { "url": "https://example.com/sse", "transport": "sse" }
   }
 }
 ```
+
+### MCP
+
+MCP servers add tools to the agent. Three transports are supported:
+
+- **stdio** (default when `command` is set): newline-delimited JSON on a child
+  process, for the usual `npx`/`uvx` servers.
+- **http** (default when `url` is set): Streamable HTTP, the current spec. Each
+  request is a POST and the answer comes back as JSON or as a single-use SSE
+  stream; the `Mcp-Session-Id` returned on the handshake is echoed back.
+- **sse**: the older two-endpoint transport (`transport: "sse"`), where a GET
+  stream announces the POST endpoint and answers arrive as `message` events.
+
+Remote servers can authenticate with `CARLS_MCP_TOKEN` (sent as a bearer token)
+or with an `Authorization`/`MCP_TOKEN` entry under the server's `env`. A tool
+whose descriptor carries `annotations.readOnlyHint: true` runs in parallel with
+other read-only calls; everything else stays sequential. Duplicate tool names
+across servers are skipped with a warning instead of breaking startup, and
+`/mcp` shows what actually connected.
 
 ### Hooks
 

@@ -11,6 +11,7 @@ import { needsOnboarding, runOnboarding } from "./setup/Onboarding.js";
 import { formatProviderTable } from "./cli/ProviderList.js";
 import { enableWindowsVirtualTerminal } from "./utils/platform.js";
 import { collectDoctorRows } from "./cli/Doctor.js";
+import { announceUpdate, runUpdate } from "./update/Updater.js";
 
 async function main(): Promise<number> {
   // Windows consoles need this before any ANSI colour or cursor control works.
@@ -45,6 +46,15 @@ async function main(): Promise<number> {
     const loaded = loadConfig(args.overrides);
     process.stdout.write(`${(await collectDoctorRows(loaded)).join("\n")}\n`);
     return 0;
+  }
+  if (args.update) {
+    // Updating must not need a provider, a key or an onboarded config: a broken
+    // install is exactly when it is needed.
+    return runUpdate({
+      check: args.updateCheck,
+      ...(args.updateRef !== undefined ? { ref: args.updateRef } : {}),
+      ...(args.updateDryRun === true ? { dryRun: true } : {}),
+    });
   }
 
   // First run, or an explicit request: run setup before anything else so the
@@ -115,6 +125,10 @@ async function main(): Promise<number> {
       printInfo("No prior session found for this directory; starting fresh.");
     }
   }
+
+  // Fire-and-forget: one cached GitHub call per 24h, stderr only, never awaited
+  // so a slow or blocked network cannot delay the prompt.
+  void announceUpdate();
 
   const code = await runRepl({
     config,

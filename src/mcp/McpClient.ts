@@ -1,15 +1,13 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { McpServerConfig } from "../config/Config.js";
 import type { Tool, ToolContext, ToolResult } from "../types/tools.js";
 import type { ToolSchema } from "../types/llm.js";
 import type { Logger } from "../utils/Logger.js";
-
-interface JsonRpcRequest {
-  jsonrpc: "2.0";
-  id: number;
-  method: string;
-  params?: unknown;
-}
+import {
+  HttpTransport,
+  SseTransport,
+  StdioTransport,
+  type McpTransport,
+} from "./transports.js";
 
 interface JsonRpcResponse {
   jsonrpc: "2.0";
@@ -18,142 +16,143 @@ interface JsonRpcResponse {
   error?: { code: number; message: string };
 }
 
-interface McpToolDescriptor {
+export interface McpToolDescriptor {
   name: string;
   description?: string;
   inputSchema?: Record<string, unknown>;
   annotations?: { readOnlyHint?: boolean };
 }
 
+export interface McpServerInfo {
+  name: string;
+  version?: string;
+  protocolVersion?: string;
+}
+
 const CALL_TIMEOUT_MS = 60000;
+const INIT_TIMEOUT_MS = 20000;
 
 /**
- * Minimal Model Context Protocol client over stdio. Implements the handshake,
- * tool discovery and tool invocation. Messages are newline-delimited JSON-RPC
- * as required by the stdio transport.
+ * Model Context Protocol client.
+ *
+ * The protocol core lives here — handshake, request/response correlation by id,
+ * tool discovery, invocation — and the wire is a `McpTransport`. That way a
+ * local stdio server, a server that only speaks SSE and a Streamable HTTP
+ * endpoint are the same code path with the same timeouts and error handling.
  */
 export class McpClient {
   readonly serverName: string;
-  private readonly child: ChildProcessWithoutNullStreams;
+  readonly transportKind: "stdio" | "sse" | "http";
+  private readonly transport: McpTransport;
   private readonly logger: Logger;
-  private buffer = "";
   private nextId = 1;
-  private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private readonly pending = new Map<
+    number,
+    { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
+  >();
   private readonly tools: McpToolDescriptor[] = [];
   private closed = false;
+  private info: McpServerInfo | undefined;
 
   constructor(serverName: string, config: McpServerConfig, logger: Logger, cwd: string) {
     this.serverName = serverName;
     this.logger = logger;
-    this.child = spawn(config.command, config.args ?? [], {
-      cwd,
-      env: { ...process.env, ...(config.env ?? {}) },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    this.transport = buildTransport(serverName, config, logger, cwd);
+    this.transportKind = this.transport.kind;
+  }
 
-    this.child.stdout.setEncoding("utf8");
-    this.child.stdout.on("data", (chunk: string) => this.onData(chunk));
-    this.child.stderr.setEncoding("utf8");
-    this.child.stderr.on("data", (chunk: string) => this.logger.debug(`[mcp:${serverName}] ${chunk.trim()}`));
-    this.child.on("error", (error) => this.failAll(new Error(`MCP server "${serverName}" error: ${error.message}`)));
-    this.child.on("close", () => {
-      this.closed = true;
-      this.failAll(new Error(`MCP server "${serverName}" closed.`));
-    });
+  /** Server name and version as reported during the handshake, for /mcp. */
+  serverInfo(): McpServerInfo | undefined {
+    return this.info;
   }
 
   private failAll(error: Error): void {
-    for (const { reject } of this.pending.values()) reject(error);
+    for (const entry of this.pending.values()) {
+      clearTimeout(entry.timer);
+      entry.reject(error);
+    }
     this.pending.clear();
   }
 
-  private onData(chunk: string): void {
-    this.buffer += chunk;
-    let index = this.buffer.indexOf("\n");
-    while (index !== -1) {
-      const line = this.buffer.slice(0, index).trim();
-      this.buffer = this.buffer.slice(index + 1);
-      if (line.length > 0) this.handleLine(line);
-      index = this.buffer.indexOf("\n");
-    }
-  }
-
-  private handleLine(line: string): void {
-    let message: JsonRpcResponse;
-    try {
-      message = JSON.parse(line) as JsonRpcResponse;
-    } catch {
-      this.logger.debug(`[mcp:${this.serverName}] non-JSON output: ${line.slice(0, 200)}`);
-      return;
-    }
-    if (typeof message.id !== "number") return;
-    const entry = this.pending.get(message.id);
-    if (!entry) return;
-    this.pending.delete(message.id);
-    if (message.error) {
-      entry.reject(new Error(`MCP error ${message.error.code}: ${message.error.message}`));
+  private handleMessage(message: unknown): void {
+    if (message === null || typeof message !== "object") return;
+    const response = message as JsonRpcResponse;
+    if (typeof response.id !== "number") return;
+    const entry = this.pending.get(response.id);
+    if (entry === undefined) return;
+    this.pending.delete(response.id);
+    clearTimeout(entry.timer);
+    if (response.error !== undefined) {
+      entry.reject(new Error(`MCP error ${response.error.code}: ${response.error.message}`));
     } else {
-      entry.resolve(message.result);
+      entry.resolve(response.result);
     }
   }
 
-  private send(method: string, params?: unknown): Promise<unknown> {
+  request(method: string, params: unknown, timeoutMs = CALL_TIMEOUT_MS): Promise<unknown> {
     if (this.closed) return Promise.reject(new Error(`MCP server "${this.serverName}" is closed.`));
     const id = this.nextId++;
-    const request: JsonRpcRequest = { jsonrpc: "2.0", id, method };
-    if (params !== undefined) request.params = params;
+    const message: Record<string, unknown> = { jsonrpc: "2.0", id, method };
+    if (params !== undefined) message.params = params;
 
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`MCP request "${method}" timed out after ${CALL_TIMEOUT_MS}ms.`));
-      }, CALL_TIMEOUT_MS);
+        reject(new Error(`MCP request "${method}" timed out after ${timeoutMs}ms.`));
+      }, timeoutMs);
 
-      this.pending.set(id, {
-        resolve: (value) => {
-          clearTimeout(timer);
-          resolve(value);
-        },
-        reject: (error) => {
-          clearTimeout(timer);
-          reject(error);
-        },
-      });
+      this.pending.set(id, { resolve, reject, timer });
 
-      this.child.stdin.write(`${JSON.stringify(request)}\n`, (error) => {
-        if (error) {
-          this.pending.delete(id);
-          clearTimeout(timer);
-          reject(error);
-        }
+      this.transport.send(message, timeoutMs).catch((error: unknown) => {
+        const entry = this.pending.get(id);
+        if (entry === undefined) return;
+        this.pending.delete(id);
+        clearTimeout(entry.timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
       });
     });
   }
 
-  private notify(method: string, params?: unknown): void {
-    const message = { jsonrpc: "2.0", method, ...(params !== undefined ? { params } : {}) };
-    this.child.stdin.write(`${JSON.stringify(message)}\n`);
+  notify(method: string, params?: unknown): void {
+    if (this.closed) return;
+    const message: Record<string, unknown> = { jsonrpc: "2.0", method };
+    if (params !== undefined) message.params = params;
+    // A notification has no response to correlate, so a transport error here is
+    // only worth a debug line; the next request will surface a real failure.
+    void this.transport.send(message, CALL_TIMEOUT_MS).catch((error: unknown) => {
+      this.logger.debug(`[mcp:${this.serverName}] notify ${method} failed: ${(error as Error).message}`);
+    });
   }
 
   async initialize(): Promise<void> {
-    await this.send("initialize", {
-      protocolVersion: "2024-11-05",
-      capabilities: { tools: {} },
-      clientInfo: { name: "carls-code", version: "0.1.0" },
-    });
+    await this.transport.start((message) => this.handleMessage(message));
+    const result = (await this.request(
+      "initialize",
+      {
+        protocolVersion: "2025-03-26",
+        capabilities: { tools: {} },
+        clientInfo: { name: "carls-code", version: "0.1.0" },
+      },
+      INIT_TIMEOUT_MS,
+    )) as { serverInfo?: { name?: string; version?: string }; protocolVersion?: string } | undefined;
+
+    const info: McpServerInfo = { name: this.serverName };
+    if (result?.serverInfo?.version !== undefined) info.version = result.serverInfo.version;
+    if (result?.protocolVersion !== undefined) info.protocolVersion = result.protocolVersion;
+    this.info = info;
     this.notify("notifications/initialized");
   }
 
   async listTools(): Promise<McpToolDescriptor[]> {
-    const result = (await this.send("tools/list")) as { tools?: McpToolDescriptor[] } | undefined;
+    const result = (await this.request("tools/list", {}) as { tools?: McpToolDescriptor[] } | undefined) ?? {};
     this.tools.length = 0;
-    this.tools.push(...(result?.tools ?? []));
+    this.tools.push(...(result.tools ?? []));
     return this.tools;
   }
 
   async callTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
     try {
-      const result = (await this.send("tools/call", { name, arguments: args })) as
+      const result = (await this.request("tools/call", { name, arguments: args })) as
         | { content?: { type: string; text?: string }[]; isError?: boolean }
         | undefined;
       const text = (result?.content ?? [])
@@ -175,8 +174,45 @@ export class McpClient {
 
   close(): void {
     this.closed = true;
-    this.child.kill("SIGTERM");
+    this.failAll(new Error(`MCP server "${this.serverName}" closed.`));
+    this.transport.close();
   }
+}
+
+/**
+ * Picks the wire the config asks for. A `url` with no transport means Streamable
+ * HTTP, because that is the current spec; `transport: "sse"` is the older
+ * two-endpoint variant.
+ */
+export function buildTransport(
+  serverName: string,
+  config: McpServerConfig,
+  logger: Logger,
+  cwd: string,
+): McpTransport {
+  if (config.url !== undefined && config.url.length > 0) {
+    const headers = remoteHeaders(config.env);
+    if (config.transport === "sse") {
+      return new SseTransport({ url: config.url, headers, logger, serverName });
+    }
+    return new HttpTransport({ url: config.url, headers, logger, serverName });
+  }
+  if (config.command !== undefined && config.command.length > 0) {
+    return new StdioTransport({
+      command: config.command,
+      args: config.args ?? [],
+      cwd,
+      env: config.env ?? {},
+      logger,
+      serverName,
+    });
+  }
+  throw new Error(`MCP server "${serverName}" needs either "command" (stdio) or "url" (sse/http).`);
+}
+
+function remoteHeaders(env: Record<string, string> | undefined): Record<string, string> {
+  const token = env?.["Authorization"] ?? env?.["MCP_TOKEN"] ?? process.env.CARLS_MCP_TOKEN;
+  return token !== undefined && token.length > 0 ? { authorization: token } : {};
 }
 
 class McpTool implements Tool<Record<string, unknown>> {

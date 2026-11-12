@@ -7,10 +7,15 @@
 # prefix that every user can reach.
 #
 # Usage:
+#   curl -fsSL https://raw.githubusercontent.com/carlscodev/carls-agent-v2/main/scripts/install.sh | bash
 #   ./scripts/install.sh                    interactive panel
 #   ./scripts/install.sh --yes              accept all defaults, no prompts
 #   ./scripts/install.sh --prefix /opt/carls --mode build
 #   ./scripts/install.sh --uninstall        remove carls
+#
+# The script is self-bootstrapping: run from a checkout it uses that tree, and
+# piped from curl it downloads the requested tag/branch first and re-executes
+# itself from inside it. That is why the one-liner works with no clone.
 #
 # Flags:
 #   -y, --yes            non-interactive; use defaults for anything unspecified
@@ -25,14 +30,74 @@
 #       --context-window <n>  model context window in tokens (default 200000)
 #       --no-node        never install Node, fail if it is missing
 #       --uninstall      remove the install prefix and symlinks
+#       --ref <ref>      git tag or branch to install (default: main; the updater
+#                        passes the release tag here)
 #   -h, --help           show this help
 
 set -o pipefail
 
 PREFIX="${CARLS_PREFIX:-}"
 
-# Shared helpers that have their own tests. Sourcing keeps them honest.
 carls_script_dir="$(cd "$(dirname "$0")" && pwd)"
+
+# --------------------------------------------------------- remote bootstrap
+# `curl ... | bash` leaves $0 = bash, so neither scripts/lib/ nor src/ exists
+# next to the script and the normal install path cannot work. Pull the ref once
+# and re-exec the real script from inside the downloaded tree.
+CARLS_REPO="${CARLS_REPO:-carlscodev/carls-agent-v2}"
+CARLS_REF="${CARLS_REF:-main}"
+
+# --ref must be honoured before the tree exists, so scan it here; the parser
+# below accepts it again for a checkout run.
+carls_prev=""
+for carls_arg in "$@"; do
+  if [ "$carls_prev" = "--ref" ]; then CARLS_REF="$carls_arg"; fi
+  case "$carls_arg" in --ref=*) CARLS_REF="${carls_arg#--ref=}" ;; esac
+  carls_prev="$carls_arg"
+done
+unset carls_prev carls_arg
+
+carls_download() {
+  # carls_download <url> <dest>
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$1" -o "$2"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$2" "$1"
+  else
+    return 1
+  fi
+}
+
+carls_needs_bootstrap() {
+  [ "${CARLS_BOOTSTRAPPED:-0}" = "1" ] && return 1
+  [ -f "$carls_script_dir/lib/node-bin.sh" ] || return 0
+  [ -f "$carls_script_dir/../package.json" ] || return 0
+  return 1
+}
+
+if carls_needs_bootstrap; then
+  printf '· fetching carls-code %s from %s\n' "$CARLS_REF" "$CARLS_REPO"
+  carls_tmp="$(mktemp -d "${TMPDIR:-/tmp}/carls-bootstrap.XXXXXX")" || {
+    printf '✗ cannot create a temporary directory\n' >&2; exit 1
+  }
+  carls_ok=0
+  if carls_download "https://codeload.github.com/$CARLS_REPO/tar.gz/$CARLS_REF" "$carls_tmp/src.tgz"; then
+    if tar xzf "$carls_tmp/src.tgz" -C "$carls_tmp" --strip-components=1 2>/dev/null; then carls_ok=1; fi
+  fi
+  if [ "$carls_ok" -eq 0 ] && command -v git >/dev/null 2>&1; then
+    if git clone --depth 1 --branch "$CARLS_REF" "https://github.com/$CARLS_REPO.git" "$carls_tmp/repo" >/dev/null 2>&1; then
+      carls_tmp="$carls_tmp/repo"; carls_ok=1
+    fi
+  fi
+  if [ "$carls_ok" -eq 0 ] || [ ! -f "$carls_tmp/scripts/install.sh" ]; then
+    printf '✗ could not download %s at %s. Check the ref name, or run from a clone.\n' "$CARLS_REPO" "$CARLS_REF" >&2
+    exit 1
+  fi
+  export CARLS_BOOTSTRAPPED=1 CARLS_REF
+  exec bash "$carls_tmp/scripts/install.sh" "$@"
+fi
+
+# Shared helpers that have their own tests. Sourcing keeps them honest.
 # shellcheck source=scripts/lib/node-bin.sh
 . "$carls_script_dir/lib/node-bin.sh"
 MODE=""
@@ -565,6 +630,7 @@ while [ $# -gt 0 ]; do
     --base-url) BASE_URL="$2"; shift ;;
     --api-key) API_KEY="$2"; shift ;;
     --no-node) INSTALL_NODE=0 ;;
+    --ref) CARLS_REF="$2"; shift ;;
     --uninstall) DO_UNINSTALL=1 ;;
     -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "Unknown flag $1 (try --help)" ;;

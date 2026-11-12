@@ -17,6 +17,7 @@ import { formatProviderTable } from "./ProviderList.js";
 import { collectDoctorRows } from "./Doctor.js";
 import { loadConfig, specFor } from "../config/Config.js";
 import { apiKeyEnvFor } from "../config/Config.js";
+import { runUpdate } from "../update/Updater.js";
 
 export interface CommandContext {
   runtime: Runtime;
@@ -491,11 +492,24 @@ export const COMMANDS: CommandSpec[] = [
     name: "/tools",
     summary: "List the tools the agent can call",
     run: (_args, ctx) => {
+      const advertised = new Set(ctx.runtime.advertisedTools().names());
       const rows = ctx.runtime.registry.list().map((tool) => {
         const kind = tool.category ?? (tool.readOnly ? "read" : "write");
-        return `${pc.cyan(kind.padEnd(5))} ${tool.name.padEnd(16)} ${pc.gray(tool.description.slice(0, 64))}`;
+        // Read-only tools run in parallel within one turn, which is worth
+        // showing because it is what makes a batched exploration fast.
+        const parallel = tool.readOnly ? pc.green("⇉") : " ";
+        const hidden = advertised.has(tool.name) ? " " : pc.yellow("h");
+        return `${pc.cyan(kind.padEnd(5))} ${parallel}${hidden} ${tool.name.padEnd(20)} ${pc.gray(tool.description.slice(0, 58))}`;
       });
-      printPanel("Tools", rows);
+      const mcp = ctx.runtime.mcpServers();
+      printPanel("Tools", [
+        ...rows,
+        "",
+        pc.gray("⇉ runs in parallel   h callable but not advertised to the model"),
+        ...(mcp.length > 0
+          ? [pc.gray(`MCP: ${mcp.map((server) => `${server.name} (${server.transport}, ${server.tools})`).join(", ")}`)]
+          : []),
+      ]);
       return false;
     },
   },
@@ -704,6 +718,43 @@ export const COMMANDS: CommandSpec[] = [
       }
       refreshTheme(requested);
       printInfo(`Theme set to ${pc.bold(requested)}.`);
+      return false;
+    },
+  },
+  {
+    name: "/mcp",
+    summary: "Show the connected MCP servers and their tools",
+    run: (_args, ctx) => {
+      const servers = ctx.runtime.mcpServers();
+      const configured = Object.entries(ctx.runtime.config.mcpServers);
+      if (configured.length === 0 && servers.length === 0) {
+        printPanel("MCP", [
+          "No servers configured.",
+          pc.gray('Add them under "mcpServers" in .carlsrc.json:'),
+          pc.gray('  stdio: { "command": "npx", "args": ["-y", "some-mcp-server"] }'),
+          pc.gray('  http:  { "url": "https://example.com/mcp" }'),
+          pc.gray('  sse:   { "url": "https://example.com/sse", "transport": "sse" }'),
+        ]);
+        return false;
+      }
+      const rows = servers.map((server) => {
+        const version = server.version !== undefined ? pc.gray(` v${server.version}`) : "";
+        return `${pc.green("✓")} ${pc.bold(server.name)}${version} ${pc.cyan(server.transport)} · ${server.tools} tools`;
+      });
+      const failed = configured
+        .map(([name]) => name)
+        .filter((name) => !servers.some((server) => server.name === name))
+        .map((name) => `${pc.red("✗")} ${name} ${pc.gray("not connected")}`);
+      printPanel("MCP", [...rows, ...failed]);
+      return false;
+    },
+  },
+  {
+    name: "/update",
+    usage: "/update [--check]",
+    summary: "Install the latest release (or only check for one)",
+    run: async (args) => {
+      await runUpdate({ check: args.includes("--check") || args.includes("check") });
       return false;
     },
   },

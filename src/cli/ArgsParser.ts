@@ -16,14 +16,22 @@ export interface ParsedArgs {
   listProviders: boolean;
   /** Print the diagnostic panel and exit. */
   doctor: boolean;
+  /** Install the latest published release, then exit. */
+  update: boolean;
+  /** With --update: report whether a newer release exists. */
+  updateCheck: boolean;
+  /** With --update: pin a release tag instead of asking GitHub. */
+  updateRef?: string;
+  /** With --update: print the plan without installing. */
+  updateDryRun?: boolean;
   /** API key supplied on the command line (setup only; prefer the env var). */
   apiKey?: string;
 }
 
 export class ArgError extends Error {}
 
-export function parseArgs(argv: string[]): ParsedArgs {
-  const parsed: ParsedArgs = {
+function emptyParsed(): ParsedArgs {
+  return {
     help: false,
     version: false,
     overrides: {},
@@ -31,7 +39,47 @@ export function parseArgs(argv: string[]): ParsedArgs {
     setup: false,
     listProviders: false,
     doctor: false,
+    update: false,
+    updateCheck: false,
   };
+}
+
+/**
+ * `carls update [--check] [--ref <tag>]` is a subcommand, so it is parsed before
+ * the generic flags. Without this the word "update" was read as a prompt.
+ */
+function parseUpdateCommand(argv: string[]): ParsedArgs {
+  const parsed = emptyParsed();
+  parsed.update = true;
+  for (let index = 1; index < argv.length; index++) {
+    const flag = argv[index];
+    if (flag === undefined) continue;
+    if (flag === "--check" || flag === "--update-check" || flag === "--check-updates") {
+      parsed.updateCheck = true;
+    } else if (flag === "--ref") {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("--")) {
+        throw new ArgError("--ref requires a release tag, e.g. --ref v0.2.0");
+      }
+      parsed.updateRef = value;
+      index++;
+    } else if (flag.startsWith("--ref=")) {
+      parsed.updateRef = flag.slice("--ref=".length);
+    } else if (flag === "--dry-run") {
+      parsed.updateDryRun = true;
+    } else if (flag === "--help" || flag === "-h") {
+      parsed.help = true;
+    } else {
+      throw new ArgError(`Unknown flag "${flag}" for update. Try carls update --check.`);
+    }
+  }
+  return parsed;
+}
+
+export function parseArgs(argv: string[]): ParsedArgs {
+  if (argv[0] === "update") return parseUpdateCommand(argv);
+
+  const parsed: ParsedArgs = emptyParsed();
   const positionals: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -117,6 +165,18 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--doctor":
         parsed.doctor = true;
         break;
+      case "--update":
+        parsed.update = true;
+        break;
+      case "--update-check":
+      case "--check-updates":
+        parsed.update = true;
+        parsed.updateCheck = true;
+        break;
+      case "--ref":
+        parsed.update = true;
+        parsed.updateRef = next(arg);
+        break;
       case "--api-key":
         parsed.apiKey = next(arg);
         parsed.setup = true;
@@ -195,6 +255,9 @@ OPTIONS
       --api-key <key>         Key for the setup wizard (prefer the env var)
       --providers             List every bundled provider and exit
       --doctor                Check config, credentials and connectivity, then exit
+      --update                Install the latest published release, then exit
+      --update-check          Report whether a newer release exists
+      --ref <tag>             With --update: install a specific release tag
       --debug                 Verbose diagnostics on stderr
 
 MODES
@@ -226,5 +289,6 @@ REPL COMMANDS
   /compact   /clear             /retry         /doctor
   /config    /permissions       /init          /exit
   /setup     /providers         /skills        /todo
+  /mcp       /update [--check]
   !<command>  run a shell command in the workspace
 `;

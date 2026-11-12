@@ -9,6 +9,17 @@ const inputSchema = z.object({
   pattern: z.string().describe("JavaScript regular expression to search for."),
   glob: z.string().optional().describe("Optional file glob to restrict the search (default '**/*')."),
   max_results: z.number().int().positive().optional().describe("Max matching lines (default 100)."),
+  case_sensitive: z
+    .boolean()
+    .optional()
+    .describe("Set false to ignore case. Default is case-sensitive, as written."),
+  context: z
+    .number()
+    .int()
+    .min(0)
+    .max(5)
+    .optional()
+    .describe("Lines of surrounding context per match (default 0). Context lines are marked with a trailing dash."),
 });
 
 type Input = z.infer<typeof inputSchema>;
@@ -37,9 +48,10 @@ export class GrepSearch implements Tool<Input> {
 
   async run(input: Input, ctx: ToolContext): Promise<ToolResult> {
     const maxResults = input.max_results ?? 100;
+    const context = input.context ?? 0;
     let regex: RegExp;
     try {
-      regex = new RegExp(input.pattern);
+      regex = new RegExp(input.pattern, input.case_sensitive === false ? "i" : "");
     } catch (error) {
       return { ok: false, output: "", error: `Invalid regex: ${(error as Error).message}` };
     }
@@ -71,6 +83,9 @@ export class GrepSearch implements Tool<Input> {
         if (content.length > MAX_FILE_BYTES || content.includes("\u0000")) continue;
 
         const lines = content.split("\n");
+        // Context windows can overlap, so each line is emitted at most once per
+        // file and a match always wins over being shown as context.
+        const emitted = new Set<number>();
         for (let index = 0; index < lines.length; index++) {
           if (results.length >= maxResults) {
             truncated = true;
@@ -78,10 +93,25 @@ export class GrepSearch implements Tool<Input> {
           }
           const line = lines[index] ?? "";
           const match = regex.exec(line);
-          if (match) {
-            const column = match.index + 1;
-            results.push(`${file}:${index + 1}:${column}: ${line.trim().slice(0, 300)}`);
+          if (!match) continue;
+
+          const from = Math.max(0, index - context);
+          const to = Math.min(lines.length - 1, index + context);
+          for (let cursor = from; cursor <= to; cursor++) {
+            if (emitted.has(cursor)) continue;
+            emitted.add(cursor);
+            const text = (lines[cursor] ?? "").trim().slice(0, 300);
+            if (cursor === index) {
+              results.push(`${file}:${cursor + 1}:${match.index + 1}: ${text}`);
+            } else {
+              results.push(`${file}:${cursor + 1}- ${text}`);
+            }
+            if (results.length >= maxResults) {
+              truncated = true;
+              break;
+            }
           }
+          if (truncated) break;
         }
       }
 

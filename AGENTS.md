@@ -7,7 +7,7 @@ Project memory for `carls-code`, an autonomous coding-agent CLI harness.
 ```bash
 npm install
 npm run typecheck    # tsc --noEmit (must stay clean, strict + exactOptionalPropertyTypes)
-npm test             # vitest, 109 tests
+npm test             # vitest, 125 tests
 npm run build        # tsc -> dist/
 npm run dev          # run from source via tsx
 node ./bin/carls.mjs --help
@@ -55,6 +55,32 @@ before running the built CLI. Keep the `dist/src` path in mind if you change
   `ContextManager.safeCutIndex`.
 - **Sub-agents get read-only tools and no `spawnSubAgent`** (see
   `Runtime.subAgentToolContext`), which caps nesting.
+- **Consecutive read-only calls in one assistant turn run in parallel**
+  (`AgentLoop`, capped by `MAX_PARALLEL_TOOLS`). That covers `read_file`,
+  `grep_search`, `glob_files`, `multi_read` and `delegate_task`. Any call with a
+  side effect breaks the batch and runs alone, so write/shell ordering is
+  unchanged. `mapWithConcurrency` preserves input order because the
+  `tool_result` blocks must line up with their `tool_use` blocks, and
+  `runToolUse` never throws so one failure cannot reject a whole batch.
+- **MCP servers are transport-agnostic.** `src/mcp/transports.ts` owns the wire
+  (stdio newline-JSON, legacy `sse` two-endpoint, and Streamable `http`), and
+  `McpClient` owns the protocol (handshake, id correlation, tools/list,
+  tools/call). A config entry with `url` defaults to `http`; `transport: "sse"`
+  selects the older pair. A duplicate tool name from a second server is skipped
+  with a warning instead of aborting startup, and an `annotations.readOnlyHint`
+  makes the wrapped tool eligible for parallel execution.
+- **The installers are self-bootstrapping.** `curl … | bash` leaves `$0 = bash`,
+  so `scripts/install.sh` downloads `codeload.github.com/$CARLS_REPO/tar.gz/$CARLS_REF`
+  and re-execs itself from that tree (`CARLS_BOOTSTRAPPED=1` prevents a loop).
+  `scripts/install.ps1` does the same with the zip and `@PSBoundParameters`.
+  Keep both paths working: the public one-liner in README is the only install
+  most users ever run.
+- **Updates are installer re-runs pinned to a tag.** `src/update/Updater.ts`
+  compares `packageVersion()` against the GitHub release (falling back to tags)
+  and runs the installer with `--ref <tag>`, so an update cannot land on a
+  different build than the one reported. `installerPlan` is pure so tests never
+  execute an installer. The startup notice is cached for 24h, stderr-only, never
+  awaited, and silenced by `CARLS_NO_UPDATE_CHECK=1`.
 - **Secrets** are read from the environment first and passed through
   `Logger.redact` before reaching the model, a log line or an error message.
   `redact` knows the key format of every bundled provider plus JWTs and
@@ -113,9 +139,8 @@ Commands live in `src/cli/Commands.ts` as a `COMMANDS` array of `CommandSpec`
 (name, optional aliases, usage, summary, run). Add a command by appending one
 entry; `/help` renders from the same list. Current set: `/help`, `/models`,
 `/model`, `/effort`, `/mode`, `/status`, `/cost`, `/undo`, `/todo`, `/files`,
-`/agent`, `/tools`, `/diff`, `/sessions`, `/resume`, `/clear`, `/compact`,
-`/retry`, `/setup`, `/providers`, `/config`, `/doctor`, `/init`, `/skills`,
-`/exit`. `!<cmd>` is shell passthrough and `# <note>` appends context without a
+`/agent`, `/tools`, `/diff`, `/sessions`, `/resume`, `/clear`, `/compact`, `/retry`, `/setup`, `/providers`, `/config`, `/doctor`, `/init`, `/skills`,
+`/mcp`, `/update`, `/exit`. `!<cmd>` is shell passthrough and `# <note>` appends context without a
 model call. `/setup` writes the config, reloads it and calls
 `Runtime.rebuildProvider()` so the next turn uses the new provider in place.
 
@@ -198,25 +223,16 @@ adds it to the user `PATH`, and restricts the config ACL. `enableWindowsVirtualT
 runs first in `main()` so ANSI output works in `cmd.exe`. When touching anything
 path- or shell-related, go through `src/utils/platform.ts`.
 
-## Remote deployment (instabox)
+## Deployment notes
 
-`carls` is installed on `ibssh_brebtumms7rf2ghz5ytwwbssre@ssh.instabox.sh` (port 2222):
-
-- Code: `/data/home/carls-code` (dev copy) and `/opt/carls/app` (deployed, world-readable).
-- Runtime: Node lives at `/opt/carls/node`; `/usr/local/bin/{carls,node,npm,npx}`
-  symlink into `/opt/carls`, so every user gets a working `carls`. The original
-  runtime under `/data/home/.local` is mode 700 and unreachable by other users.
 - Config precedence: `./.carlsrc.json` > `~/.carlsrc.json` > `/etc/carls/.carlsrc.json`
   (override the system path with `$CARLS_SYSTEM_CONFIG`) > defaults. The system
   layer makes `carls` work for every user, including brand-new ones, with no setup.
-- Key: stored as `"apiKey"` in the config files, not in a shell profile. Config is
-  read regardless of interactive/non-interactive shell, so `carls` works over plain
-  `ssh host carls`. Note `/etc/carls/.carlsrc.json` is mode 644, so the key is
-  readable by any local user — tighten to a group if the box is shared.
-- Redeploy: `tar czf x.tgz --exclude=node_modules --exclude=dist carls-code && scp -P 2222 …`
-  then `npm install && npm run build` remotely, then copy `dist/` **and `skills/`**
-  into `/opt/carls/app` with `sudo` (the deployed tree is root-owned) and
-  `chmod -R a+rX`. Without `skills/` the catalog is empty for every user.
+- A machine-wide install writes the shared `/etc/carls/.carlsrc.json` mode 644 on
+  purpose so every user can read it. A key placed there is readable by any local
+  account, so prefer the provider's environment variable in that layer.
+- A deployed tree needs `dist/` **and `skills/`**: without `skills/` the bundled
+  catalog is empty for every user.
 
 Free apinex models verified working with tool-calling: `free/glm-5.3-flash`,
 `free/deepseek-v4.1-flash`, `free/kimi-k3`, `free/gpt-6-luna`. `free/minimax-m3`

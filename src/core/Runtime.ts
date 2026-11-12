@@ -107,6 +107,7 @@ export class Runtime {
   /** Mutable so /setup can swap the client without a restart. */
   private provider: Provider;
   private readonly mcpClients: McpClient[] = [];
+  private readonly mcpSummary: { name: string; transport: string; tools: number; version?: string }[] = [];
 
   constructor(deps: RuntimeDeps, history: Message[] = []) {
     this.config = deps.config;
@@ -288,18 +289,46 @@ export class Runtime {
   async connectMcpServers(): Promise<void> {
     const entries = Object.entries(this.config.mcpServers);
     for (const [name, serverConfig] of entries) {
-      const client = new McpClient(name, serverConfig, this.logger, this.config.cwd);
+      let client: McpClient | undefined;
       try {
+        client = new McpClient(name, serverConfig, this.logger, this.config.cwd);
         await client.initialize();
         const tools = await client.listTools();
-        for (const tool of client.asTools()) this.registry.register(tool);
-        this.logger.info(`MCP "${name}": registered ${tools.length} tool(s).`);
+        let registered = 0;
+        for (const tool of client.asTools()) {
+          // Two servers exposing the same tool name must not take the whole
+          // startup down: keep the first and say which one was skipped.
+          if (this.registry.has(tool.name)) {
+            this.logger.warn(`MCP "${name}": tool ${tool.name} already exists; skipped.`);
+            continue;
+          }
+          this.registry.register(tool);
+          registered++;
+        }
+        const info = client.serverInfo();
+        this.mcpSummary.push({
+          name,
+          transport: client.transportKind,
+          tools: registered,
+          ...(info?.version !== undefined ? { version: info.version } : {}),
+        });
+        this.logger.info(`MCP "${name}" (${client.transportKind}): registered ${registered} tool(s).`);
         this.mcpClients.push(client);
       } catch (error) {
         this.logger.warn(`MCP "${name}" unavailable: ${(error as Error).message}`);
-        client.close();
+        client?.close();
       }
     }
+  }
+
+  /** Connected MCP servers, for `/mcp` and `/doctor`. */
+  mcpServers(): { name: string; transport: string; tools: number; version?: string }[] {
+    return this.mcpSummary;
+  }
+
+  /** The registry whose schemas are advertised to the model (may be a subset). */
+  advertisedTools(): ToolRegistry {
+    return this.advertised;
   }
 
   async start(): Promise<void> {
@@ -419,6 +448,8 @@ export function buildSystemPrompt(config: ResolvedConfig): string {
       "3. VERIFY: run the project's tests, linter or compiler with bash and fix failures until they pass.",
       "Never claim something works without running it. Prefer small, reviewable edits.",
       "Delegate broad exploration to delegate_task to keep your context small.",
+      "Independent read-only calls run in parallel, so ask for every read_file, grep_search, glob_files",
+      "or delegate_task you already know you need in the SAME turn instead of one after another.",
       "Use the specialised tools instead of bash when one exists: multi_read and write_many batch file I/O,",
       "apply_patch applies a unified diff, tree_view and list_dir map a project, git_* cover version control,",
       "network_request and http_download handle HTTP, computer_use and browser_* drive a desktop or a page,",
@@ -437,12 +468,17 @@ export function buildSystemPrompt(config: ResolvedConfig): string {
 
   const skills = SkillLoader.discover(config.cwd);
   if (skills.length > 0) {
-    const index = skills
+    // The index is a menu, not the catalog: past a few dozen entries it costs
+    // more context than the task. The rest stay reachable by name.
+    const indexLimit = 40;
+    const listed = skills.slice(0, indexLimit);
+    const index = listed
       .map((skill) => {
         const when = skill.whenToUse !== undefined ? ` — ${skill.whenToUse}` : "";
         return `- ${skill.name}: ${skill.description}${when}`;
       })
-      .join("\n");
+      .join("\n")
+      .concat(skills.length > indexLimit ? `\n… ${skills.length - indexLimit} more; ask for one by name.` : "");
     sections.push(
       [
         "Skills (reusable procedures). Read one with use_skill before acting when it matches the task,",

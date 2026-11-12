@@ -36,11 +36,18 @@ export class UseSkill implements Tool<Input> {
   async run(input: Input, ctx: ToolContext): Promise<ToolResult> {
     const skill = ctx.skills?.get(input.name);
     if (skill === undefined) {
+      // A wrong name is the common failure, and dumping 40 names does not fix
+      // it. Rank the catalog against what was asked for and suggest the closest.
+      const suggestions = (ctx.skills?.search(input.name, 3) ?? []).map((hit) => hit.skill.name);
+      const hint =
+        suggestions.length > 0
+          ? `Did you mean: ${suggestions.join(", ")}?`
+          : `Search with /skills search <query> to find the right name.`;
       const available = ctx.skills?.skills.map((entry) => entry.name).slice(0, 40) ?? [];
       return {
         ok: false,
         output: "",
-        error: `Unknown skill "${input.name}". Available: ${available.join(", ")}`,
+        error: `Unknown skill "${input.name}". ${hint}\nAvailable: ${available.join(", ")}`,
       };
     }
     ctx.skills?.recordUse(skill.name);

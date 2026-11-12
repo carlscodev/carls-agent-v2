@@ -43,9 +43,15 @@ export interface HooksConfig {
 }
 
 export interface McpServerConfig {
-  command: string;
+  /** Local server executable (stdio transport). */
+  command?: string;
   args?: string[];
+  /** Extra environment (stdio) or headers/token source (remote). */
   env?: Record<string, string>;
+  /** Remote endpoint. Implies the http transport unless `transport` says sse. */
+  url?: string;
+  /** Wire to speak with a remote endpoint. Defaults to "http". */
+  transport?: "stdio" | "sse" | "http";
 }
 
 export interface ConfigFileShape {

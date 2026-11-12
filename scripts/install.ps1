@@ -18,8 +18,15 @@
 #   -Mode <mode>      plan | pair | ask | build | auto | yolo
 #   -Effort <level>   minimal | low | medium | high
 #   -NoNode           never install Node.js; fail if it is missing
+#   -Ref <ref>        git tag or branch to install (default: main)
 #   -Uninstall        remove the install prefix, the shim and the config
 #   -Yes              accept defaults, no prompts
+#
+# One-liner (no clone, no admin when Node.js is present):
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/carlscodev/carls-agent-v2/main/scripts/install.ps1))) -Yes
+#
+# The script is self-bootstrapping: downloaded on its own it fetches the
+# requested ref and re-runs the real installer from inside it.
 
 [CmdletBinding()]
 param(
@@ -30,6 +37,7 @@ param(
   [string]$ApiKey = "",
   [string]$Mode = "",
   [string]$Effort = "",
+  [string]$Ref = "",
   [switch]$NoNode,
   [switch]$Uninstall,
   [switch]$Yes
@@ -38,6 +46,40 @@ param(
 $ErrorActionPreference = "Stop"
 $NodeMajor = 20
 $LogFile = Join-Path $env:TEMP "carls-install-$PID.log"
+
+# --------------------------------------------------------- remote bootstrap
+# `irm ... | iex` has no checkout beside it, so the sources the build needs are
+# missing. Download the ref once and run the real installer from that tree.
+$RepoSlug = if ($env:CARLS_REPO) { $env:CARLS_REPO } else { "carlscodev/carls-agent-v2" }
+$TargetRef = if ($Ref) { $Ref } elseif ($env:CARLS_REF) { $env:CARLS_REF } else { "main" }
+
+if ($env:CARLS_BOOTSTRAPPED -ne "1") {
+  $root = if ($PSScriptRoot) { Split-Path -Parent $PSScriptRoot } else { "" }
+  if (-not $root -or -not (Test-Path (Join-Path $root "package.json"))) {
+    Write-Host "· fetching carls-code $TargetRef from $RepoSlug"
+    $stage = Join-Path ([IO.Path]::GetTempPath()) ("carls-bootstrap-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $stage | Out-Null
+    $archive = Join-Path $stage "src.zip"
+    try {
+      Invoke-WebRequest -Uri "https://codeload.github.com/$RepoSlug/zip/$TargetRef" -OutFile $archive -UseBasicParsing
+      Expand-Archive -Path $archive -DestinationPath $stage -Force
+    } catch {
+      Write-Host "✗ could not download $RepoSlug at $TargetRef`: $($_.Exception.Message)"
+      exit 1
+    }
+    $tree = Get-ChildItem -Path $stage -Directory |
+      Where-Object { Test-Path (Join-Path $_.FullName "package.json") } |
+      Select-Object -First 1
+    if (-not $tree) {
+      Write-Host "✗ the downloaded archive has no package.json; check the ref name."
+      exit 1
+    }
+    $env:CARLS_BOOTSTRAPPED = "1"
+    $env:CARLS_REF = $TargetRef
+    & (Join-Path $tree.FullName "scripts\install.ps1") @PSBoundParameters
+    exit $LASTEXITCODE
+  }
+}
 
 function Say([string]$text) { Write-Host $text }
 function Info([string]$text) { Write-Host "· $text" -ForegroundColor Cyan }

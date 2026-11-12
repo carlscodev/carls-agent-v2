@@ -17,7 +17,7 @@ import { classifyError, FatalError, httpError, RetryableError, withRetry } from 
 import { readApiKey, resolveApiKey } from "../src/providers/ProviderBase.js";
 import { loadConfig } from "../src/config/Config.js";
 import type { PermissionMode } from "../src/config/Config.js";
-import type { ToolContext } from "../src/types/tools.js";
+import type { Tool, ToolContext } from "../src/types/tools.js";
 import type { Message } from "../src/types/llm.js";
 import { SkillLoader } from "../src/skills/SkillLoader.js";
 import { SkillRegistry } from "../src/skills/SkillRegistry.js";
@@ -36,6 +36,8 @@ import { apiKeyEnvFor, defaultModelFor } from "../src/config/Config.js";
 import { clipboardCommands, isWindows, processListCommand, shellForPlatform, systemConfigPath, userDataDir } from "../src/utils/platform.js";
 import { redact } from "../src/utils/Logger.js";
 import { needsOnboarding, runOnboarding } from "../src/setup/Onboarding.js";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 
 let dir: string;
 let logger: Logger;
@@ -671,6 +673,106 @@ describe("AgentLoop (scripted provider)", () => {
     const result = await loop.run(history, "go", { silent: true });
     expect(result.stoppedReason).toBe("max_steps");
     expect(result.steps).toBe(2);
+  });
+});
+
+describe("parallel tool execution", () => {
+  /** Records how many calls of a group were in flight at the same time. */
+  function tracker(): { active: number; peak: number } {
+    return { active: 0, peak: 0 };
+  }
+
+  function fakeTool(name: string, readOnly: boolean, state: ReturnType<typeof tracker>): Tool {
+    return {
+      name,
+      description: name,
+      readOnly,
+      schema: () => ({ name, description: name, input_schema: { type: "object" } }),
+      parse: (input) => input,
+      async run() {
+        state.active += 1;
+        state.peak = Math.max(state.peak, state.active);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        state.active -= 1;
+        return { ok: true, output: `${name} done` };
+      },
+    };
+  }
+
+  it("runs read-only calls together, keeps side effects sequential, and preserves result order", async () => {
+    const { AgentLoop } = await import("../src/core/AgentLoop.js");
+    const { CostTracker } = await import("../src/core/CostTracker.js");
+    const { Hooks } = await import("../src/core/Hooks.js");
+
+    const reads = tracker();
+    const writes = tracker();
+    const registry = new ToolRegistry();
+    registry.register(fakeTool("read_a", true, reads));
+    registry.register(fakeTool("read_b", true, reads));
+    registry.register(fakeTool("read_c", true, reads));
+    registry.register(fakeTool("write_a", false, writes));
+    registry.register(fakeTool("write_b", false, writes));
+
+    const config = loadConfig({ yolo: true, maxSteps: 10 }, dir);
+    const session = new SessionStore(dir, config.model, undefined, join(dir, "sessions"));
+
+    const toolUse = (id: string, name: string): import("../src/types/llm.js").ContentBlock => ({
+      type: "tool_use",
+      id,
+      name,
+      input: {},
+    });
+
+    const scripted: import("../src/types/llm.js").LLMResponse[] = [
+      {
+        content: [toolUse("1", "read_a"), toolUse("2", "read_b"), toolUse("3", "read_c")],
+        stopReason: "tool_use",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+      {
+        content: [toolUse("4", "write_a"), toolUse("5", "write_b")],
+        stopReason: "tool_use",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+      { content: [{ type: "text", text: "done" }], stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1 } },
+    ];
+
+    const provider: import("../src/types/llm.js").Provider = {
+      name: "scripted",
+      async complete() {
+        const next = scripted.shift();
+        if (!next) throw new Error("scripted provider exhausted");
+        return next;
+      },
+    };
+
+    const loop = new AgentLoop({
+      provider,
+      registry,
+      gate: new PermissionGate(config, logger, async () => "y"),
+      contextManager: new ContextManager({ contextWindow: 200000, compactThreshold: 0.75, truncateLimit: 8000 }),
+      session,
+      costTracker: new CostTracker(config.model),
+      hooks: new Hooks(config.hooks, logger, dir),
+      config,
+      logger,
+      systemPrompt: "test",
+      toolContext: { cwd: dir, config, session, logger },
+    });
+
+    const history: Message[] = [{ role: "user", content: [{ type: "text", text: "go" }] }];
+    const result = await loop.run(history, "go", { silent: true });
+    expect(result.stoppedReason).toBe("completed");
+
+    // The three reads overlapped; the two writes never did.
+    expect(reads.peak).toBeGreaterThan(1);
+    expect(writes.peak).toBe(1);
+
+    // Observations still arrive in the order the model asked for them.
+    const ids = history.flatMap((message) =>
+      message.content.flatMap((block) => (block.type === "tool_result" ? [block.tool_use_id] : [])),
+    );
+    expect(ids).toEqual(["1", "2", "3", "4", "5"]);
   });
 });
 
@@ -1612,6 +1714,260 @@ describe("selectList", () => {
       const plain = line.replace(/\u001b\[[0-9;?]*[a-zA-Z]/g, "");
       expect(plain.length).toBeLessThanOrEqual(79);
     }
+  });
+});
+
+describe("updater", () => {
+  it("orders versions numerically and ranks a pre-release below its release", async () => {
+    const { compareVersions } = await import("../src/update/Updater.js");
+    expect(compareVersions("0.2.0", "0.1.9")).toBe(1);
+    expect(compareVersions("v1.0.0", "1.0.0")).toBe(0);
+    expect(compareVersions("1.0.10", "1.0.9")).toBe(1);
+    expect(compareVersions("1.0.0-rc.1", "1.0.0")).toBe(-1);
+    expect(compareVersions("0.1.0", "0.10.0")).toBe(-1);
+  });
+
+  it("reads a release, falls back to a tag, and builds a pinned installer plan", async () => {
+    const { releaseFromPayload, tagFromPayload, installerPlan } = await import("../src/update/Updater.js");
+    expect(releaseFromPayload({ tag_name: "v0.3.0", html_url: "u" })).toEqual({
+      version: "0.3.0",
+      tag: "v0.3.0",
+      url: "u",
+    });
+    expect(releaseFromPayload({ nope: true })).toBeUndefined();
+    expect(tagFromPayload([{ name: "v0.4.1" }])?.version).toBe("0.4.1");
+    expect(tagFromPayload([])).toBeUndefined();
+
+    const unix = installerPlan("v0.3.0", "linux", "/tmp");
+    expect(unix.url).toContain("/v0.3.0/scripts/install.sh");
+    expect(unix.command).toBe("bash");
+    expect(unix.args).toEqual([unix.scriptPath, "--yes", "--ref", "v0.3.0"]);
+
+    const win = installerPlan("v0.3.0", "win32", "C:/tmp");
+    expect(win.url).toContain("/v0.3.0/scripts/install.ps1");
+    expect(win.command).toBe("powershell");
+    expect(win.args).toContain("-Yes");
+  });
+
+  it("compares against the GitHub release API", async () => {
+    const { checkForUpdate } = await import("../src/update/Updater.js");
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ tag_name: "v99.0.0", html_url: "https://example.test/r" }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const check = await checkForUpdate({ apiBase: `http://127.0.0.1:${port}` });
+      expect(check.latest).toBe("99.0.0");
+      expect(check.available).toBe(true);
+      expect(check.tag).toBe("v99.0.0");
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe("mcp transports", () => {
+  /** Minimal MCP server: JSON-RPC over Streamable HTTP, or the SSE pair. */
+  async function startFakeMcp(mode: "http" | "sse"): Promise<{ url: string; close: () => void }> {
+    const sseClients = new Set<import("node:http").ServerResponse>();
+
+    const answer = (message: { id?: number; method?: string; params?: unknown }): unknown => {
+      if (message.method === "initialize") {
+        return {
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { protocolVersion: "2025-03-26", serverInfo: { name: "fake", version: "1.2.3" } },
+        };
+      }
+      if (message.method === "tools/list") {
+        return {
+          jsonrpc: "2.0",
+          id: message.id,
+          result: {
+            tools: [
+              { name: "echo", description: "echo the args", inputSchema: { type: "object" } },
+              { name: "peek", description: "read only", annotations: { readOnlyHint: true } },
+            ],
+          },
+        };
+      }
+      if (message.method === "tools/call") {
+        return {
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { content: [{ type: "text", text: "called" }] },
+        };
+      }
+      return { jsonrpc: "2.0", id: message.id, result: {} };
+    };
+
+    const server = createServer((req, res) => {
+      if (mode === "sse" && req.method === "GET") {
+        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+        sseClients.add(res);
+        res.write("event: endpoint\ndata: /messages?session=1\n\n");
+        req.on("close", () => sseClients.delete(res));
+        return;
+      }
+      let raw = "";
+      req.on("data", (chunk) => (raw += chunk));
+      req.on("end", () => {
+        let message: { id?: number } = {};
+        try {
+          message = JSON.parse(raw) as { id?: number };
+        } catch {
+          // ignore
+        }
+        if (mode === "sse") {
+          res.writeHead(202);
+          res.end();
+          if (typeof message.id === "number") {
+            const payload = JSON.stringify(answer(message));
+            for (const client of sseClients) client.write(`event: message\ndata: ${payload}\n\n`);
+          }
+          return;
+        }
+        if (typeof message.id !== "number") {
+          res.writeHead(202);
+          res.end();
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "sid-1" });
+        res.end(JSON.stringify(answer(message)));
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    return {
+      url: `http://127.0.0.1:${port}${mode === "sse" ? "/sse" : "/mcp"}`,
+      close: () => {
+        for (const client of sseClients) client.end();
+        server.closeAllConnections();
+        server.close();
+      },
+    };
+  }
+
+  for (const mode of ["http", "sse"] as const) {
+    it(`completes the handshake and calls a tool over ${mode}`, async () => {
+      const { McpClient } = await import("../src/mcp/McpClient.js");
+      const server = await startFakeMcp(mode);
+      const client = new McpClient("fake", { url: server.url, transport: mode }, logger, dir);
+      try {
+        expect(client.transportKind).toBe(mode);
+        await client.initialize();
+        expect(client.serverInfo()?.version).toBe("1.2.3");
+
+        const tools = await client.listTools();
+        expect(tools.map((tool) => tool.name).sort()).toEqual(["echo", "peek"]);
+
+        const wrapped = client.asTools();
+        expect(wrapped.map((tool) => tool.name)).toContain("mcp__fake__echo");
+        // A readOnlyHint keeps MCP reads eligible for parallel execution.
+        expect(wrapped.find((tool) => tool.name === "mcp__fake__peek")?.readOnly).toBe(true);
+
+        const result = await client.callTool("echo", { hi: 1 });
+        expect(result.ok).toBe(true);
+        expect(result.output).toBe("called");
+      } finally {
+        client.close();
+        server.close();
+      }
+    });
+  }
+
+  it("speaks the stdio transport to a local server", async () => {
+    const { McpClient } = await import("../src/mcp/McpClient.js");
+    const script = [
+      'let buffer = "";',
+      'process.stdin.setEncoding("utf8");',
+      'process.stdin.on("data", (chunk) => {',
+      "  buffer += chunk;",
+      '  let index = buffer.indexOf("\\n");',
+      "  while (index !== -1) {",
+      "    const line = buffer.slice(0, index);",
+      "    buffer = buffer.slice(index + 1);",
+      "    index = buffer.indexOf(\"\\n\");",
+      "    if (!line.trim()) continue;",
+      "    const message = JSON.parse(line);",
+      "    if (message.id === undefined) continue;",
+      "    const result = message.method === 'initialize'",
+      "      ? { protocolVersion: '2025-03-26', serverInfo: { name: 'local-fake', version: '0.0.1' } }",
+      "      : message.method === 'tools/list'",
+      "      ? { tools: [{ name: 'ping', description: 'ping', inputSchema: { type: 'object' } }] }",
+      "      : { content: [{ type: 'text', text: 'pong' }] };",
+      "    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n');",
+      "  }",
+      "});",
+    ].join("\n");
+
+    const client = new McpClient("local", { command: process.execPath, args: ["-e", script] }, logger, dir);
+    try {
+      expect(client.transportKind).toBe("stdio");
+      await client.initialize();
+      expect(client.serverInfo()?.version).toBe("0.0.1");
+      expect((await client.listTools()).map((tool) => tool.name)).toEqual(["ping"]);
+      const result = await client.callTool("ping", {});
+      expect(result.ok).toBe(true);
+      expect(result.output).toBe("pong");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("rejects a server with neither command nor url, and parses SSE frames", async () => {
+    const { McpClient, buildTransport } = await import("../src/mcp/McpClient.js");
+    const { createSseParser } = await import("../src/mcp/transports.js");
+    expect(() => new McpClient("broken", {}, logger, dir)).toThrow(/needs either/);
+    expect(buildTransport("remote", { url: "https://x/mcp" }, logger, dir).kind).toBe("http");
+    expect(
+      buildTransport("remote", { url: "https://x/sse", transport: "sse" }, logger, dir).kind,
+    ).toBe("sse");
+    expect(buildTransport("local", { command: "node" }, logger, dir).kind).toBe("stdio");
+
+    const frames: { event: string; data: string }[] = [];
+    const parse = createSseParser((frame) => frames.push(frame));
+    // A frame may arrive split across chunks, and multi-line data is joined.
+    parse('event: message\ndata: {"a":1}\n');
+    parse("\ndata: two\n\ndata: lines\n\ndata: a\ndata: b\n\n");
+    expect(frames).toEqual([
+      { event: "message", data: '{"a":1}' },
+      { event: "message", data: "two" },
+      { event: "message", data: "lines" },
+      { event: "message", data: "a\nb" },
+    ]);
+  });
+});
+
+describe("grep_search options", () => {
+  it("adds context lines, honours case-insensitive mode, and marks context with a dash", async () => {
+    const { GrepSearch } = await import("../src/tools/GrepSearch.js");
+    await writeFile(join(dir, "notes.txt"), "alpha\nNeedle here\nomega\n", "utf8");
+    const tool = new GrepSearch();
+    const ctx = makeContext();
+
+    const withContext = await tool.run({ pattern: "Needle", context: 1 }, ctx);
+    expect(withContext.ok).toBe(true);
+    expect(withContext.output).toContain("notes.txt:2:1: Needle here");
+    expect(withContext.output).toContain("notes.txt:1- alpha");
+    expect(withContext.output).toContain("notes.txt:3- omega");
+
+    const sensitive = await tool.run({ pattern: "needle" }, ctx);
+    expect(sensitive.output).toContain("No matches");
+    const insensitive = await tool.run({ pattern: "needle", case_sensitive: false }, ctx);
+    expect(insensitive.output).toContain("Needle here");
+  });
+});
+
+describe("mcp tool rendering", () => {
+  it("splits a namespaced name and renders it as an MCP call", async () => {
+    const { parseMcpName } = await import("../src/cli/ToolView.js");
+    expect(parseMcpName("mcp__github__create_issue")).toEqual({ server: "github", tool: "create_issue" });
+    expect(parseMcpName("read_file")).toBeUndefined();
+    expect(parseMcpName("mcp__broken")).toBeUndefined();
   });
 });
 
