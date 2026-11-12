@@ -127,8 +127,9 @@ async function main(): Promise<number> {
   }
 
   // Fire-and-forget: one cached GitHub call per 24h, stderr only, never awaited
-  // so a slow or blocked network cannot delay the prompt.
-  void announceUpdate();
+  // so a slow or blocked network cannot delay the prompt. With autoUpdate
+  // "auto" this also installs the newer release, once per version.
+  void announceUpdate(config.autoUpdate);
 
   const code = await runRepl({
     config,

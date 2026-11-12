@@ -65,6 +65,7 @@ setup at all.
 | `truncateLimit` | 8000 | characters kept from one tool observation |
 | `bashTimeoutMs` | 120000 | hard timeout for a shell command |
 | `allowOutsideWorkspace` | `false` | lets file tools touch paths outside `cwd` (also `CARLS_ALLOW_OUTSIDE=1`) |
+| `autoUpdate` | `auto` | `auto` installs a newer release at startup, `notify` only prints the line, `off` never checks |
 | `tools` | all | tools advertised to the model. Everything stays callable; this only narrows the prompt |
 | `permissions.allow` | — | commands that run without prompting |
 | `permissions.deny` | — | commands refused even in `auto` mode (`yolo` ignores the list) |
@@ -136,6 +137,23 @@ stdout. `preToolUse` can block a call by exiting with code 2 or printing
 | Path | What |
 | --- | --- |
 | `~/.carls/sessions/` | transcripts, one JSONL per session (`/resume`) |
-| `~/.carls/update-check.json` | cached release check (24h) |
+| `~/.carls/update-check.json` | cached release check (24h), plus which version was auto-installed or failed |
 | `.carls/skill-usage.json` | skill usage ledger (`/skills review`) |
-| `.carls/backups/` | file snapshots behind `/undo` |
+| `.carls/backups/` | file snapshots behind `/undo` and `/redo` |
+
+## Updates
+
+A check runs at most once per 24h and only in an interactive session, so a
+pipeline or `carls -p` never touches the network for it. When a newer release
+exists, `autoUpdate` decides what happens:
+
+- `auto` (default): the installer runs in the background at startup, once per
+  release. The cache records the version, so a restart does not install it
+  again, and a version whose install failed is only ever announced — never
+  retried in a loop.
+- `notify`: one line on stderr, nothing else.
+- `off`: no check at all. `CARLS_NO_UPDATE_CHECK=1` does the same for a single
+  process.
+
+`carls update` is always the manual path: it shows the installer's progress and
+accepts `--check`, `--ref <tag>` and `--dry-run`.

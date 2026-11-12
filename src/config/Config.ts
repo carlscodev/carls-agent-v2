@@ -35,6 +35,16 @@ export type Effort = "minimal" | "low" | "medium" | "high";
 
 export const EFFORTS: Effort[] = ["minimal", "low", "medium", "high"];
 
+/**
+ * How a newly detected release is handled at startup.
+ * - auto:   install it in place, at most once per version (default).
+ * - notify: print a one-line notice and leave the decision to the user.
+ * - off:    never check for releases.
+ */
+export type AutoUpdateMode = "auto" | "notify" | "off";
+
+export const AUTO_UPDATE_MODES: AutoUpdateMode[] = ["auto", "notify", "off"];
+
 export interface HooksConfig {
   preToolUse: string[];
   postToolUse: string[];
@@ -75,6 +85,8 @@ export interface ConfigFileShape {
   mcpServers?: Record<string, McpServerConfig>;
   /** Allow tools to touch paths outside the workspace root. */
   allowOutsideWorkspace?: boolean;
+  /** What to do when a newer release exists. Defaults to "auto". */
+  autoUpdate?: AutoUpdateMode;
   /**
    * Tools advertised to the model. Unset means all of them, except on local
    * backends where the core set is used to keep the prompt small.
@@ -119,6 +131,8 @@ export interface ResolvedConfig {
   mcpServers: Record<string, McpServerConfig>;
   /** Off by default: a prompt-injected call cannot reach ~/.ssh or C:\Windows. */
   allowOutsideWorkspace: boolean;
+  /** Startup release handling; see `AutoUpdateMode`. */
+  autoUpdate: AutoUpdateMode;
   /** Tools to advertise, or undefined for all of them. */
   tools?: string[];
   /** True when the config named a contextWindow, so discovery must not override it. */
@@ -204,6 +218,9 @@ export function loadConfig(overrides: ConfigOverrides = {}, cwd = process.cwd())
     hooks: { ...DEFAULT_HOOKS, ...file.hooks },
     mcpServers: file.mcpServers ?? {},
     allowOutsideWorkspace: file.allowOutsideWorkspace ?? process.env.CARLS_ALLOW_OUTSIDE === "1",
+    // Anything that is not one of the two conservative modes keeps the default:
+    // a typo must not silently disable updates, nor make them more aggressive.
+    autoUpdate: file.autoUpdate === "notify" || file.autoUpdate === "off" ? file.autoUpdate : "auto",
     contextWindowPinned: file.contextWindow !== undefined,
     planMode: false,
     yolo: false,

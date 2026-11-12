@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import type { AutoUpdateMode } from "../config/Config.js";
 import { packageVersion } from "../core/Runtime.js";
 import { isWindows, userDataDir } from "../utils/platform.js";
 
@@ -46,6 +47,10 @@ export interface UpdateCache {
   latest: string;
   tag: string;
   url: string;
+  /** Release this install last upgraded to by itself. */
+  autoInstalled?: string;
+  /** Version whose automatic install failed, so it is never retried blindly. */
+  autoFailed?: string;
 }
 
 /**
@@ -173,6 +178,8 @@ export function readUpdateCache(): UpdateCache | undefined {
       latest: parsed.latest,
       tag: typeof parsed.tag === "string" ? parsed.tag : `v${parsed.latest}`,
       url: typeof parsed.url === "string" ? parsed.url : "",
+      ...(typeof parsed.autoInstalled === "string" ? { autoInstalled: parsed.autoInstalled } : {}),
+      ...(typeof parsed.autoFailed === "string" ? { autoFailed: parsed.autoFailed } : {}),
     };
   } catch {
     return undefined;
@@ -186,6 +193,33 @@ export function writeUpdateCache(cache: UpdateCache): void {
   } catch {
     // A read-only home must not break a run; the cache is an optimisation.
   }
+}
+
+/** Updates only the bookkeeping fields, so a check never erases install state. */
+export function patchUpdateCache(patch: Partial<UpdateCache>): void {
+  const current = readUpdateCache();
+  const base: UpdateCache = current ?? {
+    checkedAt: 0,
+    latest: packageVersion(),
+    tag: `v${packageVersion()}`,
+    url: "",
+  };
+  writeUpdateCache({ ...base, ...patch });
+}
+
+/**
+ * Whether this release may be installed without being asked.
+ *
+ * The brakes matter more than the feature: at most one automatic install per
+ * release, and a version that already failed once is only ever announced. A
+ * crash loop of installers at startup would be far worse than a stale build.
+ */
+export function shouldAutoUpdate(check: UpdateCheck, cache: UpdateCache | undefined): boolean {
+  if (!check.available) return false;
+  if (cache === undefined) return true;
+  if (cache.autoFailed === check.latest) return false;
+  if (cache.autoInstalled === check.latest) return false;
+  return true;
 }
 
 /**
@@ -218,17 +252,39 @@ export function updateAnnouncement(check: UpdateCheck): string | undefined {
   );
 }
 
-/** Prints the startup notice on stderr; never throws, never blocks a run. */
-export async function announceUpdate(): Promise<void> {
+/**
+ * Startup update handling, on stderr only, never blocking the prompt.
+ *
+ * - `auto`: install a newer release in place, once per version.
+ * - `notify`: print the one-line notice and do nothing else.
+ * - `off`: no check at all.
+ */
+export async function announceUpdate(mode: AutoUpdateMode = "auto"): Promise<void> {
+  if (mode === "off") return;
   if (process.env.CARLS_NO_UPDATE_CHECK === "1") return;
   if (process.stderr.isTTY !== true) return;
+  let check: UpdateCheck;
   try {
-    const check = await cachedUpdateCheck();
-    const line = updateAnnouncement(check);
-    if (line !== undefined) process.stderr.write(`${line}\n`);
+    check = await cachedUpdateCheck();
   } catch {
     // Offline, proxied, rate-limited: not a problem worth reporting.
+    return;
   }
+  if (!check.available) return;
+
+  if (mode === "auto" && shouldAutoUpdate(check, readUpdateCache())) {
+    process.stderr.write(`↑ carls ${check.current} → ${check.latest}, updating in place\n`);
+    const code = await runUpdate({ ref: check.tag, quiet: true });
+    if (code === 0) {
+      patchUpdateCache({ autoInstalled: check.latest, latest: check.latest, tag: check.tag });
+      process.stderr.write(`✓ carls ${check.latest} installed. Restart carls to use it.\n`);
+      return;
+    }
+    patchUpdateCache({ autoFailed: check.latest });
+  }
+
+  const line = updateAnnouncement(check);
+  if (line !== undefined) process.stderr.write(`${line}\n`);
 }
 
 export interface InstallerPlan {
@@ -277,9 +333,30 @@ async function downloadScript(url: string, destination: string): Promise<void> {
   }
 }
 
-function runScript(command: string, args: string[]): Promise<number> {
+function runScript(command: string, args: string[], quiet = false): Promise<number> {
   return new Promise<number>((resolve) => {
-    const child = spawn(command, args, { stdio: "inherit", shell: false });
+    // A quiet run is an automatic update during startup: the installer's own
+    // progress would paint over the prompt, so its output is captured and only
+    // the failure tail is shown.
+    const child = spawn(command, args, { stdio: quiet ? ["ignore", "pipe", "pipe"] : "inherit", shell: false });
+    if (quiet) {
+      let tail = "";
+      const collect = (chunk: Buffer): void => {
+        tail = (tail + chunk.toString("utf8")).slice(-2000);
+      };
+      child.stdout?.on("data", collect);
+      child.stderr?.on("data", collect);
+      child.on("error", () => resolve(1));
+      child.on("close", (code) => {
+        const status = code ?? 1;
+        if (status !== 0) {
+          const lines = tail.trim().split("\n").slice(-8).join("\n");
+          if (lines.length > 0) process.stderr.write(`${lines}\n`);
+        }
+        resolve(status);
+      });
+      return;
+    }
     child.on("error", () => resolve(1));
     child.on("close", (code) => resolve(code ?? 1));
   });
@@ -292,6 +369,8 @@ export interface RunUpdateOptions {
   ref?: string;
   /** Print the plan without downloading or executing anything. */
   dryRun?: boolean;
+  /** Keep the installer's output out of the terminal (used by auto-update). */
+  quiet?: boolean;
 }
 
 /**
@@ -299,7 +378,11 @@ export interface RunUpdateOptions {
  * Everything user-visible goes to stderr, because stdout belongs to the model.
  */
 export async function runUpdate(options: RunUpdateOptions = {}): Promise<number> {
+  const quiet = options.quiet === true;
   const out = (line: string): void => {
+    if (!quiet) process.stderr.write(`${line}\n`);
+  };
+  const err = (line: string): void => {
     process.stderr.write(`${line}\n`);
   };
   const current = packageVersion();
@@ -317,8 +400,8 @@ export async function runUpdate(options: RunUpdateOptions = {}): Promise<number>
     try {
       check = await checkForUpdate();
     } catch (error) {
-      out(`error: could not check for updates: ${(error as Error).message}`);
-      out(`Install the latest build directly with: ${UPDATE_RAW_BASE}/main/scripts/install.sh`);
+      err(`error: could not check for updates: ${(error as Error).message}`);
+      err(`Install the latest build directly with: ${UPDATE_RAW_BASE}/main/scripts/install.sh`);
       return 1;
     }
   }
@@ -345,18 +428,18 @@ export async function runUpdate(options: RunUpdateOptions = {}): Promise<number>
   try {
     await downloadScript(plan.url, plan.scriptPath);
   } catch (error) {
-    out(`error: could not download the installer: ${(error as Error).message}`);
-    out(`Re-run the one-liner from ${UPDATE_RAW_BASE}/main/README.md#install`);
+    err(`error: could not download the installer: ${(error as Error).message}`);
+    err(`Re-run the one-liner from ${UPDATE_RAW_BASE}/main/README.md#install`);
     return 1;
   }
 
-  const code = await runScript(plan.command, plan.args);
+  const code = await runScript(plan.command, plan.args, quiet);
   if (code !== 0) {
-    out(`error: the installer exited with code ${code}.`);
+    err(`error: the installer exited with code ${code}.`);
     if (isWindows()) {
-      out("If Node.js was installed by this run, open a new terminal and run carls update again.");
+      err("If Node.js was installed by this run, open a new terminal and run carls update again.");
     } else {
-      out("If the install prefix is root-owned, re-run the same command with sudo.");
+      err("If the install prefix is root-owned, re-run the same command with sudo.");
     }
     return code;
   }

@@ -438,6 +438,7 @@ async function pickModel(
     logLevel: "info",
     cwd: process.cwd(),
     allowOutsideWorkspace: false,
+    autoUpdate: "auto",
     baseUrl,
     ...(apiKey !== undefined ? { apiKey } : {}),
   };
@@ -694,6 +695,7 @@ async function verifyCredential(
     logLevel: "info",
     cwd: process.cwd(),
     allowOutsideWorkspace: false,
+    autoUpdate: "auto",
     baseUrl,
     ...(apiKey !== undefined ? { apiKey } : {}),
   };

@@ -1850,6 +1850,43 @@ describe("updater", () => {
       server.close();
     }
   });
+
+  it("installs a release by itself only once, and never after a failure", async () => {
+    const { shouldAutoUpdate } = await import("../src/update/Updater.js");
+    const check = { current: "0.2.0", latest: "0.3.0", tag: "v0.3.0", available: true, url: "" };
+    const base = { checkedAt: 1, latest: "0.3.0", tag: "v0.3.0", url: "" };
+
+    expect(shouldAutoUpdate(check, undefined)).toBe(true);
+    expect(shouldAutoUpdate(check, base)).toBe(true);
+    // Already upgraded to it: the cache outlives the version bump.
+    expect(shouldAutoUpdate(check, { ...base, autoInstalled: "0.3.0" })).toBe(false);
+    // One failed install is enough; it is announced, never retried in a loop.
+    expect(shouldAutoUpdate(check, { ...base, autoFailed: "0.3.0" })).toBe(false);
+    // A different version gets its own single attempt.
+    expect(shouldAutoUpdate(check, { ...base, autoFailed: "0.2.9" })).toBe(true);
+    expect(shouldAutoUpdate({ ...check, available: false }, undefined)).toBe(false);
+  });
+
+  it("defaults autoUpdate to auto and honours the conservative modes", async () => {
+    const { loadConfig } = await import("../src/config/Config.js");
+    const path = join(dir, "autoupdate", ".carlsrc.json");
+    await mkdir(join(dir, "autoupdate"), { recursive: true });
+    const previous = process.env.CARLS_SYSTEM_CONFIG;
+    process.env.CARLS_SYSTEM_CONFIG = join(dir, "autoupdate", "missing.json");
+    try {
+      expect(loadConfig({}, dir).autoUpdate).toBe("auto");
+      await writeFile(path, JSON.stringify({ autoUpdate: "notify" }));
+      expect(loadConfig({}, join(dir, "autoupdate")).autoUpdate).toBe("notify");
+      await writeFile(path, JSON.stringify({ autoUpdate: "off" }));
+      expect(loadConfig({}, join(dir, "autoupdate")).autoUpdate).toBe("off");
+      // A typo must not disable updates silently.
+      await writeFile(path, JSON.stringify({ autoUpdate: "sometimes" }));
+      expect(loadConfig({}, join(dir, "autoupdate")).autoUpdate).toBe("auto");
+    } finally {
+      if (previous === undefined) delete process.env.CARLS_SYSTEM_CONFIG;
+      else process.env.CARLS_SYSTEM_CONFIG = previous;
+    }
+  });
 });
 
 describe("mcp transports", () => {
