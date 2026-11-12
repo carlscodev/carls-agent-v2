@@ -540,6 +540,25 @@ describe("installer config writer", () => {
     expect(merged.permissions?.deny).toContain("rm -rf *");
   });
 
+  it("keeps hand-written blocks a reinstall knows nothing about", async () => {
+    const { mergeConfig } = await import("../src/setup/writeConfig.js");
+    const merged = mergeConfig(
+      {
+        provider: "anthropic",
+        mcpServers: { docs: { url: "https://example.test/mcp" } },
+        hooks: { preToolUse: ["node guard.mjs"] },
+        allowOutsideWorkspace: true,
+        tools: ["read_file", "bash"],
+      },
+      { mode: "auto" },
+    );
+    expect(merged.mcpServers?.docs?.url).toBe("https://example.test/mcp");
+    expect(merged.hooks?.preToolUse).toEqual(["node guard.mjs"]);
+    expect(merged.allowOutsideWorkspace).toBe(true);
+    expect(merged.tools).toEqual(["read_file", "bash"]);
+    expect(merged.mode).toBe("auto");
+  });
+
   it("defaults to the openai provider when only a base URL is given", async () => {
     const { mergeConfig } = await import("../src/setup/writeConfig.js");
     expect(mergeConfig({}, { baseUrl: "https://x/v1" }).provider).toBe("openai");

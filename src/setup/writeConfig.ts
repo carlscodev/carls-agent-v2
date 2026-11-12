@@ -95,8 +95,12 @@ export function mergeConfig(
   const apiKey = args.apiKey ?? existing.apiKey;
   const effort = args.effort ?? existing.effort;
 
-  const merged: ConfigFileShape = { provider };
+  // Start from the file on disk, not from an empty object: a reinstall must not
+  // drop hand-written settings the installer knows nothing about (mcpServers,
+  // hooks, allowOutsideWorkspace, tools, the timeout knobs).
+  const merged: ConfigFileShape = { ...existing, provider };
   if (mode !== undefined) merged.mode = mode as PermissionMode;
+  else delete merged.mode;
   if (model !== undefined) merged.model = model;
   if (baseUrl !== undefined) merged.baseUrl = baseUrl;
   if (apiKey !== undefined) merged.apiKey = apiKey;
