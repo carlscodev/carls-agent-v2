@@ -1,5 +1,13 @@
 import { spawn } from "node:child_process";
 import { shellForPlatform } from "../utils/platform.js";
+import {
+  detectOsProfile,
+  killProcessTree,
+  needsDetachedGroup,
+  utf8Env,
+  verifyCwdIntegrity,
+} from "../os/OsRuntimeAdapter.js";
+import { sandboxCommand } from "../os/Sandbox.js";
 import { z } from "zod";
 import type { Tool, ToolContext, ToolResult } from "../types/tools.js";
 import type { ToolSchema } from "../types/llm.js";
@@ -14,6 +22,12 @@ const inputSchema = z.object({
     .optional()
     .describe("Kill the command after this many milliseconds (default from config, 60000)."),
   description: z.string().optional().describe("Short human-readable label for the command."),
+  sandbox: z
+    .boolean()
+    .optional()
+    .describe(
+      "Run inside the host's sandbox when one is available (bubblewrap on Linux/Android, sandbox-exec on macOS). Ignored where none exists.",
+    ),
 });
 
 type Input = z.infer<typeof inputSchema>;
@@ -49,7 +63,7 @@ export class BashExecution implements Tool<Input> {
   async run(input: Input, ctx: ToolContext): Promise<ToolResult> {
     const timeoutMs = input.timeout_ms ?? ctx.config.bashTimeoutMs;
     const startedAt = Date.now();
-    const outcome = await this.spawnShell(input.command, ctx.cwd, timeoutMs, ctx.signal);
+    const outcome = await this.spawnShell(input.command, ctx.cwd, timeoutMs, ctx.signal, input.sandbox === true);
 
     if (outcome.spawnError !== undefined) {
       return { ok: false, output: "", error: `Failed to start command: ${outcome.spawnError}` };
@@ -64,18 +78,33 @@ export class BashExecution implements Tool<Input> {
     }
     sections.push(`[exit code] ${outcome.exitCode ?? "null"}`);
 
+    // The command ran; the session root is checked before the next one does, so
+    // a `rm -rf .` or a `mv` of the workspace is reported once, in plain words,
+    // instead of surfacing as an ENOENT from an unrelated later tool.
+    const integrity = verifyCwdIntegrity(ctx.cwd);
+    if (!integrity.ok) {
+      sections.push(`[workspace] ${integrity.reason}: ${integrity.path}`);
+    }
+
     const ok = outcome.exitCode === 0 && !outcome.timedOut;
     const durationMs = Math.round(Date.now() - startedAt);
     const result: ToolResult = {
-      ok,
+      ok: ok && integrity.ok,
       output: sections.join("\n"),
-      metadata: { exitCode: outcome.exitCode, timedOut: outcome.timedOut },
+      metadata: {
+        exitCode: outcome.exitCode,
+        timedOut: outcome.timedOut,
+        cwdIntact: integrity.ok,
+        durationMs,
+      },
     };
     if (!ok) {
       result.error =
         outcome.timedOut
           ? `Command timed out after ${timeoutMs}ms.`
           : `Command exited with code ${outcome.exitCode}.`;
+    } else if (!integrity.ok) {
+      result.error = `The workspace root was damaged by the command: ${integrity.reason}.`;
     }
     return result;
   }
@@ -85,15 +114,24 @@ export class BashExecution implements Tool<Input> {
     cwd: string,
     timeoutMs: number,
     signal: AbortSignal,
+    sandboxed: boolean,
   ): Promise<SpawnOutcome> {
     return new Promise<SpawnOutcome>((resolve) => {
       // Windows has no /bin/bash: the platform shell is cmd.exe or PowerShell.
       const shell = shellForPlatform();
-      const child = spawn(shell.file, [...shell.args, command], {
+      const wrapped = sandboxed ? sandboxCommand(shell.file, shell.args, command, cwd) : undefined;
+      const file = wrapped?.file ?? shell.file;
+      const args = wrapped?.args ?? [...shell.args, command];
+
+      const child = spawn(file, args, {
         cwd,
-        env: process.env,
+        // UTF-8 is forced so a non-English locale cannot corrupt the observation.
+        env: { ...process.env, ...detectOsProfile().env },
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
+        // A detached POSIX child leads its own process group, which is what
+        // makes the negative-pid kill below reach its grandchildren.
+        detached: needsDetachedGroup(),
       });
 
       let stdout = "";
@@ -117,13 +155,17 @@ export class BashExecution implements Tool<Input> {
       child.stdout.on("data", capture("out"));
       child.stderr.on("data", capture("err"));
 
+      const killTree = (sig: NodeJS.Signals): void => {
+        killProcessTree(child.pid, sig);
+      };
+
       const timer = setTimeout(() => {
         timedOut = true;
-        child.kill("SIGKILL");
+        killTree("SIGKILL");
       }, timeoutMs);
 
       const onAbort = (): void => {
-        child.kill("SIGTERM");
+        killTree("SIGTERM");
       };
       signal.addEventListener("abort", onAbort, { once: true });
 

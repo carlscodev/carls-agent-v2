@@ -1,6 +1,6 @@
 import pc from "picocolors";
 import { RawSession, type KeyEvent } from "./Input.js";
-import { pad, truncate, visibleWidth } from "./Text.js";
+import { pad, terminalDimension, truncate, visibleWidth } from "./Text.js";
 
 /** One selectable row. `section` groups it under a collapsible heading. */
 export interface SelectItem {
@@ -116,8 +116,8 @@ export async function selectList(options: SelectListOptions): Promise<SelectItem
   // One column is left free: writing to the very last cell of a row makes some
   // terminals wrap, which would push the frame down by a line.
   const size = (): { width: number; height: number } => ({
-    width: Math.max(40, (output.columns ?? 80) - 1),
-    height: Math.max(10, output.rows ?? 24),
+    width: Math.max(40, (terminalDimension(output.columns)) - 1),
+    height: Math.max(10, terminalDimension(output.rows, 24)),
   });
 
   let rows = buildRows();

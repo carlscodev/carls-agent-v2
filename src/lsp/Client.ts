@@ -105,6 +105,8 @@ export class LspClient {
   private readonly pending = new Map<number, (message: RpcMessage) => void>();
   private readonly diagnostics = new Map<string, LspDiagnostic[]>();
   private readonly waiters = new Map<string, (diagnostics: LspDiagnostic[]) => void>();
+  /** Last version sent per uri, so a re-sync uses didChange, not a second didOpen. */
+  private readonly uriVersions = new Map<string, number>();
   private closed = false;
 
   constructor(spec: LspServerSpec, cwd: string) {
@@ -208,10 +210,9 @@ export class LspClient {
         resolve(list);
       });
     });
-    this.notify({
-      method: "textDocument/didOpen",
-      params: { textDocument: { uri, languageId, version: 1, text } },
-    });
+    // Through `openDocument`, not a bare notify, so the version is recorded and a
+    // later re-check knows to send didChange rather than a second didOpen.
+    this.openDocument(path, text, languageId);
     return wait;
   }
 
@@ -222,7 +223,58 @@ export class LspClient {
       method: "textDocument/didOpen",
       params: { textDocument: { uri, languageId, version: 1, text } },
     });
+    this.uriVersions.set(uri, 1);
     return uri;
+  }
+
+  /**
+   * True while the server process is usable. A persistent pool checks this before
+   * reusing a connection: a server that crashed on the previous request must be
+   * respawned, not asked again.
+   */
+  get alive(): boolean {
+    return !this.closed && this.child.exitCode === null && this.child.signalCode === null;
+  }
+
+  /**
+   * Re-sends a document the server already has. `didOpen` twice for the same uri
+   * is a protocol error, so an already-open document gets `didChange` with the
+   * full text instead, which is what makes a second verification pass see the
+   * file as it is now rather than as it was.
+   */
+  syncDocument(path: string, text: string, languageId: string): string {
+    const uri = pathToFileURL(path).toString();
+    const version = this.uriVersions.get(uri);
+    if (version === undefined) return this.openDocument(path, text, languageId);
+    const next = version + 1;
+    this.uriVersions.set(uri, next);
+    this.notify({
+      method: "textDocument/didChange",
+      params: {
+        textDocument: { uri, version: next },
+        contentChanges: [{ text }],
+      },
+    });
+    return uri;
+  }
+
+  /**
+   * Waits for the next `publishDiagnostics` for a uri, ignoring whatever was
+   * cached. Used after a `syncDocument`, where the cached list is stale by
+   * definition.
+   */
+  async waitForDiagnostics(path: string, timeoutMs: number): Promise<LspDiagnostic[]> {
+    const uri = pathToFileURL(path).toString();
+    return new Promise<LspDiagnostic[]>((resolve) => {
+      const timer = setTimeout(() => {
+        this.waiters.delete(uri);
+        resolve(this.diagnostics.get(uri) ?? []);
+      }, timeoutMs);
+      this.waiters.set(uri, (list) => {
+        clearTimeout(timer);
+        resolve(list);
+      });
+    });
   }
 
   /** `textDocument/hover`, reduced to plain text lines. */

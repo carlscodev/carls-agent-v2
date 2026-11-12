@@ -1,5 +1,5 @@
 import pc from "picocolors";
-import { visibleWidth } from "./Text.js";
+import { terminalDimension, visibleWidth } from "./Text.js";
 
 const ESC = "\u001b[";
 const SAVE = "\u001b7";
@@ -8,6 +8,8 @@ const RESTORE = "\u001b8";
 export interface ChromeLayout {
   /** Rows occupied by the fixed header, 1-based. */
   headerRows: number;
+  /** Row holding the tab strip, or 0 when no tabs are shown. */
+  tabRow: number;
   /** First row of the scrolling conversation region. */
   regionTop: number;
   /** Last row of the scrolling conversation region. */
@@ -33,6 +35,8 @@ export class Chrome {
   private enabled = false;
   private headerLines: string[] = [];
   private statusText = "";
+  /** One line of tab labels, or undefined when the strip is hidden. */
+  private tabStrip: string | undefined;
   private readonly out: NodeJS.WriteStream;
 
   constructor(out: NodeJS.WriteStream = process.stderr) {
@@ -63,6 +67,7 @@ export class Chrome {
 
   private layout: ChromeLayout = {
     headerRows: 0,
+    tabRow: 0,
     regionTop: 1,
     regionBottom: 1,
     statusRow: 1,
@@ -75,13 +80,18 @@ export class Chrome {
   }
 
   private computeLayout(): ChromeLayout {
-    const height = Math.max(12, this.out.rows ?? 24);
-    const headerRows = Math.min(this.headerLines.length, Math.max(0, height - 6));
+    const rows = this.out.rows ?? 0;
+    const height = Math.max(12, rows > 0 ? rows : 24);
+    const tabRows = this.tabStrip === undefined ? 0 : 1;
+    // The strip takes its row out of the header's budget, so the footer rows and
+    // at least one conversation row survive on a short terminal.
+    const headerRows = Math.min(this.headerLines.length, Math.max(0, height - 6 - tabRows));
     const statusRow = height - 1;
     const promptRow = height;
-    const regionTop = headerRows + 1;
+    const tabRow = tabRows === 1 ? headerRows + 1 : 0;
+    const regionTop = headerRows + tabRows + 1;
     const regionBottom = Math.max(regionTop, statusRow - 1);
-    return { headerRows, regionTop, regionBottom, statusRow, promptRow, height };
+    return { headerRows, tabRow, regionTop, regionBottom, statusRow, promptRow, height };
   }
 
   /** Recomputes after a terminal resize. */
@@ -94,11 +104,38 @@ export class Chrome {
   }
 
   private drawHeader(): void {
-    const { height } = this.layout;
-    for (let index = 0; index < Math.min(this.headerLines.length, height - 2); index++) {
+    // Only `layout.headerRows` lines may be painted: on a short terminal that
+    // budget is smaller than the banner, and drawing the overflow would land on
+    // the tab strip's row and erase it.
+    for (let index = 0; index < this.layout.headerRows; index++) {
       const line = this.headerLines[index] ?? "";
       this.out.write(`${ESC}${index + 1};1H${ESC}2K${line}`);
     }
+    this.drawTabs();
+  }
+
+  /**
+   * Sets the tab strip. Passing undefined hides it and gives the row back to
+   * the header, so a single-tab session looks exactly as it did before.
+   */
+  setTabs(strip: string | undefined): void {
+    const had = this.tabStrip !== undefined;
+    const has = strip !== undefined;
+    this.tabStrip = strip;
+    if (!this.enabled) return;
+    if (had !== has) {
+      this.layout = this.computeLayout();
+      this.applyRegion();
+      this.moveToRegionBottom();
+    }
+    this.drawHeader();
+  }
+
+  private drawTabs(): void {
+    if (this.tabStrip === undefined || this.layout.tabRow === 0) return;
+    const width = terminalDimension(this.out.columns);
+    const line = fit(this.tabStrip, width);
+    this.out.write(`${ESC}${this.layout.tabRow};1H${ESC}2K${line}`);
   }
 
   private applyRegion(): void {
@@ -134,7 +171,7 @@ export class Chrome {
   drawStatus(): void {
     if (!this.enabled) return;
     const { statusRow, height } = this.layout;
-    const width = this.out.columns ?? 80;
+    const width = terminalDimension(this.out.columns);
     const body = fit(this.statusText, width);
     this.out.write(`${SAVE}${ESC}${statusRow};1H${ESC}2K${body}${RESTORE}`);
     void height;
@@ -144,7 +181,7 @@ export class Chrome {
   drawPrompt(promptText: string, buffer: string, cursor: number): void {
     if (!this.enabled) return;
     const { promptRow } = this.layout;
-    const width = this.out.columns ?? 80;
+    const width = terminalDimension(this.out.columns);
     // An empty prompt shows what it accepts instead of a bare glyph; the cursor
     // still sits right after the prompt, so the placeholder never gets in the way.
     const ghost = buffer.length === 0 ? pc.gray("ask for a change, or / for commands") : "";

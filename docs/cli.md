@@ -63,11 +63,16 @@ composer steps aside, so answering `y` cannot also steer the turn.
 | `/compact` | compact now instead of waiting for the threshold |
 | `/clear` | start a fresh session |
 | `/undo [n]`, `/redo [n]` | revert the last edits, or re-apply what an undo removed |
+| `/checkpoint [label]` | snapshot the whole working tree to a private git ref |
+| `/rewind [id\|list]` | restore the working tree to a checkpoint (snapshots first, so it is undoable) |
 | `/agents [name]` | switch the agent preset from `.agents/agents/*.md` |
 | `/export [path]` | write the session transcript to a markdown file |
 | `/editor [text]` | compose the prompt in `$VISUAL`/`$EDITOR` and load it back |
 | `/files`, `/diff` | files the agent touched, and the working-tree diff |
 | `/todo` | the agent's current plan |
+| `/plan` | the persistent task graph, where it stopped and what runs next |
+| `/rules [forget <id>]` | rules learned from corrections, and how to drop one |
+| `/receipt` | what the last task changed, verified and rolled back |
 | `/agent <goal>` | run an isolated sub-agent and print its conclusion |
 | `/tools` | every tool, its category, parallel-safe and advertised flags |
 | `/mcp` | connected MCP servers, transport and tool counts |

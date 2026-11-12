@@ -13,7 +13,9 @@ import type { Hooks } from "./Hooks.js";
 import type { Logger } from "../utils/Logger.js";
 import { ContextManager } from "./ContextManager.js";
 import { redact } from "../utils/Logger.js";
+import { mapWithConcurrency } from "../utils/concurrency.js";
 import pc from "picocolors";
+import type { CompactionPipeline } from "./CompactionPipeline.js";
 
 /**
  * How many independent read-only calls one assistant turn may run at once.
@@ -22,34 +24,6 @@ import pc from "picocolors";
  * series. Six keeps a local endpoint and the permission gate comfortable.
  */
 const MAX_PARALLEL_TOOLS = 6;
-
-/**
- * Runs `fn` over every item with at most `limit` in flight, preserving the
- * input order in the result so tool_result blocks still line up with the
- * tool_use blocks that produced them.
- */
-async function mapWithConcurrency<T, R>(
-  items: readonly T[],
-  limit: number,
-  fn: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = new Array<R>(items.length);
-  let next = 0;
-  const workers = Array.from(
-    { length: Math.max(1, Math.min(limit, items.length)) },
-    async () => {
-      for (;;) {
-        const index = next++;
-        if (index >= items.length) return;
-        const item = items[index];
-        if (item === undefined) return;
-        results[index] = await fn(item);
-      }
-    },
-  );
-  await Promise.all(workers);
-  return results;
-}
 
 export interface AgentLoopDeps {
   provider: Provider;
@@ -76,6 +50,12 @@ export interface AgentLoopDeps {
    * `tool_use` and its `tool_result`.
    */
   takeSteering?: () => string[];
+  /**
+   * The layered compaction pipeline. When present, the loop routes its context
+   * management through it so the live state is re-anchored after a summary; when
+   * absent the loop falls back to the plain `contextManager.compact`.
+   */
+  compaction?: CompactionPipeline;
 }
 
 export interface RunOptions {
@@ -170,6 +150,15 @@ export class AgentLoop {
       content: this.deps.contextManager.truncateObservation(redact(body)),
       is_error: !result.ok,
     };
+  }
+
+  /**
+   * Public form of the internal summariser, so the Runtime can reuse the exact
+   * same prompt for the compaction pipeline instead of a second implementation
+   * that would drift from this one.
+   */
+  async summarizeHistory(older: Message[], hint: { goal: string; filesTouched: string[] }): Promise<Checkpoint> {
+    return this.summarize(older, hint);
   }
 
   private async summarize(
@@ -354,17 +343,41 @@ export class AgentLoop {
       }
       if (steering.length > 0) options.onSteer?.(steering);
 
+      // Cheap pass first: masking old observations keeps every tool pair intact
+      // and usually drops enough tokens to push a full compaction far away.
+      if (this.deps.contextManager.shouldMask(history)) {
+        const masked = this.deps.contextManager.maskObservations(history);
+        if (this.deps.contextManager.lastMaskedCount > 0) {
+          history.splice(0, history.length, ...masked);
+          this.deps.logger.info(
+            `Masked ${this.deps.contextManager.lastMaskedCount} old observation(s) to reclaim context.`,
+          );
+        }
+      }
+
       if (this.deps.contextManager.shouldCompact(history)) {
         this.deps.logger.info("Context window 75%+ full: compacting conversation.");
-        const compaction = await this.deps.contextManager.compact(
-          history,
-          goal,
-          filesTouched,
-          (older, hint) => this.summarize(older, hint),
-        );
-        if (compaction.compacted && compaction.checkpoint) {
-          history.splice(0, history.length, ...compaction.messages);
-          this.deps.session.recordCheckpoint(compaction.checkpoint);
+        if (this.deps.compaction !== undefined) {
+          // The pipeline also runs the cheap layers, so a full summary is only
+          // paid for when masking and projection were not enough.
+          const { messages: compactedMessages, report } = await this.deps.compaction.autoCompact(history, goal, filesTouched);
+          if (report.layers.some((layer) => layer.applied && layer.layer === 5)) {
+            history.splice(0, history.length, ...compactedMessages);
+            this.deps.logger.info(
+              `Compacted ${report.tokensBefore} -> ${report.tokensAfter} tokens; live state re-anchored.`,
+            );
+          }
+        } else {
+          const compaction = await this.deps.contextManager.compact(
+            history,
+            goal,
+            filesTouched,
+            (older, hint) => this.summarize(older, hint),
+          );
+          if (compaction.compacted && compaction.checkpoint) {
+            history.splice(0, history.length, ...compaction.messages);
+            this.deps.session.recordCheckpoint(compaction.checkpoint);
+          }
         }
       }
 

@@ -4,6 +4,9 @@ import type { SessionStore } from "../core/SessionStore.js";
 import type { BackupStore } from "../core/Backups.js";
 import type { Logger } from "../utils/Logger.js";
 import type { SkillRegistry } from "../skills/SkillRegistry.js";
+import type { SubAgentRole } from "../core/SubAgent.js";
+import type { SubAgentOutcome, SubAgentTask } from "../core/SubAgentPool.js";
+import type { PersistentTaskDAG } from "../core/PersistentTaskDAG.js";
 
 export interface ToolContext {
   cwd: string;
@@ -13,10 +16,18 @@ export interface ToolContext {
   signal: AbortSignal;
   /** Snapshot store so `/undo` can revert agent edits. */
   backups?: BackupStore;
-  /** Invoked by `delegate_task` to run an isolated sub-agent loop. */
-  spawnSubAgent?: (goal: string) => Promise<string>;
+  /** Invoked by `delegate_task` to run one isolated sub-agent loop. */
+  spawnSubAgent?: (goal: string, role?: SubAgentRole) => Promise<string>;
+  /** Invoked by `delegate_task` to run several sub-agents in parallel. */
+  spawnSubAgentPool?: (tasks: readonly SubAgentTask[]) => Promise<SubAgentOutcome[]>;
+  /** How many tasks `spawnSubAgentPool` accepts per call. */
+  subAgentPoolLimit?: number;
   /** Skills the model can load with `use_skill` and extend with `save_skill`. */
   skills?: SkillRegistry;
+  /** Persistent task graph, so a long plan survives a restart. */
+  dag?: PersistentTaskDAG;
+  /** Live-state renderer used by the compaction pipeline and the receipt. */
+  buildLiveState?: () => Promise<string>;
 }
 
 export interface ToolResult {

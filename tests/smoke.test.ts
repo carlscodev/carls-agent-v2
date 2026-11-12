@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -9,7 +10,15 @@ import { FileRead } from "../src/tools/FileRead.js";
 import { BashExecution } from "../src/tools/BashExecution.js";
 import { ToolRegistry } from "../src/tools/ToolRegistry.js";
 import { PermissionGate } from "../src/security/PermissionGate.js";
-import { ContextManager } from "../src/core/ContextManager.js";
+import { ContextManager, digest } from "../src/core/ContextManager.js";
+import { RepoMap, extractSymbols } from "../src/core/RepoMap.js";
+import { RepoMapTool } from "../src/tools/RepoMapTool.js";
+import { ShadowGit } from "../src/security/ShadowGit.js";
+import { SubAgent, SUBAGENT_ROLES } from "../src/core/SubAgent.js";
+import type { SubAgentRole } from "../src/core/SubAgent.js";
+import { SubAgentPool, formatOutcomes } from "../src/core/SubAgentPool.js";
+import type { SubAgentTask } from "../src/core/SubAgentPool.js";
+import { DelegateTask } from "../src/tools/DelegateTask.js";
 import { SessionStore } from "../src/core/SessionStore.js";
 import { Logger } from "../src/utils/Logger.js";
 import { truncate } from "../src/utils/truncate.js";
@@ -34,6 +43,28 @@ import { Runtime } from "../src/core/Runtime.js";
 import { PROVIDERS, providerById, reasoningHintsFor } from "../src/providers/registry.js";
 import { apiKeyEnvFor, defaultModelFor } from "../src/config/Config.js";
 import { clipboardCommands, isWindows, processListCommand, shellForPlatform, systemConfigPath, userDataDir } from "../src/utils/platform.js";
+import { currentPlatform, isTermux } from "../src/utils/platform.js";
+import {
+  detectOsProfile,
+  killProcessTree,
+  needsDetachedGroup,
+  normalizeWorkspacePath,
+  utf8Env,
+  verifyCwdIntegrity,
+} from "../src/os/OsRuntimeAdapter.js";
+import { detectSandbox, sandboxCommand } from "../src/os/Sandbox.js";
+import { LspSessionPool } from "../src/lsp/SessionPool.js";
+import { TransactionManager } from "../src/core/TransactionManager.js";
+import { BackupStore } from "../src/core/Backups.js";
+import { PersistentTaskDAG } from "../src/core/PersistentTaskDAG.js";
+import { TaskHorizonRouter, countAsks } from "../src/core/TaskHorizonRouter.js";
+import { ArtifactStore } from "../src/core/ArtifactStore.js";
+import { CompactionPipeline, findSupersededReads } from "../src/core/CompactionPipeline.js";
+import { buildLiveState } from "../src/core/LiveState.js";
+import { SkillEvolutionEngine } from "../src/skills/SkillEvolutionEngine.js";
+import { AutoReviewSteeringClassifier } from "../src/symbiosis/SteeringClassifier.js";
+import { OperatorCognitiveMemory } from "../src/symbiosis/OperatorMemory.js";
+import { ExecutionReceipt } from "../src/symbiosis/ExecutionReceipt.js";
 import { redact } from "../src/utils/Logger.js";
 import { needsOnboarding, runOnboarding } from "../src/setup/Onboarding.js";
 import { createServer } from "node:http";
@@ -41,16 +72,23 @@ import type { AddressInfo } from "node:net";
 
 let dir: string;
 let logger: Logger;
+let previousHome: string | undefined;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "carls-test-"));
   logger = new Logger("error");
-  // Keep tests hermetic: the machine-level /etc/carls/.carlsrc.json must not
-  // leak into assertions about defaults.
+  // Keep tests hermetic: neither the machine-level /etc/carls/.carlsrc.json nor
+  // a developer's own ~/.carlsrc.json may leak into assertions about defaults.
+  // $HOME is redirected because `userConfigPath()` resolves it through
+  // `homedir()`, and a real user config otherwise shadows the layer under test.
   process.env.CARLS_SYSTEM_CONFIG = join(dir, "no-system-config.json");
+  previousHome = process.env.HOME;
+  process.env.HOME = join(dir, "home");
 });
 
 afterEach(async () => {
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -888,6 +926,92 @@ describe("parallel tool execution", () => {
     );
     expect(ids).toEqual(["1", "2", "3", "4", "5"]);
   });
+
+  it("re-anchors the live state after the compaction pipeline summarises", async () => {
+    const { AgentLoop } = await import("../src/core/AgentLoop.js");
+    const { CostTracker } = await import("../src/core/CostTracker.js");
+    const { Hooks } = await import("../src/core/Hooks.js");
+    const { CompactionPipeline } = await import("../src/core/CompactionPipeline.js");
+    const { BashExecution } = await import("../src/tools/BashExecution.js");
+
+    const registry = new ToolRegistry();
+    registry.register(new BashExecution());
+
+    const config = loadConfig({ yolo: true, maxSteps: 6 }, dir);
+    const session = new SessionStore(dir, config.model, undefined, join(dir, "sessions"));
+    // A tiny window plus a high mask threshold isolates the compaction path: the
+    // loop must reach layer 5, not the cheap masking pass.
+    const contextManager = new ContextManager({
+      contextWindow: 900,
+      compactThreshold: 0.2,
+      truncateLimit: 8000,
+      keepRecent: 2,
+      maskThreshold: 5,
+    });
+
+    let liveStateBuilt = false;
+    let summarizeCalls = 0;
+    const compaction = new CompactionPipeline({
+      contextManager,
+      buildLiveState: async () => {
+        liveStateBuilt = true;
+        return "LIVE STATE: goal=ship it, next node n1";
+      },
+      summarize: async () => {
+        summarizeCalls++;
+        return { goal: "ship it", filesTouched: [], errorsResolved: [], summary: "did work", nextStep: "continue" };
+      },
+    });
+
+    const scripted: import("../src/types/llm.js").LLMResponse[] = [
+      {
+        content: [{ type: "tool_use", id: "1", name: "bash", input: { command: "node -e \"console.log('x'.repeat(4000))\"" } }],
+        stopReason: "tool_use",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+      {
+        content: [{ type: "text", text: "done" }],
+        stopReason: "end_turn",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+    ];
+
+    let sawLiveState = false;
+    const provider: import("../src/types/llm.js").Provider = {
+      name: "scripted",
+      async complete(args) {
+        const flat = args.messages.flatMap((m) => m.content);
+        if (flat.some((b) => b.type === "text" && b.text.includes("LIVE STATE"))) sawLiveState = true;
+        const next = scripted.shift();
+        if (!next) throw new Error("scripted provider exhausted");
+        return next;
+      },
+    };
+
+    const loop = new AgentLoop({
+      provider,
+      registry,
+      gate: new PermissionGate(config, logger, async () => "y"),
+      contextManager,
+      session,
+      costTracker: new CostTracker(config.model),
+      hooks: new Hooks(config.hooks, logger, dir),
+      config,
+      logger,
+      systemPrompt: "test",
+      toolContext: { cwd: dir, config, session, logger },
+      compaction,
+    });
+
+    const history: Message[] = [{ role: "user", content: [{ type: "text", text: "ship it" }] }];
+    const result = await loop.run(history, "ship it", { silent: true });
+
+    expect(result.stoppedReason).toBe("completed");
+    expect(summarizeCalls).toBeGreaterThan(0);
+    expect(liveStateBuilt).toBe(true);
+    // The re-anchored block is what the model read on the step after the summary.
+    expect(sawLiveState).toBe(true);
+  });
 });
 
 describe("httpError classification", () => {
@@ -1235,6 +1359,50 @@ describe("new tools", () => {
     expect(runtime.registry.names()).toContain("computer_use");
     expect(runtime.registry.names()).toContain("apply_patch");
   });
+
+  it("registers the horizon and skill-evolution tools", async () => {
+    const config = { ...loadConfig({}, dir), apiKey: "test-key" };
+    const session = new SessionStore(dir, config.model, undefined, join(dir, "sessions"));
+    const runtime = new Runtime({ config, logger, session });
+
+    for (const name of ["plan_task", "advance_task", "read_task_graph", "resume_task", "evolve_skill", "review_skills", "skill_history", "revert_skill", "skill_graph"]) {
+      expect(runtime.registry.names()).toContain(name);
+    }
+    // The plan tools are advertised, so the model can use them without a flag.
+    expect(runtime.advertisedTools().names()).toContain("plan_task");
+  });
+
+  it("wires the plan, memory and receipt into one runtime", async () => {
+    const workspace = join(dir, "wired-runtime");
+    await mkdir(workspace, { recursive: true });
+    const config = { ...loadConfig({}, workspace), apiKey: "test-key" };
+    const session = new SessionStore(workspace, config.model, undefined, join(workspace, "sessions"));
+    const runtime = new Runtime({ config, logger, session });
+
+    // A plan written through the runtime's own DAG is visible to its live state.
+    runtime.dag.plan("ship the feature", [{ title: "write it", acceptanceCriteria: "tests pass" }]);
+    const liveState = await runtime.buildLiveState();
+    expect(liveState).toContain("ship the feature");
+    expect(liveState).toContain("tests pass");
+
+    // A correction typed mid-run is learned as a rule and re-anchored.
+    runtime.steer("no, use the other API instead");
+    expect(runtime.operatorMemory.all().length).toBe(1);
+    expect(await runtime.buildLiveState()).toContain("use the other API");
+
+    // An approval is not learned and not forwarded as an instruction.
+    runtime.steer("ok continue");
+    expect(runtime.operatorMemory.all().length).toBe(1);
+    expect(runtime.takeSteering().some((text) => text.includes("ok continue"))).toBe(false);
+
+    // The plan survives a fresh Runtime over the same workspace, which is the
+    // whole point of persisting it: a restart must not lose where the work was.
+    const restarted = new Runtime({ config, logger, session: new SessionStore(workspace, config.model, undefined, join(workspace, "sessions")) });
+    expect(restarted.dag.all().length).toBe(1);
+    expect(restarted.dag.snapshot().objective).toBe("ship the feature");
+    // And the learned rule survives too, since it lives in the workspace.
+    expect(restarted.operatorMemory.all()[0]?.text).toContain("use the other API");
+  });
 });
 
 describe("provider registry", () => {
@@ -1355,7 +1523,32 @@ describe("platform abstraction", () => {
       expect(path.length).toBeGreaterThan(0);
     }
   });
+
+  it("does not call require() from ESM source", async () => {
+    // `require` does not exist in an ES module, so a stray call throws
+    // ReferenceError at runtime. Inside a try/catch it fails silently, which is
+    // how the Windows terminal setup went unnoticed. The build must not contain
+    // a bare require().
+    const sources = await collectFiles(join(process.cwd(), "src"));
+    expect(sources.length).toBeGreaterThan(0);
+    for (const source of sources) {
+      const text = await readFile(source, "utf8");
+      // Ignore comments and `createRequire`-style calls.
+      const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+      expect(code, `${source} calls require()`).not.toMatch(/(?<![\w.])require\s*\(/);
+    }
+  });
 });
+
+async function collectFiles(root: string): Promise<string[]> {
+  const found: string[] = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const full = join(root, entry.name);
+    if (entry.isDirectory()) found.push(...(await collectFiles(full)));
+    else if (entry.name.endsWith(".ts")) found.push(full);
+  }
+  return found;
+}
 
 describe("permission gate hardening", () => {
   function gateFor(mode: PermissionMode): PermissionGate {
@@ -3216,4 +3409,1683 @@ describe("@file mentions", () => {
       server.close();
     }
   }, 30000);
+});
+
+describe("session tabs", () => {
+  it("adds, wraps and selects without losing the active tab", async () => {
+    const { TabManager } = await import("../src/cli/Tabs.js");
+    const tabs = new TabManager<{ n: number }>({ id: "a", title: "a", payload: { n: 1 } });
+    expect(tabs.size).toBe(1);
+    expect(tabs.current().id).toBe("a");
+
+    tabs.add({ id: "b", title: "b", payload: { n: 2 } });
+    tabs.add({ id: "c", title: "c", payload: { n: 3 } });
+    expect(tabs.size).toBe(3);
+    // `add` makes the new tab active.
+    expect(tabs.current().id).toBe("c");
+
+    expect(tabs.next()).toBe(0);
+    expect(tabs.current().id).toBe("a");
+    // Wrapping backwards from the first lands on the last.
+    expect(tabs.prev()).toBe(2);
+    expect(tabs.current().id).toBe("c");
+    // Out-of-range jumps are ignored rather than throwing.
+    expect(tabs.select(9)).toBe(2);
+    expect(tabs.select(-1)).toBe(2);
+  });
+
+  it("refuses to close the final tab and keeps the selection sensible", async () => {
+    const { TabManager } = await import("../src/cli/Tabs.js");
+    const tabs = new TabManager<string>({ id: "a", title: "a", payload: "A" });
+    expect(tabs.close(0)).toBe(false);
+    expect(tabs.size).toBe(1);
+
+    tabs.add({ id: "b", title: "b", payload: "B" });
+    tabs.add({ id: "c", title: "c", payload: "C" });
+    tabs.select(0);
+    // Closing the active first tab slides the next one into its slot.
+    expect(tabs.close(0)).toBe(true);
+    expect(tabs.size).toBe(2);
+    expect(tabs.activeIndex).toBe(0);
+    expect(tabs.current().id).toBe("b");
+    // Closing the tail clamps the index to the new last tab.
+    tabs.select(1);
+    expect(tabs.close(1)).toBe(true);
+    expect(tabs.activeIndex).toBe(0);
+    expect(tabs.current().id).toBe("b");
+  });
+
+  it("derives a short tab title from the first line of a goal", async () => {
+    const { shortTitle } = await import("../src/cli/Tabs.js");
+    expect(shortTitle("  fix   the parser\nand the lexer  ")).toBe("fix the parser and the …");
+    expect(shortTitle("")).toBe("untitled");
+    expect(shortTitle("short")).toBe("short");
+  });
+
+  it("hides the strip for one tab and marks the active one otherwise", async () => {
+    const { tabStripLine } = await import("../src/cli/TerminalUI.js");
+    expect(tabStripLine([{ title: "only" }], 0)).toBeUndefined();
+    const strip = tabStripLine([{ title: "one" }, { title: "two" }], 1);
+    expect(strip).toBeDefined();
+    // Both labels are present, and the active one is bracketed.
+    expect(strip).toContain("1:one");
+    expect(strip).toContain("[2:two]");
+    const { visibleWidth } = await import("../src/cli/Text.js");
+    expect(visibleWidth(strip ?? "")).toBeLessThan(200);
+  });
+});
+
+describe("Chrome tab strip", () => {
+  it("gives the strip a row and shifts the region down when tabs are shown", async () => {
+    const { Chrome } = await import("../src/cli/Chrome.js");
+    const { PassThrough } = await import("node:stream");
+    const out = new PassThrough() as unknown as NodeJS.WriteStream;
+    (out as unknown as { isTTY: boolean }).isTTY = true;
+    (out as unknown as { columns: number }).columns = 80;
+    (out as unknown as { rows: number }).rows = 24;
+
+    const chrome = new Chrome(out);
+    const bare = chrome.enable(["header"]);
+    expect(bare).toBeDefined();
+    expect(bare?.tabRow).toBe(0);
+    const bareTop = bare?.regionTop ?? 0;
+
+    chrome.setTabs("1:one │[2:two]");
+    const withTabs = chrome.current();
+    // The strip sits directly under the header, so it is headerRows + 1.
+    expect(withTabs.tabRow).toBe((bare?.headerRows ?? 0) + 1);
+    // The conversation region starts one row lower to make space for the strip.
+    expect(withTabs.regionTop).toBe(bareTop + 1);
+
+    chrome.setTabs(undefined);
+    expect(chrome.current().tabRow).toBe(0);
+    expect(chrome.current().regionTop).toBe(bareTop);
+  });
+});
+
+describe("Prompt tab bindings", () => {
+  async function pressKey(sequence: string): Promise<string> {
+    const { Prompt } = await import("../src/cli/Prompt.js");
+    const { PassThrough } = await import("node:stream");
+    const input = new PassThrough() as unknown as NodeJS.ReadStream;
+    (input as unknown as { isTTY: boolean }).isTTY = true;
+    const output = new PassThrough() as unknown as NodeJS.WriteStream;
+    const prompt = new Prompt(input, output);
+    const pending = prompt.read({ prompt: "carls> " });
+    await new Promise((r) => setTimeout(r, 10));
+    input.write(sequence);
+    const result = await pending;
+    return result.type;
+  }
+
+  it("reports ctrl+t, ctrl+x, ctrl+n and ctrl+b as tab actions", async () => {
+    expect(await pressKey("\u0014")).toBe("new-tab");
+    expect(await pressKey("\u0018")).toBe("close-tab");
+    expect(await pressKey("\u000e")).toBe("next-tab");
+    expect(await pressKey("\u0002")).toBe("sidebar");
+  });
+});
+
+describe("terminal dimension fallback", () => {
+  it("treats a zero column count as unknown, not as zero width", async () => {
+    const { terminalDimension, clampWidth } = await import("../src/cli/Text.js");
+    // A pty with no window size set reports 0; `0 ?? fallback` would keep it.
+    expect(terminalDimension(0, 80)).toBe(80);
+    expect(terminalDimension(undefined, 80)).toBe(80);
+    expect(terminalDimension(120, 80)).toBe(120);
+    expect(clampWidth(0, 80)).toBe(80);
+    expect(clampWidth(5, 80)).toBe(20);
+    expect(clampWidth(120, 80)).toBe(120);
+  });
+});
+
+describe("Chrome header must not erase the tab strip", () => {
+  it("never paints more header lines than the layout reserves", async () => {
+    const { Chrome } = await import("../src/cli/Chrome.js");
+    const { PassThrough } = await import("node:stream");
+    const out = new PassThrough() as unknown as NodeJS.WriteStream;
+    (out as unknown as { isTTY: boolean }).isTTY = true;
+    (out as unknown as { columns: number }).columns = 80;
+    // Short terminal: the six-line banner cannot all fit above the footer.
+    (out as unknown as { rows: number }).rows = 12;
+    const writes: string[] = [];
+    out.on("data", (chunk: Buffer) => writes.push(chunk.toString()));
+
+    const chrome = new Chrome(out);
+    chrome.enable(["h1", "h2", "h3", "h4", "h5", "h6"]);
+    writes.length = 0;
+
+    // Showing the strip costs a row, so the banner can no longer fit whole.
+    chrome.setTabs("1:a │[2:b]");
+    const layout = chrome.current();
+    expect(layout.headerRows).toBe(5);
+    expect(layout.tabRow).toBe(6);
+
+    const painted = writes.join("");
+    // The strip must survive: the overflow header line ("h6") may not be painted
+    // at all, because its row is now the strip's.
+    expect(painted).toContain("1:a │[2:b]");
+    expect(painted).not.toContain("h6");
+    // Every header line that is painted stays strictly above the strip.
+    expect(painted).not.toContain(`\u001b[${layout.tabRow};1H\u001b[2Kh`);
+  });
+});
+
+describe("line endings (CRLF files, as produced on Windows)", () => {
+  const crlfCtx = (): ToolContext => makeContext();
+
+  it("edits a CRLF file with an LF old_string and keeps CRLF", async () => {
+    const file = join(dir, "win.txt");
+    await writeFile(file, "one\r\ntwo\r\nthree\r\n", "utf8");
+    const tool = new FileEdit();
+
+    const result = await tool.run(
+      tool.parse({ path: "win.txt", old_string: "one\ntwo", new_string: "merged" }),
+      crlfCtx(),
+    );
+
+    expect(result.ok).toBe(true);
+    // Untouched lines keep CRLF; the file is not silently converted to LF.
+    expect(await readFile(file, "utf8")).toBe("merged\r\nthree\r\n");
+  });
+
+  it("keeps CRLF when the replacement adds a line", async () => {
+    const file = join(dir, "grow.txt");
+    await writeFile(file, "a\r\nb\r\n", "utf8");
+    const tool = new FileEdit();
+
+    const result = await tool.run(
+      tool.parse({ path: "grow.txt", old_string: "b", new_string: "b1\nb2" }),
+      crlfCtx(),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(await readFile(file, "utf8")).toBe("a\r\nb1\r\nb2\r\n");
+  });
+
+  it("still counts occurrences across line endings", async () => {
+    const file = join(dir, "dup-crlf.txt");
+    await writeFile(file, "same\r\nsame\r\n", "utf8");
+    const tool = new FileEdit();
+
+    const result = await tool.run(tool.parse({ path: "dup-crlf.txt", old_string: "same", new_string: "x" }), crlfCtx());
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("matches 2 times");
+  });
+
+  it("applies an LF patch to a CRLF file without rewriting every line", async () => {
+    const file = join(dir, "patch-crlf.txt");
+    await writeFile(file, "alpha\r\nbeta\r\ngamma\r\n", "utf8");
+    const tool = new ApplyPatch();
+    const patch = "@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma";
+
+    const result = await tool.run(tool.parse({ path: "patch-crlf.txt", patch }), crlfCtx());
+
+    expect(result.ok).toBe(true);
+    expect(await readFile(file, "utf8")).toBe("alpha\r\nBETA\r\ngamma\r\n");
+  });
+
+  it("applies a CRLF patch, as a Windows diff tool would emit", async () => {
+    const file = join(dir, "patch-crlf2.txt");
+    await writeFile(file, "alpha\r\nbeta\r\ngamma\r\n", "utf8");
+    const tool = new ApplyPatch();
+    const patch = "@@ -1,3 +1,3 @@\r\n alpha\r\n-beta\r\n+BETA\r\n gamma";
+
+    const result = await tool.run(tool.parse({ path: "patch-crlf2.txt", patch }), crlfCtx());
+
+    expect(result.ok).toBe(true);
+    expect(await readFile(file, "utf8")).toBe("alpha\r\nBETA\r\ngamma\r\n");
+  });
+
+  it("reads a CRLF file without leaking carriage returns to the model", async () => {
+    const file = join(dir, "read-crlf.txt");
+    await writeFile(file, "one\r\ntwo\r\n", "utf8");
+    const tool = new FileRead();
+
+    const result = await tool.run(tool.parse({ path: "read-crlf.txt" }), crlfCtx());
+
+    expect(result.ok).toBe(true);
+    expect(result.output).not.toContain("\r");
+    expect(result.output).toContain("1→one");
+  });
+
+  it("keeps a mixed-ending file mixed instead of imposing one ending", async () => {
+    const file = join(dir, "mixed.txt");
+    await writeFile(file, "a\r\nb\nc\r\n", "utf8");
+    const tool = new FileEdit();
+
+    const result = await tool.run(tool.parse({ path: "mixed.txt", old_string: "b", new_string: "B\nB2" }), crlfCtx());
+
+    expect(result.ok).toBe(true);
+    // The inserted line follows the LF that was there; the CRLF lines are untouched.
+    expect(await readFile(file, "utf8")).toBe("a\r\nB\nB2\nc\r\n");
+  });
+});
+
+describe("repo_map index", () => {
+  it("extracts declarations with signatures and members", () => {
+    const source = [
+      "export interface Guard {",
+      "  cwd: string;",
+      "  allowOutsideWorkspace: boolean;",
+      "}",
+      "",
+      "export class Paths {",
+      "  private root: string;",
+      "  resolve(p: string): string {",
+      "    return p;",
+      "  }",
+      "}",
+      "",
+      "export function guardPath(ctx: Guard, path: string): string {",
+      "  return path;",
+      "}",
+    ].join("\n");
+
+    const symbols = extractSymbols(source, "src/paths.ts", true);
+    const guard = symbols.find((s) => s.name === "Guard");
+    const paths = symbols.find((s) => s.name === "Paths");
+    const fn = symbols.find((s) => s.name === "guardPath");
+
+    expect(guard?.kind).toBe("interface");
+    expect(guard?.members).toContain("cwd: string;");
+    expect(paths?.members).toContain("private root: string;");
+    // A method's own statements are implementation, not interface.
+    expect(paths?.members).not.toContain("return p;");
+    expect(fn?.line).toBe(13);
+    expect(fn?.exported).toBe(true);
+    expect(fn?.signature).toContain("export function guardPath");
+  });
+
+  it("indexes a workspace and answers symbol queries", async () => {
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(
+      join(dir, "src", "alpha.ts"),
+      "export function alphaOne(): number {\n  return 1;\n}\n",
+      "utf8",
+    );
+    await writeFile(
+      join(dir, "src", "beta.ts"),
+      'import { alphaOne } from "./alpha.js";\nexport const betaValue = alphaOne();\n',
+      "utf8",
+    );
+
+    const map = new RepoMap(dir);
+    const stats = map.build();
+
+    expect(stats.files).toBe(2);
+    expect(map.find("alphaOne")).toHaveLength(1);
+    expect(map.find("alphaOne")[0]?.file).toBe("src/alpha.ts");
+    // Imports resolve across the .js/.ts extension boundary.
+    expect(map.dependents("src/alpha.ts")).toEqual(["src/beta.ts"]);
+  });
+
+  it("keeps the rendered map inside its token budget", async () => {
+    await mkdir(join(dir, "src"), { recursive: true });
+    for (let i = 0; i < 30; i++) {
+      const body = Array.from({ length: 20 }, (_, n) => `  export const value${n} = ${n};`).join("\n");
+      await writeFile(join(dir, `src/mod${i}.ts`), `${body}\n`, "utf8");
+    }
+    const map = new RepoMap(dir);
+    map.build();
+
+    const rendered = map.render(300);
+    // 300 tokens at ~3.6 chars/token, with room for the clip marker.
+    expect(rendered.length).toBeLessThanOrEqual(300 * 3.6 + 64);
+  });
+
+  it("reports an empty map rather than throwing", () => {
+    const map = new RepoMap(dir);
+    map.build();
+    expect(map.render(500)).toBe("The repository map is empty.");
+  });
+
+  it("serves queries through the repo_map tool", async () => {
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(join(dir, "src", "one.ts"), "export class Widget {\n}\n", "utf8");
+    const tool = new RepoMapTool(new RepoMap(dir));
+
+    const found = await tool.run(tool.parse({ query: "Widget" }), makeContext());
+    expect(found.ok).toBe(true);
+    expect(found.output).toContain("src/one.ts");
+    expect(found.output).toContain("class Widget");
+
+    const missing = await tool.run(tool.parse({ query: "NoSuchSymbol" }), makeContext());
+    expect(missing.ok).toBe(true);
+    expect(missing.output).toContain("No symbol matches");
+  });
+});
+
+describe("observation masking", () => {
+  const pair = (id: string, content: string, isError = false): Message[] => [
+    { role: "assistant", content: [{ type: "tool_use", id, name: "bash", input: { command: "npm test" } }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: id, content, is_error: isError }] },
+  ];
+
+  it("replaces old observations while keeping every tool pair intact", () => {
+    const manager = new ContextManager({
+      contextWindow: 1000,
+      compactThreshold: 0.75,
+      truncateLimit: 8000,
+      maskMinChars: 100,
+    });
+    const messages: Message[] = [];
+    for (let i = 0; i < 30; i++) {
+      messages.push(...pair(`t${i}`, `${"x".repeat(5000)}\n[exit code] 0`));
+    }
+
+    const masked = manager.maskObservations(messages);
+
+    expect(manager.lastMaskedCount).toBeGreaterThan(0);
+    // Nothing is dropped or reordered, so the provider still accepts the request.
+    expect(masked).toHaveLength(messages.length);
+    const uses = masked.flatMap((m) => m.content.filter((b) => b.type === "tool_use").map((b) => b.id));
+    const results = masked.flatMap((m) =>
+      m.content.filter((b) => b.type === "tool_result").map((b) => b.tool_use_id),
+    );
+    expect(results).toEqual(uses);
+  });
+
+  it("leaves the recent tail verbatim and shrinks the history", () => {
+    const manager = new ContextManager({
+      contextWindow: 1000,
+      compactThreshold: 0.75,
+      truncateLimit: 8000,
+      maskMinChars: 100,
+    });
+    const messages: Message[] = [];
+    for (let i = 0; i < 30; i++) {
+      messages.push(...pair(`t${i}`, `${"x".repeat(5000)}\n[exit code] 0`));
+    }
+
+    const masked = manager.maskObservations(messages);
+
+    const before = JSON.stringify(messages).length;
+    const after = JSON.stringify(masked).length;
+    expect(after).toBeLessThan(before);
+    // The newest pair is untouched, so current reasoning keeps its detail.
+    expect(masked[masked.length - 1]).toBe(messages[messages.length - 1]);
+  });
+
+  it("keeps a failure observation's detail instead of masking it away", () => {
+    const manager = new ContextManager({
+      contextWindow: 1000,
+      compactThreshold: 0.75,
+      truncateLimit: 8000,
+      maskMinChars: 100,
+    });
+    const failure = `${"e".repeat(150)}\n[exit code] 1`;
+    const messages: Message[] = [
+      ...pair("t0", failure, true),
+      ...Array.from({ length: 12 }, (_, i) => pair(`t${i + 1}`, `${"x".repeat(5000)}\n[exit code] 0`)).flat(),
+    ];
+
+    const masked = manager.maskObservations(messages);
+    const first = masked[1]?.content[0];
+    expect(first?.type).toBe("tool_result");
+    if (first?.type === "tool_result") {
+      expect(first.is_error).toBe(true);
+      expect(first.content).toBe(failure);
+    }
+  });
+
+  it("digests an observation down to its outcome", () => {
+    expect(digest("Tests 186 passed (186)\n[exit code] 0", false)).toContain("186 tests ok");
+    expect(digest("a.ts(1,1): error TS1: x\n2 errors", true)).toContain("2 errors");
+    expect(digest("@@ -1,2 +1,3 @@\n@@ -8,1 +9,2 @@", false)).toContain("2 hunks");
+    // With nothing recognisable, the size still tells the model what happened.
+    expect(digest("plain output", false)).toContain("chars");
+  });
+});
+
+describe("shadow git checkpoints", () => {
+  const git = (args: string[], cwd: string): string =>
+    execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+
+  const repo = async (): Promise<string> => {
+    const root = await mkdtemp(join(tmpdir(), "carls-shadow-"));
+    git(["init", "-q", "."], root);
+    git(["config", "user.email", "test@example.com"], root);
+    git(["config", "user.name", "Test"], root);
+    await writeFile(join(root, "tracked.txt"), "v1\n", "utf8");
+    git(["add", "tracked.txt"], root);
+    git(["commit", "-qm", "init"], root);
+    return root;
+  };
+
+  it("does not disturb the user's index, HEAD or branch", async () => {
+    const root = await repo();
+    // Something the developer staged, which a careless checkpoint would clobber.
+    await writeFile(join(root, "staged.txt"), "staged\n", "utf8");
+    git(["add", "staged.txt"], root);
+    const headBefore = git(["rev-parse", "HEAD"], root);
+    const stagedBefore = git(["diff", "--cached", "--name-only"], root);
+
+    const shadow = new ShadowGit(root);
+    await writeFile(join(root, "untracked.txt"), "new\n", "utf8");
+    const checkpoint = shadow.create("before refactor");
+
+    expect(checkpoint).toBeDefined();
+    expect(git(["diff", "--cached", "--name-only"], root)).toBe(stagedBefore);
+    expect(git(["rev-parse", "HEAD"], root)).toBe(headBefore);
+    expect(git(["rev-parse", "--abbrev-ref", "HEAD"], root)).toBe("master");
+    // The checkpoint lives on its own ref, invisible to a normal git log.
+    expect(git(["for-each-ref", "--format=%(refname)", "refs/carls/checkpoints"], root)).toContain(
+      "refs/carls/checkpoints/",
+    );
+    shadow.dispose();
+  });
+
+  it("captures untracked files and rewinds the tree to them", async () => {
+    const root = await repo();
+    const shadow = new ShadowGit(root);
+    await writeFile(join(root, "untracked.txt"), "keep me\n", "utf8");
+    const checkpoint = shadow.create("with untracked");
+    expect(checkpoint?.files).toBe(2);
+
+    // Break the tracked file and add a new one after the snapshot.
+    await writeFile(join(root, "tracked.txt"), "v2-BROKEN\n", "utf8");
+    await writeFile(join(root, "added-later.txt"), "junk\n", "utf8");
+
+    const result = shadow.rewind(checkpoint!);
+
+    expect(await readFile(join(root, "tracked.txt"), "utf8")).toBe("v1\n");
+    expect(existsSync(join(root, "untracked.txt"))).toBe(true);
+    // A file that did not exist at snapshot time is removed.
+    expect(existsSync(join(root, "added-later.txt"))).toBe(false);
+    expect(result.deleted).toContain("added-later.txt");
+    shadow.dispose();
+  });
+
+  it("respects .gitignore, so build output is never captured or deleted", async () => {
+    const root = await repo();
+    await writeFile(join(root, ".gitignore"), "dist/\n", "utf8");
+    await mkdir(join(root, "dist"), { recursive: true });
+    await writeFile(join(root, "dist", "bundle.js"), "compiled\n", "utf8");
+
+    const shadow = new ShadowGit(root);
+    const checkpoint = shadow.create("ignoring dist");
+
+    // `.gitignore` is itself a new, unignored file, so it is captured; dist/ is not.
+    const captured = git(["ls-tree", "-r", "--name-only", checkpoint!.commit], root).split("\n");
+    expect(captured).toContain("tracked.txt");
+    expect(captured).toContain(".gitignore");
+    expect(captured).not.toContain("dist/bundle.js");
+
+    shadow.rewind(checkpoint!);
+    expect(existsSync(join(root, "dist", "bundle.js"))).toBe(true);
+    shadow.dispose();
+  });
+
+  it("lists, resolves and diffs checkpoints", async () => {
+    const root = await repo();
+    const shadow = new ShadowGit(root);
+    const checkpoint = shadow.create("first")!;
+
+    expect(shadow.list().map((c) => c.id)).toContain(checkpoint.id);
+    expect(shadow.resolve(checkpoint.id)?.label).toBe("first");
+    expect(shadow.resolve(checkpoint.commit.slice(0, 10))?.id).toBe(checkpoint.id);
+
+    await writeFile(join(root, "tracked.txt"), "v2\n", "utf8");
+    const patch = shadow.diff(checkpoint);
+    expect(patch).toContain("-v1");
+    expect(patch).toContain("+v2");
+    shadow.dispose();
+  });
+
+  it("is inert outside a git repository", async () => {
+    const plain = await mkdtemp(join(tmpdir(), "carls-nogit-"));
+    const shadow = new ShadowGit(plain);
+
+    expect(shadow.enabled).toBe(false);
+    expect(shadow.create("nothing")).toBeUndefined();
+    expect(shadow.list()).toEqual([]);
+    shadow.dispose();
+  });
+});
+
+describe("os runtime adapter", () => {
+  it("detects the platform and exposes a shell for it", () => {
+    const profile = detectOsProfile();
+    expect(["win32", "linux", "darwin", "android", "other"]).toContain(profile.platform);
+    expect(profile.shell.file.length).toBeGreaterThan(0);
+    expect(profile.shell.args.length).toBeGreaterThan(0);
+    // POSIX is exactly "not Windows", which is what the prompt builder keys off.
+    expect(profile.posix).toBe(!isWindows());
+  });
+
+  it("classifies Termux as android, not linux", () => {
+    const saved = { ...process.env };
+    try {
+      process.env.TERMUX_VERSION = "0.118";
+      process.env.PREFIX = "/data/data/com.termux/files/usr";
+      expect(isTermux()).toBe(true);
+      expect(currentPlatform()).toBe("android");
+      // The Termux shell lives under $PREFIX, never at /bin/bash.
+      const shell = shellForPlatform();
+      expect(shell.file.startsWith("/data/data/com.termux/files/usr")).toBe(true);
+    } finally {
+      process.env = saved;
+    }
+  });
+
+  it("normalises workspace paths deterministically", () => {
+    const base = "/work/project";
+    expect(normalizeWorkspacePath("src/a.ts", base)).toBe("/work/project/src/a.ts");
+    expect(normalizeWorkspacePath("./src/../src/a.ts", base)).toBe("/work/project/src/a.ts");
+    expect(normalizeWorkspacePath("/abs/./b/../c.ts", base)).toBe("/abs/c.ts");
+    // Two spellings of the same file must collapse to one string.
+    expect(normalizeWorkspacePath("src/./a.ts", base)).toBe(normalizeWorkspacePath("src/a.ts", base));
+  });
+
+  it("forces UTF-8 output from child processes", () => {
+    const env = utf8Env();
+    if (isWindows()) {
+      expect(env.PYTHONIOENCODING).toBe("utf-8");
+      expect(env.PYTHONUTF8).toBe("1");
+    } else {
+      expect(env.LANG).toContain("UTF-8");
+      expect(env.LC_ALL).toContain("UTF-8");
+    }
+  });
+
+  it("reports a cwd that is intact, missing, or not a directory", async () => {
+    const ok = verifyCwdIntegrity(dir);
+    expect(ok.ok).toBe(true);
+
+    const gone = verifyCwdIntegrity(join(dir, "does-not-exist"));
+    expect(gone.ok).toBe(false);
+    expect(gone.reason).toContain("no longer exists");
+
+    const file = join(dir, "a-file.txt");
+    await writeFile(file, "x\n", "utf8");
+    const notDir = verifyCwdIntegrity(file);
+    expect(notDir.ok).toBe(false);
+    expect(notDir.reason).toContain("no longer a directory");
+  });
+
+  it("kills a whole process tree, not just the shell", async () => {
+    // The shell backgrounds a long-lived grandchild and keeps running itself, so
+    // killing only the shell would leave the grandchild behind.
+    const tool = new BashExecution();
+    const ctx = makeContext();
+    const outcome = await tool.run(
+      tool.parse({
+        command: `node -e "setInterval(()=>{},100)" & echo "gc=$!"; sleep 30; true`,
+        timeout_ms: 1200,
+      }),
+      ctx,
+    );
+    const match = /gc=(\d+)/.exec(outcome.output);
+    expect(match).not.toBeNull();
+    const grandchild = Number(match?.[1]);
+    expect(Number.isFinite(grandchild)).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    // `process.kill(pid, 0)` succeeds for a zombie, so the state is read instead:
+    // a dead-but-unreaped child shows `Z`, which is still a successful kill.
+    const state = execFileSync("ps", ["-o", "stat=", "-p", String(grandchild)], { encoding: "utf8" }).trim();
+    expect(state === "" || state.startsWith("Z")).toBe(true);
+  });
+
+  it("reports a workspace the command destroyed instead of a later ENOENT", async () => {
+    const victim = join(dir, "victim");
+    await mkdir(victim, { recursive: true });
+    const tool = new BashExecution();
+    const ctx = { ...makeContext(), cwd: victim };
+
+    const outcome = await tool.run(tool.parse({ command: "cd .. && rm -rf victim" }), ctx);
+
+    expect(existsSync(victim)).toBe(false);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.metadata?.cwdIntact).toBe(false);
+    expect(outcome.error).toContain("workspace root was damaged");
+  });
+
+  it("leaves a normal command's cwd untouched", async () => {
+    const tool = new BashExecution();
+    const outcome = await tool.run(tool.parse({ command: "echo hi && pwd" }), makeContext());
+    expect(outcome.ok).toBe(true);
+    expect(outcome.metadata?.cwdIntact).toBe(true);
+    expect(outcome.output).toContain("hi");
+  });
+
+  it("spawns detached only where a process group exists", () => {
+    expect(needsDetachedGroup()).toBe(!isWindows());
+  });
+
+  it("degrades silently when no sandbox is installed", () => {
+    const availability = detectSandbox();
+    expect(["bubblewrap", "seatbelt", "none"]).toContain(availability.kind);
+    if (availability.kind === "none") {
+      // Still usable: the caller runs the command directly.
+      expect(sandboxCommand("/bin/bash", ["-lc"], "echo hi", "/tmp")).toBeUndefined();
+    } else {
+      const wrapped = sandboxCommand("/bin/bash", ["-lc"], "echo hi", "/tmp");
+      expect(wrapped?.file).toBe(availability.binary);
+      expect(wrapped?.args).toContain("echo hi");
+    }
+  });
+
+  it("kills an already-dead pid without throwing", () => {
+    expect(() => killProcessTree(undefined)).not.toThrow();
+    expect(() => killProcessTree(0)).not.toThrow();
+    // A pid that cannot exist: the helper must swallow ESRCH.
+    expect(() => killProcessTree(2 ** 30)).not.toThrow();
+  });
+});
+
+describe("transaction manager", () => {
+  const git = (args: string[], cwd: string): string =>
+    execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+
+  const repo = async (): Promise<string> => {
+    const root = await mkdtemp(join(tmpdir(), "carls-tx-"));
+    git(["init", "-q", "."], root);
+    git(["config", "user.email", "test@example.com"], root);
+    git(["config", "user.name", "Test"], root);
+    await writeFile(join(root, "a.ts"), "export const a = 1;\n", "utf8");
+    git(["add", "-A"], root);
+    git(["commit", "-qm", "init"], root);
+    return root;
+  };
+
+  /** No language server configured: the LSP half is skipped, commands decide. */
+  const manager = (
+    root: string,
+    outcomes: Record<string, boolean>,
+    onRollback?: (outcome: { committed: boolean }) => void,
+  ): TransactionManager =>
+    new TransactionManager({
+      shadowGit: new ShadowGit(root),
+      backups: new BackupStore("tx-test", join(root, ".carls-backups")),
+      lsp: new LspSessionPool({ servers: undefined, cwd: root }),
+      defaultTimeoutMs: 5000,
+      runCommand: async (command) => ({
+        command,
+        ok: outcomes[command] ?? false,
+        output: outcomes[command] === true ? "ok" : "failed",
+      }),
+      ...(onRollback !== undefined ? { onRollback } : {}),
+    });
+
+  it("keeps a change whose verification passes", async () => {
+    const root = await repo();
+    const tx = manager(root, { "verify pass": true });
+    let ran = false;
+
+    const outcome = await tx.run(
+      { label: "good edit", files: [join(root, "a.ts")], commands: [{ command: "verify pass" }] },
+      async () => {
+        ran = true;
+        await writeFile(join(root, "a.ts"), "export const a = 42;\n", "utf8");
+      },
+    );
+
+    expect(ran).toBe(true);
+    expect(outcome.committed).toBe(true);
+    expect(outcome.rolledBack).toBe(false);
+    expect(outcome.snapshot).toBe("shadow-git");
+    expect(await readFile(join(root, "a.ts"), "utf8")).toContain("42");
+  });
+
+  it("rolls the whole tree back when a command fails", async () => {
+    const root = await repo();
+    const tx = manager(root, { "verify fail": false });
+
+    const outcome = await tx.run(
+      { label: "bad edit", files: [join(root, "a.ts")], commands: [{ command: "verify fail" }] },
+      async () => {
+        await writeFile(join(root, "a.ts"), "BROKEN (((\n", "utf8");
+        await writeFile(join(root, "added-later.ts"), "junk\n", "utf8");
+      },
+    );
+
+    expect(outcome.committed).toBe(false);
+    expect(outcome.rolledBack).toBe(true);
+    // Both halves of the rollback: the edit is undone and the new file is gone.
+    expect(await readFile(join(root, "a.ts"), "utf8")).toBe("export const a = 1;\n");
+    expect(existsSync(join(root, "added-later.ts"))).toBe(false);
+    expect(outcome.failedHypothesis).toBe("bad edit");
+    expect(outcome.reason).toContain("verification failed");
+  });
+
+  it("leaves the developer's staged index and HEAD alone through a rollback", async () => {
+    const root = await repo();
+    await writeFile(join(root, "staged.txt"), "staged\n", "utf8");
+    git(["add", "staged.txt"], root);
+    const headBefore = git(["rev-parse", "HEAD"], root);
+
+    const tx = manager(root, { "verify fail": false });
+    await tx.run(
+      { label: "bad edit", files: [join(root, "a.ts")], commands: [{ command: "verify fail" }] },
+      async () => {
+        await writeFile(join(root, "a.ts"), "BROKEN\n", "utf8");
+      },
+    );
+
+    expect(git(["diff", "--cached", "--name-only"], root)).toBe("staged.txt");
+    expect(git(["rev-parse", "HEAD"], root)).toBe(headBefore);
+  });
+
+  it("falls back to per-file backups when the workspace is not a repository", async () => {
+    const root = await mkdtemp(join(tmpdir(), "carls-nogit-"));
+    await writeFile(join(root, "keep.ts"), "export const original = true;\n", "utf8");
+
+    const tx = manager(root, { "verify fail": false });
+    const outcome = await tx.run(
+      { label: "edit without git", files: [join(root, "keep.ts")], commands: [{ command: "verify fail" }] },
+      async () => {
+        await writeFile(join(root, "keep.ts"), "DESTROYED\n", "utf8");
+      },
+    );
+
+    expect(outcome.snapshot).toBe("backups");
+    expect(outcome.rolledBack).toBe(true);
+    expect(await readFile(join(root, "keep.ts"), "utf8")).toContain("original = true");
+  });
+
+  it("rolls back when the change itself throws before verification", async () => {
+    const root = await repo();
+    const seen: { committed: boolean }[] = [];
+    const tx = manager(root, {}, (outcome) => seen.push({ committed: outcome.committed }));
+
+    const outcome = await tx.run(
+      { label: "throwing edit", files: [join(root, "a.ts")] },
+      async () => {
+        await writeFile(join(root, "a.ts"), "half written\n", "utf8");
+        throw new Error("the tool died mid-edit");
+      },
+    );
+
+    expect(outcome.committed).toBe(false);
+    expect(outcome.rolledBack).toBe(true);
+    expect(outcome.reason).toContain("failed before verification");
+    expect(await readFile(join(root, "a.ts"), "utf8")).toBe("export const a = 1;\n");
+    expect(seen).toHaveLength(1);
+  });
+
+  it("reports verification problems without a language server as command-only", async () => {
+    const root = await repo();
+    const tx = manager(root, { "one fail": false, "two pass": true });
+
+    const verification = await tx.verify({
+      label: "check",
+      files: [join(root, "a.ts")],
+      commands: [{ command: "one fail" }, { command: "two pass" }],
+    });
+
+    expect(verification.clean).toBe(false);
+    expect(verification.commands.map((entry) => entry.ok)).toEqual([false, true]);
+    expect(verification.lsp).toBeUndefined();
+    expect(verification.problems).toEqual(["one fail failed"]);
+  });
+});
+
+describe("lsp session pool", () => {
+  /**
+   * A real language server, minimal but protocol-correct: it answers initialize,
+   * tracks didOpen/didChange versions, and publishes one error diagnostic whose
+   * message encodes the version it saw. That is enough to prove the pool reuses
+   * one process and keeps the server's copy of the file current.
+   */
+  const serverScript = (): string => `
+const HEADER = /content-length:\\s*(\\d+)/i;
+let buffer = Buffer.alloc(0);
+const versions = new Map();
+const send = (msg) => {
+  const body = Buffer.from(JSON.stringify(msg), "utf8");
+  process.stdout.write(Buffer.concat([Buffer.from("Content-Length: " + body.length + "\\r\\n\\r\\n"), body]));
+};
+const diagnosticsFor = (uri) => [{
+  range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+  severity: 1,
+  message: "seen-version-" + (versions.get(uri) ?? 0),
+}];
+process.stdin.on("data", (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  for (;;) {
+    const head = buffer.indexOf("\\r\\n\\r\\n");
+    if (head === -1) return;
+    const m = HEADER.exec(buffer.subarray(0, head).toString("ascii"));
+    if (m === null) { buffer = buffer.subarray(head + 4); continue; }
+    const len = Number(m[1]);
+    const start = head + 4;
+    if (buffer.length < start + len) return;
+    const msg = JSON.parse(buffer.subarray(start, start + len).toString("utf8"));
+    buffer = buffer.subarray(start + len);
+    if (msg.method === "initialize") send({ jsonrpc: "2.0", id: msg.id, result: { capabilities: {} } });
+    else if (msg.method === "textDocument/didOpen") {
+      const uri = msg.params.textDocument.uri;
+      versions.set(uri, msg.params.textDocument.version);
+      send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri, diagnostics: diagnosticsFor(uri) } });
+    } else if (msg.method === "textDocument/didChange") {
+      const uri = msg.params.textDocument.uri;
+      versions.set(uri, msg.params.textDocument.version);
+      send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri, diagnostics: diagnosticsFor(uri) } });
+    } else if (msg.method === "shutdown") send({ jsonrpc: "2.0", id: msg.id, result: null });
+    else if (msg.method === "exit") process.exit(0);
+  }
+});
+`;
+
+  it("reuses one server process and keeps its copy of the file current", async () => {
+    const root = await mkdtemp(join(tmpdir(), "carls-lsp-"));
+    const script = join(root, "fake-lsp.mjs");
+    await writeFile(script, serverScript(), "utf8");
+    const file = join(root, "sample.ts");
+    await writeFile(file, "export const a = 1;\n", "utf8");
+
+    const pool = new LspSessionPool({
+      servers: { ".ts": { command: process.execPath, args: [script] } },
+      cwd: root,
+      initTimeoutMs: 8000,
+      diagnosticsTimeoutMs: 8000,
+    });
+
+    const first = await pool.diagnosticsForFile(file);
+    expect(first?.errors).toBe(1);
+    expect(first?.diagnostics[0]?.message).toBe("seen-version-1");
+    // One process, not one per call: the whole point of the pool.
+    expect(pool.activeCount()).toBe(1);
+
+    await writeFile(file, "export const a = 2;\n", "utf8");
+    const second = await pool.diagnosticsForFile(file);
+    // A second check sends didChange, so the server sees version 2.
+    expect(second?.diagnostics[0]?.message).toBe("seen-version-2");
+    expect(pool.activeCount()).toBe(1);
+
+    await pool.close();
+    expect(pool.activeCount()).toBe(0);
+  });
+
+  it("reports a server that will not start instead of blocking verification", async () => {
+    const root = await mkdtemp(join(tmpdir(), "carls-lsp-"));
+    const file = join(root, "sample.ts");
+    await writeFile(file, "export const a = 1;\n", "utf8");
+
+    const pool = new LspSessionPool({
+      servers: { ".ts": { command: "this-binary-does-not-exist-anywhere", args: [] } },
+      cwd: root,
+      initTimeoutMs: 3000,
+      diagnosticsTimeoutMs: 3000,
+    });
+
+    const verification = await pool.verify([file]);
+    // A missing server is informational, never a failed change.
+    expect(verification.clean).toBe(true);
+    expect(verification.checked).toBe(0);
+    expect(verification.unavailable[0]?.key).toBe(".ts");
+    await pool.close();
+  });
+
+  it("maps files to the server by extension and by name", () => {
+    const pool = new LspSessionPool({
+      servers: { ".ts": { command: "tsserver" }, Makefile: { command: "make-ls" } },
+      cwd: "/tmp",
+    });
+    expect(pool.specFor("/a/b/file.ts")?.key).toBe(".ts");
+    expect(pool.specFor("/a/b/Makefile")?.key).toBe("Makefile");
+    expect(pool.specFor("/a/b/file.rs")).toBeUndefined();
+    expect(pool.configured).toBe(true);
+
+    const empty = new LspSessionPool({ servers: undefined, cwd: "/tmp" });
+    expect(empty.configured).toBe(false);
+  });
+
+  it("skips files with no configured server", async () => {
+    const pool = new LspSessionPool({ servers: { ".ts": { command: "tsserver" } }, cwd: "/tmp" });
+    const verification = await pool.verify(["/tmp/notes.md", "/tmp/script.py"]);
+    expect(verification.checked).toBe(0);
+    expect(verification.clean).toBe(true);
+  });
+});
+
+describe("persistent task dag", () => {
+  it("persists a plan and resumes it in a fresh instance", async () => {
+    const stateDir = join(await mkdtemp(join(tmpdir(), "carls-dag-")), ".carls", "state");
+    const dag = new PersistentTaskDAG(stateDir);
+    dag.plan("migrate the build", [
+      { title: "audit imports", acceptanceCriteria: "every relative import has .js" },
+      { title: "rewrite configs", dependencies: ["n1"], verifyCommands: ["npm run build"] },
+      { title: "run the suite", dependencies: ["n2"] },
+    ]);
+    dag.setStatus("n1", "running");
+    dag.setStatus("n1", "verifying");
+    dag.setStatus("n1", "completed");
+    dag.setStatus("n2", "running");
+    dag.setStatus("n2", "failed", "tsc: 3 errors");
+
+    // A different instance reading the same directory is the restart case.
+    const resumed = PersistentTaskDAG.load(stateDir);
+    expect(resumed).toBeDefined();
+    const snapshot = resumed?.snapshot();
+    expect(snapshot?.objective).toBe("migrate the build");
+    expect(snapshot?.completed).toBe(1);
+    expect(snapshot?.failed).toBe(1);
+    // Acceptance criteria and the failure reason must survive the restart, or the
+    // resumed session repeats the attempt that already failed.
+    expect(resumed?.get("n1")?.acceptanceCriteria).toBe("every relative import has .js");
+    expect(resumed?.get("n2")?.lastError).toBe("tsc: 3 errors");
+    expect(resumed?.get("n2")?.verifyCommands).toEqual(["npm run build"]);
+  });
+
+  it("only offers a node whose dependencies are completed", () => {
+    const dag = new PersistentTaskDAG("/tmp/unused");
+    dag.plan("two steps", [
+      { title: "first" },
+      { title: "second", dependencies: ["n1"] },
+    ]);
+    expect(dag.next()?.id).toBe("n1");
+    dag.setStatus("n1", "running");
+    dag.setStatus("n1", "verifying");
+    // Still not runnable while n1 is unverified: that is the point of the gate.
+    expect(dag.next()?.id).toBeUndefined();
+    dag.setStatus("n1", "completed");
+    expect(dag.next()?.id).toBe("n2");
+  });
+
+  it("refuses illegal transitions", () => {
+    const dag = new PersistentTaskDAG("/tmp/unused");
+    dag.plan("one", [{ title: "only" }]);
+    // pending -> completed skips verification entirely.
+    expect(() => dag.setStatus("n1", "completed")).toThrow(/Illegal transition/);
+    dag.setStatus("n1", "running");
+    expect(() => dag.setStatus("n1", "pending")).toThrow(/Illegal transition/);
+    dag.setStatus("n1", "verifying");
+    expect(dag.setStatus("n1", "completed").status).toBe("completed");
+  });
+
+  it("rejects a dependency on a missing node and a cycle", () => {
+    const dag = new PersistentTaskDAG("/tmp/unused");
+    expect(() => dag.plan("bad", [{ title: "a", dependencies: ["n9"] }])).toThrow(/does not exist/);
+    // A cycle must be caught at plan time, not by a node waiting forever.
+    expect(() =>
+      dag.plan("cycle", [
+        { id: "a", title: "a", dependencies: ["b"] },
+        { id: "b", title: "b", dependencies: ["a"] },
+      ]),
+    ).toThrow(/cycle/i);
+  });
+
+  it("reports blocked when nothing is runnable and work remains", () => {
+    const dag = new PersistentTaskDAG("/tmp/unused");
+    dag.plan("blocked", [
+      { title: "first" },
+      { title: "second", dependencies: ["n1"] },
+    ]);
+    dag.setStatus("n1", "running");
+    dag.setStatus("n1", "failed", "boom");
+    // n2 depends on a failed node: nothing runnable, and it is not done.
+    expect(dag.blocked).toBe(true);
+    expect(dag.done).toBe(false);
+    expect(dag.retry("n1").status).toBe("running");
+    expect(dag.blocked).toBe(false);
+  });
+
+  it("ignores a corrupt or stale-version state file", async () => {
+    const stateDir = join(await mkdtemp(join(tmpdir(), "carls-dag-bad-")), ".carls", "state");
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(join(stateDir, "dag.json"), "{ this is not json", "utf8");
+    expect(PersistentTaskDAG.load(stateDir)).toBeUndefined();
+
+    await writeFile(join(stateDir, "dag.json"), JSON.stringify({ version: 99, objective: "x", nodes: [] }), "utf8");
+    expect(PersistentTaskDAG.load(stateDir)).toBeUndefined();
+  });
+});
+
+describe("task horizon router", () => {
+  const router = new TaskHorizonRouter();
+
+  it("routes a single question to the short horizon", () => {
+    const decision = router.decide({ goal: "where is the config loader defined?" });
+    expect(decision.horizon).toBe("short");
+    expect(decision.reason.length).toBeGreaterThan(0);
+  });
+
+  it("routes a multi-step request to the long horizon", () => {
+    const decision = router.decide({
+      goal: [
+        "First, refactor the config module to be async.",
+        "Then, migrate every caller across the codebase.",
+        "Finally, run the whole test suite end-to-end and fix what breaks.",
+      ].join("\n"),
+    });
+    expect(decision.horizon).toBe("long");
+    expect(decision.suggestedSteps).toBeGreaterThan(30);
+  });
+
+  it("continues an active plan regardless of how short the turn looks", () => {
+    const decision = router.decide({ goal: "continue", hasActivePlan: true });
+    expect(decision.horizon).toBe("long");
+    expect(decision.signals).toContain("active plan on disk");
+  });
+
+  it("counts asks from bullets and from sentences", () => {
+    expect(countAsks("- one\n- two\n- three")).toBe(3);
+    expect(countAsks("Fix the parser. Then update the tests. Finally bump the version.")).toBe(3);
+    expect(countAsks("rename this")).toBe(1);
+  });
+
+  it("routes a two-file change to the medium horizon", () => {
+    const decision = router.decide({
+      goal: "Update the parser to handle the new token, and adjust the lexer that produces it so the two agree.",
+    });
+    expect(["medium", "long"]).toContain(decision.horizon);
+    expect(decision.suggestedSteps).toBeGreaterThanOrEqual(30);
+  });
+});
+
+describe("artifact store", () => {
+  it("offloads large output and reads it back by page", async () => {
+    const store = new ArtifactStore({ dir: join(await mkdtemp(join(tmpdir(), "carls-art-")), "artifacts"), thresholdChars: 500 });
+    const big = Array.from({ length: 400 }, (_, index) => `line ${index}: diagnostic`).join("\n");
+
+    expect(store.shouldOffload(big)).toBe(true);
+    expect(store.shouldOffload("short")).toBe(false);
+
+    const ref = store.offload(big);
+    expect(ref).toBeDefined();
+    expect(existsSync(ref!.path)).toBe(true);
+    expect(ref!.lines).toBe(400);
+    // The model gets the head, the tail and a pointer, not 400 lines.
+    const summary = store.summarize(big, ref!);
+    expect(summary.length).toBeLessThan(big.length / 4);
+    expect(summary).toContain(ref!.path);
+    // And any page of the original is still recoverable.
+    expect(store.read(ref!, 100, 100)).toContain("line 99");
+  });
+
+  it("deduplicates identical output", async () => {
+    const store = new ArtifactStore({ dir: join(await mkdtemp(join(tmpdir(), "carls-art-")), "artifacts"), thresholdChars: 10 });
+    const text = "same output ".repeat(100);
+    expect(store.offload(text)?.hash).toBe(store.offload(text)?.hash);
+  });
+});
+
+describe("compaction pipeline", () => {
+  const contextManager = (): ContextManager => new ContextManager({ contextWindow: 2000, compactThreshold: 0.75, truncateLimit: 8000 });
+
+  const pipeline = (cm: ContextManager): CompactionPipeline =>
+    new CompactionPipeline({
+      contextManager: cm,
+      buildLiveState: async () => "[live state]\nGOAL: the original goal\nnode n2 failed",
+      summarize: async (older, hint) => ({
+        goal: hint.goal,
+        filesTouched: [...hint.filesTouched],
+        errorsResolved: [],
+        summary: `summarised ${older.length} messages`,
+        nextStep: "run the tests",
+      }),
+    });
+
+  it("replaces a read superseded by a later edit, and keeps an untouched read", () => {
+    const messages: Message[] = [
+      { role: "user", content: [{ type: "tool_use", id: "t1", name: "read_file", input: { path: "src/a.ts" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "old a.ts ".repeat(30), is_error: false }] },
+      { role: "user", content: [{ type: "tool_use", id: "t2", name: "edit_file", input: { path: "src/a.ts" } }] },
+      { role: "user", content: [{ type: "tool_use", id: "t3", name: "read_file", input: { path: "src/b.ts" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t3", content: "contents of b.ts", is_error: false }] },
+    ];
+
+    expect(findSupersededReads(messages)).toEqual([{ toolUseId: "t1", path: "src/a.ts", editedAfter: true }]);
+
+    const layers = pipeline(contextManager()).applyCheapLayers(messages, 1_000_000);
+    expect(layers.find((layer) => layer.layer === 2)?.applied).toBe(true);
+    expect((messages[1]?.content[0] as { content: string }).content).toContain("the file was edited afterwards");
+    // b.ts was never edited, so its read stays: the layer must not over-reach.
+    expect((messages[4]?.content[0] as { content: string }).content).toBe("contents of b.ts");
+  });
+
+  it("projects a shorter view without mutating the history", () => {
+    const messages: Message[] = Array.from({ length: 40 }, (_, index) => ({
+      role: index % 2 === 1 ? ("assistant" as const) : ("user" as const),
+      content: [{ type: "text" as const, text: `message ${index} ${"x".repeat(200)}` }],
+    }));
+    const before = messages.length;
+
+    const view = pipeline(contextManager()).projectView(messages, 8);
+
+    expect(view).toBeDefined();
+    // The whole point of layer 4: the real transcript is untouched.
+    expect(messages.length).toBe(before);
+    expect(view!.messages.length).toBeLessThan(messages.length);
+    expect((view!.messages[0]?.content[0] as { text: string }).text).toContain("message 0");
+    expect((view!.messages.at(-1)?.content[0] as { text: string }).text).toContain("message 39");
+  });
+
+  it("re-anchors the live state as the last thing in the summary", async () => {
+    const messages: Message[] = [
+      { role: "user", content: [{ type: "text", text: "the original goal" }] },
+      ...Array.from({ length: 30 }, (_, index) => ({
+        role: index % 2 === 1 ? ("assistant" as const) : ("user" as const),
+        content: [{ type: "text" as const, text: `turn ${index} ${"y".repeat(300)}` }],
+      })),
+    ];
+
+    const { messages: next, report } = await pipeline(contextManager()).autoCompact(messages, "the original goal", new Set());
+
+    expect(report.layers.find((layer) => layer.layer === 5)?.applied).toBe(true);
+    expect(report.tokensAfter).toBeLessThan(report.tokensBefore);
+    const blocks = next[0]?.content.filter((block) => block.type === "text").map((block) => (block as { text: string }).text) ?? [];
+    // The summary comes first, the live state last, so the true state is the most
+    // recent thing read rather than being buried above a lossy paraphrase.
+    expect(blocks[0]).toContain("[contexto compactado]");
+    expect(blocks.at(-1)).toContain("[live state]");
+    expect(blocks.at(-1)).toContain("node n2 failed");
+    expect(report.liveStateAnchor).toContain("[live state]");
+  });
+
+  it("does not compact when nothing is older than the retained tail", async () => {
+    const messages: Message[] = [{ role: "user", content: [{ type: "text", text: "short conversation" }] }];
+    const { report } = await pipeline(contextManager()).autoCompact(messages, "short conversation", new Set());
+    expect(report.layers.find((layer) => layer.layer === 5)?.applied).toBe(false);
+  });
+});
+
+describe("live state", () => {
+  it("renders the goal, the plan, the checkpoint and the learned rules", async () => {
+    const dag = new PersistentTaskDAG("/tmp/unused");
+    dag.plan("ship the feature", [
+      { title: "write the code", acceptanceCriteria: "tests pass" },
+      { title: "open the PR", dependencies: ["n1"] },
+    ]);
+    dag.setStatus("n1", "running");
+
+    const state = await buildLiveState({
+      goal: "ship the feature",
+      dag: dag.snapshot(),
+      checkpoint: { id: "abc12345", ref: "refs/carls/checkpoints/abc12345", commit: "c", label: "before edit", at: "2026-01-01", files: 3 },
+      operatorRules: ["never force-push"],
+      projectRules: "Run npm test before claiming success.",
+    });
+
+    expect(state).toContain("ship the feature");
+    expect(state).toContain("current node: n1");
+    expect(state).toContain("abc12345");
+    expect(state).toContain("never force-push");
+    expect(state).toContain("Run npm test");
+    // Plain text: no emoji in something that is injected into the model's context.
+    expect(state).not.toMatch(/[\u{1F300}-\u{1FAFF}]/u);
+  });
+});
+
+describe("skill evolution", () => {
+  /** Builds a workspace with a couple of skill files and returns the root. */
+  const workspace = async (): Promise<string> => mkdtemp(join(tmpdir(), "carls-skill-"));
+
+  const writeSkill = async (root: string, name: string, frontmatterExtra: string[], body: string): Promise<string> => {
+    const dir = join(root, ".agents", "skills", name);
+    await mkdir(dir, { recursive: true });
+    const file = join(dir, "SKILL.md");
+    await writeFile(file, ["---", `name: ${name}`, "description: test skill", ...frontmatterExtra, "---", "", body].join("\n"), "utf8");
+    return file;
+  };
+
+  it("creates a skill, records a revision, and validates the proposal", async () => {
+    const root = await workspace();
+    const engine = new SkillEvolutionEngine(root);
+
+    const created = engine.evolve(
+      { name: "run-suite", description: "Run the test suite", body: "1. Run `npm test`.\n2. Verify the exit code is 0.", note: "initial" },
+      undefined,
+      false,
+    );
+
+    expect(created.ok).toBe(true);
+    expect(created.version).toBe(1);
+    expect(existsSync(created.path!)).toBe(true);
+    expect(engine.historyFor("run-suite")).toHaveLength(1);
+  });
+
+  it("rejects a proposal whose body is empty or whose name is malformed", async () => {
+    const root = await workspace();
+    const engine = new SkillEvolutionEngine(root);
+
+    const emptyBody = engine.evolve({ name: "ok-name", description: "d", body: "   ", note: "n" }, undefined, false);
+    expect(emptyBody.ok).toBe(false);
+    expect(emptyBody.validation.issues.some((issue) => issue.field === "body" && issue.severity === "error")).toBe(true);
+
+    const badName = engine.evolve({ name: "Bad Name", description: "d", body: "a real body here", note: "n" }, undefined, false);
+    expect(badName.ok).toBe(false);
+    expect(badName.validation.issues.some((issue) => issue.field === "name" && issue.severity === "error")).toBe(true);
+  });
+
+  it("refuses a rewrite that grows without adding a step", async () => {
+    const root = await workspace();
+    const engine = new SkillEvolutionEngine(root);
+    engine.evolve({ name: "run-suite", description: "Run the suite", body: "1. Run `npm test`.\n2. Verify the exit code is 0.", note: "initial" }, undefined, false);
+
+    const padded = engine.evolve(
+      {
+        name: "run-suite",
+        description: "Run the suite",
+        body: `1. Run \`npm test\`.\n2. Verify the exit code is 0.\n\n${"Remember to be careful and considerate at all times. ".repeat(6)}`,
+        note: "padding",
+      },
+      undefined,
+      true,
+    );
+
+    expect(padded.ok).toBe(false);
+    expect(padded.rejected).toContain("without adding a step");
+    // Nothing was written, so the working skill is untouched.
+    expect(engine.historyFor("run-suite")).toHaveLength(1);
+  });
+
+  it("accepts a rewrite that adds a real step and versions it", async () => {
+    const root = await workspace();
+    const engine = new SkillEvolutionEngine(root);
+    engine.evolve({ name: "run-suite", description: "Run the suite", body: "1. Run `npm test`.\n2. Verify the exit code is 0.", note: "initial" }, undefined, false);
+
+    const improved = engine.evolve(
+      {
+        name: "run-suite",
+        description: "Run the suite",
+        body: "1. Run `npm test`.\n2. Verify the exit code is 0.\n3. Check coverage with `npm run coverage`.\n4. Confirm nothing was skipped.",
+        note: "add coverage",
+      },
+      undefined,
+      true,
+    );
+
+    expect(improved.ok).toBe(true);
+    expect(improved.version).toBe(2);
+    expect(engine.historyFor("run-suite").map((revision) => revision.note)).toEqual(["initial", "add coverage"]);
+  });
+
+  it("reverts to the previous revision and records the revert", async () => {
+    const root = await workspace();
+    const engine = new SkillEvolutionEngine(root);
+    engine.evolve({ name: "run-suite", description: "Run the suite", body: "1. Run `npm test`.\n2. Verify the exit code is 0.", note: "initial" }, undefined, false);
+    const improved = engine.evolve(
+      {
+        name: "run-suite",
+        description: "Run the suite",
+        body: "1. Run `npm test`.\n2. Verify the exit code is 0.\n3. Check coverage with `npm run coverage`.",
+        note: "add coverage",
+      },
+      undefined,
+      true,
+    );
+
+    const reverted = engine.revert("run-suite", undefined);
+
+    expect(reverted.ok).toBe(true);
+    expect(await readFile(improved.path!, "utf8")).not.toContain("coverage");
+    // The revert is itself a revision, so it can be undone too.
+    expect(engine.historyFor("run-suite").map((revision) => revision.version)).toEqual([1, 2, 3]);
+  });
+
+  it("refuses to revert when there is no earlier revision", async () => {
+    const root = await workspace();
+    const engine = new SkillEvolutionEngine(root);
+    engine.evolve({ name: "only-one", description: "d", body: "1. A real step.\n2. Another step.", note: "first" }, undefined, false);
+    expect(engine.revert("only-one", undefined).ok).toBe(false);
+  });
+
+  it("rejects a requires on an unknown skill", async () => {
+    const root = await workspace();
+    const engine = new SkillEvolutionEngine(root);
+    const outcome = engine.evolve(
+      { name: "needs-ghost", description: "d", body: "1. A real step.\n2. Another step here.", requires: ["does-not-exist"], note: "n" },
+      undefined,
+      false,
+    );
+    expect(outcome.ok).toBe(false);
+    expect(outcome.validation.issues.some((issue) => issue.field === "requires")).toBe(true);
+  });
+
+  it("builds the dependency graph from frontmatter and finds dependents", async () => {
+    const root = await workspace();
+    await writeSkill(root, "run-suite", [], "1. Run `npm test`.");
+    await writeSkill(root, "ship-feature", ["requires: [run-suite]"], "1. Use run-suite.");
+    await writeSkill(root, "hotfix", ["extends: [run-suite]"], "1. Use run-suite, faster.");
+
+    const engine = new SkillEvolutionEngine(root);
+    const graph = engine.graph();
+
+    expect(graph.dependents("run-suite").map((edge) => edge.from).sort()).toEqual(["hotfix", "ship-feature"]);
+    // A transitive closure is what use_skill hands the model with the skill.
+    expect(graph.closure("ship-feature")).toContain("run-suite");
+    expect(graph.cycles()).toHaveLength(0);
+    expect(graph.format()).toContain("requires");
+  });
+
+  it("detects a dependency cycle", async () => {
+    const root = await workspace();
+    await writeSkill(root, "a", ["requires: [b]"], "1. Step one.\n2. Step two.");
+    await writeSkill(root, "b", ["requires: [a]"], "1. Step one.\n2. Step two.");
+    const graph = new SkillEvolutionEngine(root).graph();
+    expect(graph.cycles().length).toBeGreaterThan(0);
+  });
+
+  it("orders the review queue by how much the skill is hurting", async () => {
+    const root = await workspace();
+    await writeSkill(root, "flagged", [], "1. Step.\n2. Step.");
+    await writeSkill(root, "never-used", [], "1. Step.\n2. Step.");
+    const engine = new SkillEvolutionEngine(root);
+
+    const queue = engine.reviewQueue(undefined);
+    // With no usage records at all, everything is a "never used" candidate.
+    expect(queue.every((candidate) => candidate.reason.includes("never used"))).toBe(true);
+  });
+});
+
+describe("steering classifier", () => {
+  const classifier = new AutoReviewSteeringClassifier();
+
+  it("classifies the intents an operator actually types", () => {
+    expect(classifier.classify("stop, that's enough").intent).toBe("stop");
+    expect(classifier.classify("cancel this").intent).toBe("stop");
+    expect(classifier.classify("no, use the other API instead").intent).toBe("correct");
+    expect(classifier.classify("don't touch the generated directory").intent).toBe("reject");
+    expect(classifier.classify("ok, continue").intent).toBe("approve");
+    expect(classifier.classify("looks good").intent).toBe("approve");
+    expect(classifier.classify("why did you delete that file?").intent).toBe("question");
+    expect(classifier.classify("also update the docs").intent).toBe("steer");
+  });
+
+  it("only interrupts on intents that must change course", () => {
+    // An approval that interrupted would restart work that is already correct.
+    expect(classifier.classify("ok, continue").interrupts).toBe(false);
+    expect(classifier.classify("why did you delete that file?").interrupts).toBe(false);
+    expect(classifier.classify("no, use the other API instead").interrupts).toBe(true);
+    expect(classifier.classify("stop").interrupts).toBe(true);
+  });
+
+  it("does not fire on a marker inside a longer word", () => {
+    // "token" contains "ok" and "stopwatch" contains "stop"; neither is an intent.
+    expect(classifier.classify("tokenize the input").intent).not.toBe("approve");
+    expect(classifier.classify("fix the stopwatch widget").intent).not.toBe("stop");
+  });
+
+  it("treats an unmatched message as a steering instruction", () => {
+    const decision = classifier.classify("the schema lives in packages/core");
+    expect(decision.intent).toBe("steer");
+    expect(decision.forward).toBe(true);
+    expect(decision.instruction).toContain("packages/core");
+  });
+
+  it("ignores an empty message", () => {
+    expect(classifier.classify("   ").forward).toBe(false);
+  });
+});
+
+describe("operator cognitive memory", () => {
+  it("learns a correction, merges repeats, and marks a convention", async () => {
+    const memory = new OperatorCognitiveMemory(await mkdtemp(join(tmpdir(), "carls-mem-")));
+    const classifier = new AutoReviewSteeringClassifier();
+    const message = "no, use tabs for indentation";
+
+    memory.learn(classifier.classify(message), message);
+    memory.learn(classifier.classify(message), message);
+    const rule = memory.learn(classifier.classify(message), message);
+
+    // The same lesson repeated is one rule with a count, not three rules.
+    expect(memory.all()).toHaveLength(1);
+    expect(rule?.confirmations).toBe(3);
+    expect(memory.activeTexts()[0]).toContain("confirmed 3x");
+  });
+
+  it("learns nothing from an approval", async () => {
+    const memory = new OperatorCognitiveMemory(await mkdtemp(join(tmpdir(), "carls-mem-")));
+    const classifier = new AutoReviewSteeringClassifier();
+    expect(memory.learn(classifier.classify("ok continue"), "ok continue")).toBeUndefined();
+    expect(memory.all()).toHaveLength(0);
+  });
+
+  it("persists across instances", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "carls-mem-"));
+    new OperatorCognitiveMemory(dir).addRule("run the type check before the tests");
+    const reloaded = new OperatorCognitiveMemory(dir);
+    expect(reloaded.all()).toHaveLength(1);
+    expect(reloaded.all()[0]?.text).toContain("run the type check");
+  });
+
+  it("caps the active rules and orders conventions first", async () => {
+    const memory = new OperatorCognitiveMemory(await mkdtemp(join(tmpdir(), "carls-mem-")));
+    memory.addRule("use tabs for indentation");
+    memory.addRule("use tabs for indentation");
+    memory.addRule("use tabs for indentation");
+    memory.addRule("prefer named exports over default exports");
+
+    const active = memory.active(1);
+    expect(active).toHaveLength(1);
+    // The confirmed convention outranks a one-off instruction.
+    expect(active[0]?.text).toContain("tabs");
+  });
+
+  it("forgets a rule on request", async () => {
+    const memory = new OperatorCognitiveMemory(await mkdtemp(join(tmpdir(), "carls-mem-")));
+    const rule = memory.addRule("never touch the generated directory");
+    expect(memory.forget(rule!.id)).toBe(true);
+    expect(memory.all()).toHaveLength(0);
+    expect(memory.forget("not-a-real-id")).toBe(false);
+  });
+});
+
+describe("execution receipt", () => {
+  const base = {
+    goal: "add the coverage step",
+    answer: "Done.",
+    startedAt: new Date(Date.now() - 42_000).toISOString(),
+    steps: 12,
+    filesWritten: ["/w/a.ts", "/w/a.ts", "/w/b.ts"],
+  };
+
+  it("deduplicates files and collects the verification commands", () => {
+    const receipt = ExecutionReceipt.build({
+      ...base,
+      transactions: [
+        { label: "good", committed: true, rolledBack: false, verificationCommands: ["npm test"] },
+        { label: "bad", committed: false, rolledBack: true, reason: "failed", verificationCommands: ["npm run typecheck"] },
+      ],
+    });
+
+    expect(receipt.filesWritten).toEqual(["/w/a.ts", "/w/b.ts"]);
+    expect(receipt.verified).toEqual(["npm test", "npm run typecheck"]);
+    expect(receipt.rolledBack).toEqual(["bad"]);
+    // Something was rolled back, so the receipt is not clean.
+    expect(receipt.clean).toBe(false);
+  });
+
+  it("flags a change that was written but never verified", () => {
+    const receipt = ExecutionReceipt.build(base);
+    expect(ExecutionReceipt.unverified(receipt)).toBe(true);
+    // The rendered receipt says so in plain words rather than staying silent.
+    expect(ExecutionReceipt.format(receipt)).toContain("nothing was run to verify");
+  });
+
+  it("omits empty sections from the rendered receipt", () => {
+    const text = ExecutionReceipt.format(ExecutionReceipt.build(base));
+    expect(text).not.toContain("Rolled back");
+    expect(text).not.toContain("Checkpoints");
+    expect(text).not.toContain("Plan:");
+  });
+
+  it("reports plan progress and blockers when a plan ran", () => {
+    const receipt = ExecutionReceipt.build({
+      ...base,
+      dag: {
+        objective: "o",
+        createdAt: "t",
+        updatedAt: "t",
+        completed: 3,
+        failed: 1,
+        pending: 0,
+        done: false,
+        nodes: [{ id: "n1" }, { id: "n2" }, { id: "n3" }, { id: "n4" }] as never,
+      },
+      blockers: ["n4 needs a decision: two APIs are equally valid"],
+    });
+
+    expect(receipt.plan).toEqual({ completed: 3, total: 4, blocked: true });
+    const text = ExecutionReceipt.format(receipt);
+    expect(text).toContain("3/4 nodes completed");
+    expect(text).toContain("two APIs are equally valid");
+  });
+});
+
+describe("sub-agent pool", () => {
+  /** Records how many children overlap and can fail on demand. */
+  class FakeAgent {
+    active = 0;
+    maxActive = 0;
+    readonly calls: string[] = [];
+
+    async run(goal: string, role: string): Promise<string> {
+      this.active++;
+      this.maxActive = Math.max(this.maxActive, this.active);
+      this.calls.push(`${role}:${goal}`);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      this.active--;
+      if (goal.includes("BOOM")) throw new Error("simulated child crash");
+      return JSON.stringify({
+        summary: `did ${goal}`,
+        findings: [`f-${goal}`],
+        relevantFiles: [`${goal}.ts`],
+        suggestedCommands: [],
+      });
+    }
+  }
+
+  it("runs children in parallel but never above the concurrency cap", async () => {
+    const agent = new FakeAgent();
+    const pool = new SubAgentPool(agent as unknown as SubAgent, { concurrency: 2, maxTasks: 5 });
+    const tasks = [1, 2, 3, 4, 5].map((n) => ({
+      goal: `q${n}`,
+      role: (n % 2 === 1 ? "explorer" : "auditor") as SubAgentRole,
+    }));
+
+    const outcomes = await pool.run(tasks);
+
+    expect(outcomes).toHaveLength(5);
+    expect(agent.maxActive).toBe(2);
+    // Request order, so the parent reads a stable block between runs.
+    expect(outcomes.map((o) => o.goal)).toEqual(["q1", "q2", "q3", "q4", "q5"]);
+  });
+
+  it("isolates a failing child and still returns the others", async () => {
+    const agent = new FakeAgent();
+    const pool = new SubAgentPool(agent as unknown as SubAgent, { concurrency: 3 });
+    const outcomes = await pool.run([
+      { goal: "ok1", role: "explorer" },
+      { goal: "BOOM", role: "auditor" },
+      { goal: "ok2", role: "tester" },
+    ]);
+
+    expect(outcomes.map((o) => o.ok)).toEqual([true, false, true]);
+    expect(outcomes[1]?.error).toContain("simulated child crash");
+    expect(outcomes[0]?.summary).toBe("did ok1");
+    expect(outcomes[2]?.summary).toBe("did ok2");
+  });
+
+  it("refuses to fan out beyond maxTasks", async () => {
+    const agent = new FakeAgent();
+    const pool = new SubAgentPool(agent as unknown as SubAgent, { concurrency: 5, maxTasks: 2 });
+
+    const outcomes = await pool.run([
+      { goal: "a", role: "explorer" },
+      { goal: "b", role: "explorer" },
+      { goal: "c", role: "explorer" },
+    ]);
+
+    expect(outcomes).toHaveLength(2);
+    expect(pool.limit).toBe(2);
+  });
+
+  it("formats outcomes for the parent, marking failures", () => {
+    const text = formatOutcomes([
+      { goal: "a", role: "explorer", ok: true, summary: "found it", findings: ["x"], relevantFiles: ["a.ts"], suggestedCommands: [] },
+      { goal: "b", role: "auditor", ok: false, summary: "", findings: [], relevantFiles: [], suggestedCommands: [], error: "crashed" },
+    ]);
+
+    expect(text).toContain("explorer · a");
+    expect(text).toContain("found it");
+    expect(text).toContain("FAILED: crashed");
+  });
+
+  it("gives each role a distinct instruction and budget", () => {
+    const explorer = SubAgent.instructions("find the config", "explorer");
+    const auditor = SubAgent.instructions("find the config", "auditor");
+
+    expect(explorer).not.toBe(auditor);
+    expect(explorer).toContain("Role: explorer");
+    expect(auditor).toContain("Role: auditor");
+    expect(SUBAGENT_ROLES.auditor.maxSteps).toBeGreaterThan(SUBAGENT_ROLES.planner.maxSteps);
+  });
+});
+
+describe("delegate_task", () => {
+  const context = (overrides: Partial<ToolContext> = {}): ToolContext => ({
+    ...makeContext(),
+    ...overrides,
+  });
+
+  it("requires a goal or a non-empty tasks array", () => {
+    const tool = new DelegateTask();
+    expect(() => tool.parse({})).toThrow(/goal|tasks/);
+    expect(() => tool.parse({ tasks: [] })).toThrow(/goal|tasks/);
+    expect(tool.parse({ goal: "x" }).goal).toBe("x");
+  });
+
+  it("runs the pool form and reports failures alongside successes", async () => {
+    const tool = new DelegateTask();
+    const seen: SubAgentTask[] = [];
+    const result = await tool.run(
+      tool.parse({ tasks: [{ goal: "a", role: "explorer" }, { goal: "b", role: "auditor" }] }),
+      context({
+        subAgentPoolLimit: 4,
+        spawnSubAgentPool: async (tasks) => {
+          seen.push(...tasks);
+          return [
+            { goal: "a", role: "explorer", ok: true, summary: "sa", findings: [], relevantFiles: [], suggestedCommands: [] },
+            { goal: "b", role: "auditor", ok: false, summary: "", findings: [], relevantFiles: [], suggestedCommands: [], error: "boom" },
+          ];
+        },
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(seen).toHaveLength(2);
+    expect(result.output).toContain("FAILED: boom");
+    expect(result.metadata?.failed).toBe(1);
+  });
+
+  it("refuses more tasks than the session allows", async () => {
+    const tool = new DelegateTask();
+    const result = await tool.run(
+      tool.parse({ tasks: [{ goal: "a", role: "explorer" }, { goal: "b", role: "explorer" }] }),
+      context({ subAgentPoolLimit: 1, spawnSubAgentPool: async () => [] }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("Too many tasks");
+  });
+
+  it("passes the role through on the single-goal form", async () => {
+    const tool = new DelegateTask();
+    let seenRole: string | undefined;
+    const result = await tool.run(
+      tool.parse({ goal: "audit this", role: "auditor" }),
+      context({
+        spawnSubAgent: async (_goal, role) => {
+          seenRole = role;
+          return JSON.stringify({ summary: "done", findings: [], relevantFiles: [], suggestedCommands: [] });
+        },
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(seenRole).toBe("auditor");
+  });
+
+  it("reports a missing sub-agent wiring instead of throwing", async () => {
+    const tool = new DelegateTask();
+    const result = await tool.run(tool.parse({ goal: "x" }), context());
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("not available");
+  });
 });

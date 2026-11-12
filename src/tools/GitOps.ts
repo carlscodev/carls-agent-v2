@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { Tool, ToolContext, ToolResult } from "../types/tools.js";
 import type { ToolSchema } from "../types/llm.js";
 import { zodToJsonSchema } from "../utils/schema.js";
+import { splitLines } from "../utils/eol.js";
 import { run } from "./helpers.js";
 
 interface GitOptions {
@@ -243,7 +244,7 @@ export class SecretScan implements Tool<{path?: string | undefined; limit?: numb
       ["-rInE", "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=dist", "-e", "-----BEGIN", "-e", "sk-ant-", "-e", "AKIA[0-9A-Z]{16}", "-e", "gh[pousr]_[A-Za-z0-9]{20,}", "-e", "AIza[0-9A-Za-z_-]{35}", "--", input.path ?? "."],
       { cwd: ctx.cwd, timeoutMs: 30_000, signal: ctx.signal },
     );
-    const lines = outcome.stdout.split("\n").filter((line) => line.trim().length > 0);
+    const lines = splitLines(outcome.stdout).filter((line) => line.trim().length > 0);
     const limit = input.limit ?? 40;
     const findings: string[] = [];
     for (const line of lines.slice(0, limit)) {

@@ -5,14 +5,16 @@ import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { Message, Provider } from "../types/llm.js";
 import type { ToolContext } from "../types/tools.js";
-import type { AgentRunResult } from "../types/agent.js";
+import type { AgentRunResult, Checkpoint } from "../types/agent.js";
 import type { Effort, PermissionMode, ResolvedConfig } from "../config/Config.js";
 import { specFor } from "../config/Config.js";
 import { Logger } from "../utils/Logger.js";
+import { toLf } from "../utils/eol.js";
 import { createProvider } from "../providers/ProviderBase.js";
 import { ollamaShow } from "../providers/OllamaProvider.js";
 import { localModelContext } from "../providers/discovery.js";
 import { PermissionGate } from "../security/PermissionGate.js";
+import { ShadowGit } from "../security/ShadowGit.js";
 import { ToolRegistry } from "../tools/ToolRegistry.js";
 import { FileRead } from "../tools/FileRead.js";
 import { FileWrite } from "../tools/FileWrite.js";
@@ -21,6 +23,8 @@ import { GlobFiles } from "../tools/GlobFiles.js";
 import { GrepSearch } from "../tools/GrepSearch.js";
 import { BashExecution } from "../tools/BashExecution.js";
 import { DelegateTask } from "../tools/DelegateTask.js";
+import { RepoMap } from "./RepoMap.js";
+import { RepoMapTool } from "../tools/RepoMapTool.js";
 import { TodoWrite } from "../tools/TodoWrite.js";
 import { UseSkill } from "../tools/UseSkill.js";
 import { SaveSkill } from "../tools/SaveSkill.js";
@@ -74,6 +78,14 @@ import {
   SecretScan,
 } from "../tools/GitOps.js";
 import { SkillRegistry } from "../skills/SkillRegistry.js";
+import { PersistentTaskDAG } from "./PersistentTaskDAG.js";
+import { CompactionPipeline } from "./CompactionPipeline.js";
+import { buildLiveState } from "./LiveState.js";
+import { OperatorCognitiveMemory } from "../symbiosis/OperatorMemory.js";
+import { AutoReviewSteeringClassifier } from "../symbiosis/SteeringClassifier.js";
+import { ExecutionReceipt, type Receipt } from "../symbiosis/ExecutionReceipt.js";
+import { PlanTask, AdvanceTask, ReadTaskGraph, ResumeTask } from "../tools/HorizonTools.js";
+import { EvolveSkill, ReviewSkills, SkillHistoryTool, RevertSkill, SkillGraphTool } from "../tools/SkillEvolutionTools.js";
 import { SessionStore } from "./SessionStore.js";
 import { BackupStore } from "./Backups.js";
 import { CostTracker } from "./CostTracker.js";
@@ -82,6 +94,8 @@ import { MemoryLoader } from "./MemoryLoader.js";
 import { SkillLoader } from "../skills/SkillLoader.js";
 import { ContextManager, contextReport } from "./ContextManager.js";
 import { SubAgent } from "./SubAgent.js";
+import type { SubAgentRole } from "./SubAgent.js";
+import { SubAgentPool } from "./SubAgentPool.js";
 import { AgentLoop, type RunOptions } from "./AgentLoop.js";
 import { McpClient } from "../mcp/McpClient.js";
 
@@ -104,15 +118,32 @@ export class Runtime {
   readonly gate: PermissionGate;
   readonly loop: AgentLoop;
   readonly subAgent: SubAgent;
+  /** Runs several sub-agents at once behind `delegate_task`'s `tasks` form. */
+  readonly subAgentPool: SubAgentPool;
   readonly backups: BackupStore;
   readonly skills: SkillRegistry;
+  /** Lazy signature index behind `repo_map`; built on first query. */
+  readonly repoMap: RepoMap;
+  /** Whole-tree checkpoints behind `/checkpoint` and `/rewind`. */
+  readonly shadowGit: ShadowGit;
+  /** Persistent plan, resumed from disk when a previous session left one. */
+  readonly dag: PersistentTaskDAG;
+  /** Layered context compaction with live-state re-anchoring. */
+  readonly compaction: CompactionPipeline;
+  /** Rules the operator taught this workspace, re-injected after a compaction. */
+  readonly operatorMemory: OperatorCognitiveMemory;
   readonly history: Message[];
   /** Mutable so /setup can swap the client without a restart. */
   private provider: Provider;
   private readonly mcpClients: McpClient[] = [];
   /** Instructions typed while a turn runs, consumed by the loop. */
   private readonly steering: string[] = [];
+  /** The goal of the turn in flight, used when re-anchoring after a compaction. */
+  private currentGoal = "";
+  /** Receipt of the most recent finished turn, shown by `/receipt`. */
+  lastReceipt: Receipt | undefined;
   private readonly mcpSummary: { name: string; transport: string; tools: number; version?: string }[] = [];
+  private readonly steeringClassifier = new AutoReviewSteeringClassifier();
 
   constructor(deps: RuntimeDeps, history: Message[] = []) {
     this.config = deps.config;
@@ -123,11 +154,23 @@ export class Runtime {
     this.cost = new CostTracker(this.config.model);
     this.backups = new BackupStore(this.session.id);
     this.skills = new SkillRegistry(this.config.cwd);
+    this.repoMap = new RepoMap(this.config.cwd);
+    this.shadowGit = new ShadowGit(this.config.cwd);
     this.hooks = new Hooks(this.config.hooks, this.logger, this.config.cwd);
     this.contextManager = new ContextManager({
       contextWindow: this.config.contextWindow,
       compactThreshold: this.config.compactThreshold,
       truncateLimit: this.config.truncateLimit,
+    });
+    const stateDir = join(this.config.cwd, ".carls", "state");
+    // A plan left behind by a previous session is resumed, not discarded: the
+    // whole point of persisting it is that a restart continues where it stopped.
+    this.dag = PersistentTaskDAG.load(stateDir) ?? new PersistentTaskDAG(stateDir);
+    this.operatorMemory = new OperatorCognitiveMemory(join(this.config.cwd, ".carls"));
+    this.compaction = new CompactionPipeline({
+      contextManager: this.contextManager,
+      buildLiveState: () => this.buildLiveState(),
+      summarize: (older, hint) => this.summarizeHistory(older, hint),
     });
     this.gate = new PermissionGate(this.config, this.logger);
 
@@ -138,6 +181,7 @@ export class Runtime {
       new FileEdit(),
       new GlobFiles(),
       new GrepSearch(),
+      new RepoMapTool(this.repoMap),
       new BashExecution(),
       new DelegateTask(),
       new TodoWrite(),
@@ -185,6 +229,15 @@ export class Runtime {
       new GitBranch(),
       new GitCommit(),
       new SecretScan(),
+      new PlanTask(),
+      new AdvanceTask(),
+      new ReadTaskGraph(),
+      new ResumeTask(),
+      new EvolveSkill(),
+      new ReviewSkills(),
+      new SkillHistoryTool(),
+      new RevertSkill(),
+      new SkillGraphTool(),
     ]) {
       this.registry.register(tool);
     }
@@ -219,6 +272,10 @@ export class Runtime {
       },
     });
 
+    // Each child is a full conversation against the same provider, so the pool is
+    // capped well below the tool fan-out limit.
+    this.subAgentPool = new SubAgentPool(this.subAgent, { concurrency: 3, maxTasks: 6 });
+
     this.loop = new AgentLoop({
       provider: this.provider,
       registry: this.registry,
@@ -233,6 +290,7 @@ export class Runtime {
       systemPrompt: buildSystemPrompt(this.config),
       toolContext: this.baseToolContext(),
       takeSteering: () => this.takeSteering(),
+      compaction: this.compaction,
     });
   }
 
@@ -244,7 +302,11 @@ export class Runtime {
       logger: this.logger,
       backups: this.backups,
       skills: this.skills,
-      spawnSubAgent: (goal: string) => this.subAgent.run(goal),
+      dag: this.dag,
+      buildLiveState: () => this.buildLiveState(),
+      spawnSubAgent: (goal: string, role?: SubAgentRole) => this.subAgent.run(goal, role),
+      spawnSubAgentPool: (tasks) => this.subAgentPool.run(tasks),
+      subAgentPoolLimit: this.subAgentPool.limit,
     };
   }
 
@@ -379,10 +441,15 @@ export class Runtime {
   }
 
   async runTurn(goal: string, options: RunOptions = {}): Promise<AgentRunResult> {
+    // Recorded before the loop runs so a compaction mid-turn re-anchors the real
+    // goal, not an empty string.
+    this.currentGoal = goal;
+    const startedAt = new Date().toISOString();
     const userMessage: Message = { role: "user", content: [{ type: "text", text: goal }] };
     this.history.push(userMessage);
     this.session.recordMessage(userMessage);
     const result = await this.loop.run(this.history, goal, options);
+    this.lastReceipt = this.buildReceipt(goal, result.finalText, startedAt, result.steps);
     // The turn is over and the agent is waiting for input again, which is the
     // plugin API's `session.idle`.
     await this.hooks.sessionIdle({
@@ -437,10 +504,26 @@ export class Runtime {
     this.config.mode = mode;
   }
 
-  /** Queues an instruction for the running turn's next step boundary. */
+  /**
+   * Queues an instruction for the running turn's next step boundary.
+   *
+   * The message is classified before it is forwarded, because the four things an
+   * operator types mid-run are not interchangeable: a correction must interrupt
+   * and teach the memory, an approval must not be forwarded at all (it would read
+   * as a new instruction and derail the turn), and a stop must be dropped from the
+   * queue since the loop's abort is what actually stops the work.
+   */
   steer(text: string): void {
     const trimmed = text.trim();
-    if (trimmed.length > 0) this.steering.push(trimmed);
+    if (trimmed.length === 0) return;
+
+    const decision = this.steeringClassifier.classify(trimmed);
+    // A correction or a stated preference is worth remembering; an approval and a
+    // question are not.
+    this.operatorMemory.learn(decision, trimmed);
+
+    if (decision.intent === "approve" || decision.intent === "stop") return;
+    this.steering.push(decision.instruction.length > 0 ? decision.instruction : trimmed);
   }
 
   /** Drains steering messages; the loop calls this at every step boundary. */
@@ -473,6 +556,50 @@ export class Runtime {
     this.loop.setSystemPrompt(buildSystemPrompt(this.config));
   }
 
+  /**
+   * Builds the live-state block injected after a compaction.
+   *
+   * Every field is read from a live object rather than the transcript, so the
+   * block cannot disagree with reality. The goal is the last one the loop set;
+   * when no turn has run yet it falls back to the session's opening request.
+   */
+  async buildLiveState(): Promise<string> {
+    const memory = MemoryLoader.load(this.config.cwd);
+    return buildLiveState({
+      goal: this.currentGoal,
+      ...(this.dag.all().length > 0 ? { dag: this.dag.snapshot() } : {}),
+      operatorRules: this.operatorMemory.activeTexts(),
+      ...(memory !== undefined ? { projectRules: memory.content } : {}),
+    });
+  }
+
+  /** Summary used by the pipeline's layer 5, reusing the loop's own summariser. */
+  private async summarizeHistory(
+    older: Message[],
+    hint: { goal: string; filesTouched: string[] },
+  ): Promise<Checkpoint> {
+    return this.loop.summarizeHistory(older, hint);
+  }
+
+  /**
+   * Builds the receipt for the turn that just finished.
+   *
+   * The facts come from the objects that own them — the backup manifest for the
+   * files written, the task graph for plan progress, the operator memory for the
+   * rules in force — not from the model's own account of what it did.
+   */
+  buildReceipt(goal: string, answer: string, startedAt: string, steps: number): Receipt {
+    return ExecutionReceipt.build({
+      goal,
+      answer,
+      startedAt,
+      steps,
+      filesWritten: this.backups.list().map((entry) => entry.path),
+      ...(this.dag.all().length > 0 ? { dag: this.dag.snapshot() } : {}),
+      operatorRules: this.operatorMemory.activeTexts(),
+    });
+  }
+
   /** Manual compaction; returns true when it actually compacted. */
   async compactNow(): Promise<boolean> {
     const compaction = await this.contextManager.compact(
@@ -489,6 +616,7 @@ export class Runtime {
   async close(): Promise<void> {
     await this.hooks.sessionEnd({ sessionId: this.session.id });
     for (const client of this.mcpClients) client.close();
+    this.shadowGit.dispose();
   }
 }
 
@@ -502,7 +630,11 @@ export function buildSystemPrompt(config: ResolvedConfig): string {
       "2. ACT: apply minimal changes with edit_file or write_file.",
       "3. VERIFY: run the project's tests, linter or compiler with bash and fix failures until they pass.",
       "Never claim something works without running it. Prefer small, reviewable edits.",
-      "Delegate broad exploration to delegate_task to keep your context small.",
+      "Delegate broad exploration to delegate_task to keep your context small: pass one `goal`, or a",
+      "`tasks` array to run several investigations at once. Choose the role that fits — explorer to map",
+      "code, planner to order a change, auditor to hunt bugs, tester to find what is untested.",
+      "Before a large or risky change, call repo_map to see the symbols and signatures you are about to",
+      "touch without reading whole files.",
       "Independent read-only calls run in parallel, so ask for every read_file, grep_search, glob_files",
       "or delegate_task you already know you need in the SAME turn instead of one after another.",
       "Use the specialised tools instead of bash when one exists: multi_read and write_many batch file I/O,",
@@ -561,11 +693,16 @@ function gitSnapshot(cwd: string): string | undefined {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-    const status = execFileSync("git", ["status", "--short"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    // `git status --short` separates entries with the platform's line ending, so
+    // normalise before trimming; otherwise every path in the prompt ends with a
+    // stray `\r`.
+    const status = toLf(
+      execFileSync("git", ["status", "--short"], {
+        cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }),
+    ).trim();
     return `branch ${branch}${status.length > 0 ? `\n${status.slice(0, 4000)}` : " · clean"}`;
   } catch {
     return undefined;

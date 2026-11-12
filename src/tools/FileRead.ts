@@ -4,6 +4,7 @@ import type { Tool, ToolContext, ToolResult } from "../types/tools.js";
 import type { ToolSchema } from "../types/llm.js";
 import { zodToJsonSchema } from "../utils/schema.js";
 import { guardPath } from "../utils/paths.js";
+import { splitLines } from "../utils/eol.js";
 
 const inputSchema = z.object({
   path: z.string().describe("Path to the file, absolute or relative to the workspace root."),
@@ -50,7 +51,9 @@ export class FileRead implements Tool<Input> {
       }
 
       const content = await readFile(target, "utf8");
-      const lines = content.split("\n");
+      // Split on any ending so a CRLF file does not show a trailing `\r` on every
+      // line, which the model would then echo back into its `old_string`.
+      const lines = splitLines(content);
       const start = Math.max(1, input.start_line ?? 1);
       const end = Math.min(lines.length, input.end_line ?? lines.length);
       if (start > lines.length) {

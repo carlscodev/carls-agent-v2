@@ -1,6 +1,7 @@
 import type { ToolResult } from "../types/tools.js";
 import { theme } from "./Theme.js";
 import { visibleWidth } from "./Text.js";
+import { splitLines } from "../utils/eol.js";
 
 /**
  * Tool rendering, following opencode's vocabulary: a per-tool glyph, a short
@@ -331,7 +332,9 @@ function renderCodeBlock(content: string): string {
 /** Shell output keeps its tail, since that is where a failure is reported. */
 function renderShellOutput(output: string): string {
   const t = theme();
-  const lines = output.split("\n");
+  // Split on any ending: a `\r` from a Windows command would return the cursor to
+  // column 0 and overwrite the line on screen.
+  const lines = splitLines(output);
   const budget = MAX_BODY_LINES;
   const tail = lines.length > budget ? lines.slice(-budget) : lines;
   const dropped = lines.length - tail.length;

@@ -8,6 +8,7 @@ import { zodToJsonSchema } from "../utils/schema.js";
 import { guardPath, toDisplayPath } from "../utils/paths.js";
 import { renderDiff } from "../utils/DiffRenderer.js";
 import { applyHunks, parsePatch, writeAtomic } from "./helpers.js";
+import { applyEol, detectEol, normalizePatch, splitLines, toLf } from "../utils/eol.js";
 
 const MAX_READ_BYTES = 400_000;
 
@@ -44,7 +45,7 @@ export class MultiRead implements Tool<{paths: string[]; max_lines?: number  | u
           continue;
         }
         const text = await readFile(target, "utf8");
-        const lines = text.split("\n");
+        const lines = splitLines(text);
         const shown = lines.slice(0, limit);
         const suffix = lines.length > limit ? `\n… ${lines.length - limit} more lines` : "";
         blocks.push(`=== ${display} (${lines.length} lines) ===\n${shown.join("\n")}${suffix}`);
@@ -383,12 +384,19 @@ export class ApplyPatch implements Tool<{path: string; patch: string; fuzz?: num
   }
 
   private applyText(current: string, patch: string, fuzz: number): string {
-    const hunks = parsePatch(patch);
+    // A diff produced on Windows carries `\r\n`; parsing it as-is leaves a stray
+    // `\r` on every context line, so the hunk never matches.
+    const hunks = parsePatch(normalizePatch(patch));
     if (hunks.length === 0) throw new Error("no @@ hunks found in the patch");
-    const hadTrailingNewline = current.endsWith("\n");
-    const lines = current.split("\n");
+    // Match and apply in LF, then write the file back with its own line ending, so
+    // patching a CRLF file does not rewrite every line.
+    const { eol } = detectEol(current);
+    const normalized = toLf(current);
+    const hadTrailingNewline = normalized.endsWith("\n");
+    const lines = normalized.split("\n");
     if (hadTrailingNewline) lines.pop();
-    return applyHunks(lines, hunks, fuzz).join("\n") + (hadTrailingNewline ? "\n" : "");
+    const patched = applyHunks(lines, hunks, fuzz).join("\n") + (hadTrailingNewline ? "\n" : "");
+    return applyEol(patched, eol);
   }
 
   async run(input: {path: string; patch: string; fuzz?: number | undefined}, ctx: ToolContext): Promise<ToolResult> {

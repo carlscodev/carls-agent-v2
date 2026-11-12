@@ -5,6 +5,7 @@ import type { ToolSchema } from "../types/llm.js";
 import { zodToJsonSchema } from "../utils/schema.js";
 import { guardPath, toDisplayPath } from "../utils/paths.js";
 import { renderDiff } from "../utils/DiffRenderer.js";
+import { applyEol, detectEol, toLf } from "../utils/eol.js";
 
 const inputSchema = z.object({
   path: z.string().describe("File to edit."),
@@ -18,21 +19,14 @@ const inputSchema = z.object({
 
 type Input = z.infer<typeof inputSchema>;
 
-function countOccurrences(haystack: string, needle: string): number {
-  if (needle.length === 0) return 0;
-  let count = 0;
-  let index = haystack.indexOf(needle);
-  while (index !== -1) {
-    count++;
-    index = haystack.indexOf(needle, index + needle.length);
-  }
-  return count;
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export class FileEdit implements Tool<Input> {
   readonly name = "edit_file";
   readonly description =
-    "Replace an exact string in a file. Fails unless old_string matches exactly once (or replace_all is set). Returns a colored unified diff.";
+    "Replace an exact string in a file. Fails unless old_string matches exactly once (or replace_all is set). Returns a colored unified diff. Matching is line-ending agnostic: an LF old_string matches a CRLF file, and the file keeps its original line endings.";
   readonly readOnly = false;
   readonly category = "write" as const;
 
@@ -62,11 +56,48 @@ export class FileEdit implements Tool<Input> {
     }
   }
 
+  /**
+   * Matches `old_string` against the file, accepting either line ending. The
+   * pattern is built from the escaped lines so that a literal LF in the request
+   * matches a `\r\n` in a Windows file. Matching this way, rather than
+   * normalising the whole file first, leaves every untouched byte exactly as it
+   * was, so an edit cannot rewrite a file's line endings behind the user's back.
+   */
+  private buildMatcher(needleLf: string, global: boolean): RegExp {
+    const pattern = needleLf.split("\n").map(escapeRegExp).join("\\r?\\n");
+    return new RegExp(pattern, global ? "g" : "");
+  }
+
+  /** Applies the edit, giving any new line the ending the surrounding text uses. */
   private apply(current: string, input: Input): string {
-    if (input.replace_all === true) {
-      return current.split(input.old_string).join(input.new_string);
-    }
-    return current.replace(input.old_string, input.new_string);
+    const needle = toLf(input.old_string);
+    if (needle.length === 0) return current;
+    const fallback = detectEol(current).eol;
+    const replacement = toLf(input.new_string);
+    const matcher = this.buildMatcher(needle, input.replace_all === true);
+    return current.replace(matcher, (matched: string, offset: number) =>
+      applyEol(replacement, this.endingFor(current, matched, offset, fallback)),
+    );
+  }
+
+  /**
+   * Picks the line ending for the replacement from the region it replaces: the
+   * match itself when it spans lines, otherwise the ending that follows it. This
+   * keeps a mixed file mixed instead of imposing one ending on it.
+   */
+  private endingFor(current: string, matched: string, offset: number, fallback: "\n" | "\r\n"): "\n" | "\r\n" {
+    if (matched.includes("\r\n")) return "\r\n";
+    const after = current.slice(offset + matched.length, offset + matched.length + 2);
+    if (after.startsWith("\r\n")) return "\r\n";
+    if (after.startsWith("\n")) return "\n";
+    return fallback;
+  }
+
+  /** Occurrences of `old_string` in `current`, ignoring line-ending differences. */
+  private countMatches(current: string, input: Input): number {
+    const needle = toLf(input.old_string);
+    if (needle.length === 0) return 0;
+    return [...current.matchAll(this.buildMatcher(needle, true))].length;
   }
 
   async run(input: Input, ctx: ToolContext): Promise<ToolResult> {
@@ -74,7 +105,7 @@ export class FileEdit implements Tool<Input> {
     const display = toDisplayPath(ctx.cwd, target);
     try {
       const current = await readFile(target, "utf8");
-      const occurrences = countOccurrences(current, input.old_string);
+      const occurrences = this.countMatches(current, input);
 
       if (occurrences === 0) {
         return {
@@ -90,7 +121,7 @@ export class FileEdit implements Tool<Input> {
           error: `old_string matches ${occurrences} times in ${display}. Add surrounding context to make it unique, or set replace_all=true.`,
         };
       }
-      if (input.old_string === input.new_string) {
+      if (toLf(input.old_string) === toLf(input.new_string)) {
         return { ok: false, output: "", error: "old_string and new_string are identical." };
       }
 

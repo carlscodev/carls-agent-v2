@@ -50,7 +50,16 @@ node ./bin/carls.mjs --help   # requires npm run build first
   `tool_use` makes the provider reject the request.
 - **Terminal width is a correctness property.** Measure with `src/cli/Text.ts`,
   never count escape sequences, and never emit a line wider than the terminal.
+  `process.stderr.columns`/`.rows` are `0` on a pty with no window size set, and
+  `0 ?? fallback` keeps the `0`, collapsing every layout to one ellipsis. Read
+  them through `terminalDimension(...)`, never `?? fallback` directly.
 - **File tools stay inside the workspace** unless `allowOutsideWorkspace` is set.
+- **Line endings are data, not noise.** The model speaks LF; files may hold CRLF.
+  Match on logical lines through `src/utils/eol.ts` (`splitLines`, `toLf`,
+  `buildMatcher`) and write back the ending the file already used. Never normalise
+  a whole file to LF on an edit, and never let a `\r` reach a rendered line or the
+  model's context. A `split("\n")` on a CRLF file leaves a `\r` on every line and
+  silently breaks `edit_file`, `apply_patch` and the terminal output.
 - **No secrets in the repo.** Keys come from the environment or the config file,
   and `Logger.redact` runs before anything reaches a log or the model.
 
@@ -61,6 +70,27 @@ node ./bin/carls.mjs --help   # requires npm run build first
 - No new dependency without a strong reason; the tree is small on purpose.
 - Tests live in `tests/smoke.test.ts` and exercise real code paths: real
   filesystem, real `bash`, a scripted in-process provider for `AgentLoop`.
+
+## Testing the interactive chrome
+
+Unit tests cannot see the terminal. To exercise the tab strip, the header and
+the key handling for real, drive the built CLI over a pty:
+
+```python
+import os, pty, fcntl, termios, struct
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ["ANTHROPIC_API_KEY"] = "test-key"
+    os.execvp("node", ["node", "bin/carls.mjs"])
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+```
+
+Point `baseUrl` in the config at a throwaway HTTP server that returns a canned
+Anthropic message, so no network call is made. Set the window size in the
+**parent** (the child's `fd` is `-1`); without it the pty reports `columns=0`
+and every layout collapses. Write the raw bytes to a file and strip ANSI to read
+the frames. `Ctrl+T` opens a tab, `Ctrl+X` closes one, `Ctrl+B` toggles the
+sidebar, and `/tab list` prints the open tabs.
 
 ## Definition of done
 

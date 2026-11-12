@@ -1,4 +1,5 @@
 import pc from "picocolors";
+import { splitLines } from "./eol.js";
 
 export interface DiffLine {
   type: "add" | "remove" | "context";
@@ -13,8 +14,10 @@ export interface DiffLine {
  * files, where a Myers implementation would be preferable.
  */
 export function diffLines(oldText: string, newText: string): DiffLine[] {
-  const a = oldText.length === 0 ? [] : oldText.split("\n");
-  const b = newText.length === 0 ? [] : newText.split("\n");
+  // Compare logical lines: a trailing `\r` from a CRLF file would otherwise show
+  // up inside every rendered line and misalign the terminal.
+  const a = oldText.length === 0 ? [] : splitLines(oldText);
+  const b = newText.length === 0 ? [] : splitLines(newText);
 
   const n = a.length;
   const m = b.length;

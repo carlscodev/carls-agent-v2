@@ -1,7 +1,7 @@
 import { theme } from "./Theme.js";
 import { redact } from "../utils/Logger.js";
 import type { Effort, PermissionMode } from "../config/Config.js";
-import { pad, truncate, visibleWidth, wrap } from "./Text.js";
+import { pad, terminalDimension, truncate, visibleWidth, wrap } from "./Text.js";
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -103,7 +103,7 @@ const MARK = ["╭───╮", "│◕ ◕│", "╰─┬─╯"] as const;
  */
 export function bannerLines(info: BannerInfo): string[] {
   const t = theme();
-  const columns = process.stderr.columns ?? 80;
+  const columns = terminalDimension(process.stderr.columns);
   const width = Math.max(40, Math.min(88, columns - 2));
   const gutter = MARK.length > 0 ? visibleWidth(MARK[0] ?? "") + 2 : 0;
   const textWidth = Math.max(16, width - gutter);
@@ -140,10 +140,32 @@ export function printBanner(info: BannerInfo): void {
   process.stderr.write(`${bannerLines(info).join("\n")}\n\n`);
 }
 
+/**
+ * One line of tab labels for the Chrome strip. The active tab is bright and
+ * bracketed, the rest are faint, and an index prefix doubles as the `Ctrl+X`
+ * jump target. Returns undefined for a single tab so the strip stays hidden
+ * until a second session exists.
+ */
+export function tabStripLine(
+  tabs: readonly { title: string }[],
+  activeIndex: number,
+): string | undefined {
+  if (tabs.length <= 1) return undefined;
+  const t = theme();
+  const cells = tabs.map((tab, index) => {
+    const label = `${index + 1}:${tab.title}`;
+    return index === activeIndex
+      ? t.paint(t.colors.interactive, t.bold(`[${label}]`))
+      : t.paint(t.colors.text.faint, ` ${label} `);
+  });
+  const hint = t.paint(t.colors.text.faint, "  ctrl+t new · ctrl+x close");
+  return cells.join(t.paint(t.colors.border, "│")) + hint;
+}
+
 /** Draws a titled box around a list of pre-formatted lines. */
 export function printPanel(title: string, lines: string[]): void {
   const t = theme();
-  const columns = process.stderr.columns ?? 80;
+  const columns = terminalDimension(process.stderr.columns);
   const body = lines.map((line) => truncate(line, Math.max(20, columns - 4)));
   const width = Math.min(
     Math.max(20, columns - 2),

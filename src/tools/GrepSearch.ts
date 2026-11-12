@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { Tool, ToolContext, ToolResult } from "../types/tools.js";
 import type { ToolSchema } from "../types/llm.js";
 import { zodToJsonSchema } from "../utils/schema.js";
+import { splitLines } from "../utils/eol.js";
 
 const inputSchema = z.object({
   pattern: z.string().describe("JavaScript regular expression to search for."),
@@ -82,7 +83,7 @@ export class GrepSearch implements Tool<Input> {
         }
         if (content.length > MAX_FILE_BYTES || content.includes("\u0000")) continue;
 
-        const lines = content.split("\n");
+        const lines = splitLines(content);
         // Context windows can overlap, so each line is emitted at most once per
         // file and a match always wins over being shown as context.
         const emitted = new Set<number>();

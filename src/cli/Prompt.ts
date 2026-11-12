@@ -10,6 +10,14 @@ export type PromptResult =
   | { type: "mode-cycle" }
   | { type: "help" }
   | { type: "palette"; filter?: string }
+  /** Ctrl+T: start a new session tab. */
+  | { type: "new-tab" }
+  /** Ctrl+X: close the active session tab. */
+  | { type: "close-tab" }
+  /** Ctrl+N: move to the next session tab. */
+  | { type: "next-tab" }
+  /** Ctrl+B: toggle the session sidebar. */
+  | { type: "sidebar" }
   /** The user typed `@` at the start of a word, asking for a file mention. */
   | { type: "mention"; draft: string };
 
@@ -126,6 +134,18 @@ export class Prompt {
             case "w":
               this.deleteWord();
               render();
+              return;
+            case "t":
+              finish({ type: "new-tab" });
+              return;
+            case "x":
+              finish({ type: "close-tab" });
+              return;
+            case "n":
+              finish({ type: "next-tab" });
+              return;
+            case "b":
+              finish({ type: "sidebar" });
               return;
             case "l":
               this.output.write("\u001b[2J\u001b[H");

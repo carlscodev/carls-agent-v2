@@ -99,6 +99,14 @@ export function wrap(text: string, width: number): string[] {
 
 /** Clamps a width to the terminal, keeping a sane minimum for tiny windows. */
 export function clampWidth(columns: number | undefined, fallback: number, minimum = 20): number {
-  const width = columns ?? fallback;
-  return Math.max(minimum, width);
+  return Math.max(minimum, terminalDimension(columns, fallback));
+}
+
+/**
+ * A usable terminal dimension. `process.stderr.columns` (and `.rows`) is 0 on a pty
+ * with no window size set, and `0 ?? fallback` keeps the 0, which collapses a
+ * layout to a single ellipsis. Treat a non-positive value as "unknown".
+ */
+export function terminalDimension(columns: number | undefined, fallback = 80): number {
+  return columns !== undefined && columns > 0 ? columns : fallback;
 }

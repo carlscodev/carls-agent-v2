@@ -12,7 +12,12 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 | Agent loop | gather → act → verify, `--max-steps`, abort mid-turn |
 | Parallel read-only tools | up to 6 concurrent calls per turn |
 | Context compaction | 75% threshold, tool-pair-safe cut, checkpoint summary, `/compact` |
-| Sub-agents | `delegate_task`, read-only, no nesting, structured report |
+| Compaction pipeline | 5 layers (artifact budget, superseded-read snip, masking, collapsed view, summary); layer 5 re-anchors the live state into the summary message |
+| Observation masking | old tool results replaced by a one-line digest before compaction; failures and the recent window stay verbatim |
+| Repository map | `repo_map` indexes symbols and signatures (regex, no new deps) and answers `find`/`dependents` queries under a token budget |
+| Sub-agents | `delegate_task`, read-only, no nesting, structured report, four roles (explorer/planner/auditor/tester) |
+| Sub-agent pool | `delegate_task` with a `tasks` array runs up to 6 children, 3 at a time, in request order; a failing child does not fail the batch |
+| Checkpoints | `ShadowGit` snapshots the tree to a private git ref without touching the user's index or HEAD; `/checkpoint` and `/rewind` |
 | Sessions | persisted transcripts, `/resume`, `/sessions` picker |
 | Undo / redo | per-file snapshots behind `/undo`, session redo stack behind `/redo` |
 | `@file` mentions | `@` opens a picker over tracked files; the content rides along in the message, capped at 8 files / 60k chars. Works in the REPL and in `carls -p` |
@@ -27,10 +32,13 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 | Permissions | 6 modes, allow/deny lists, diff preview, `Shift+Tab` |
 | MCP | stdio, SSE and Streamable HTTP, remote auth, `/mcp` |
 | Skills | discovery from 3 layers, usage ledger, review queue, `save_skill` |
-| Tools | 52 built-in, plus MCP tools, all zod-schema'd |
+| Tools | 62 built-in, plus MCP tools, all zod-schema'd |
 | LSP | diagnostics, hover, definition, code actions, and `lsp_edit` applying renames and quick fixes across files |
 | Hooks | `preToolUse` / `postToolUse` / session events, plus the plugin API's `tool.execute.before` / `tool.execute.after` / `session.idle` with input rewrite and observation override |
 | Plan / todo | `todo_write`, `/todo` |
+| Persistent plan | `PersistentTaskDAG` survives a restart under `.carls/state/dag.json`; `plan_task`/`advance_task`/`read_task_graph`/`resume_task`, `/plan` |
+| Skill evolution | curation gate, versioning, dependency graph, `evolve_skill`/`review_skills`/`skill_history`/`revert_skill`/`skill_graph` |
+| Operator symbiosis | mid-run message classified as correction/approval/stop/question; corrections teach a persistent rule set (`/rules`); `ExecutionReceipt` behind `/receipt` |
 | Terminal UI | fixed header, scrolling region, boxed panels, diffs, markdown stream, palette |
 | Themes | dark/light, 256-colour and no-colour degradation |
 | Print mode | stdout answer only, pipeable |

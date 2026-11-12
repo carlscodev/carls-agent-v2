@@ -1,6 +1,6 @@
 {
   "name": "carls-code",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Autonomous AI coding agent CLI harness (Gather-Act-Verify, compaction, sub-agents, permission gate).",
   "type": "module",
   "license": "MIT",
@@ -21,6 +21,7 @@
     "start": "node ./bin/carls.mjs",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
+    "test:eol": "vitest run -t \"line endings\"",
     "typecheck": "tsc --noEmit",
     "prepare": "husky || true"
   },

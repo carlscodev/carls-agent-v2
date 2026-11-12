@@ -1,10 +1,27 @@
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir, platform as osPlatform } from "node:os";
 import { join, win32 } from "node:path";
 
-export type Platform = "win32" | "darwin" | "linux" | "other";
+export type Platform = "win32" | "darwin" | "linux" | "android" | "other";
+
+/**
+ * Termux ships its own filesystem layout under the app sandbox, and Node reports
+ * either `android` (official builds) or `linux` (some Termux packages) for it, so
+ * the environment variables are the reliable signal.
+ */
+export function isTermux(): boolean {
+  return (
+    osPlatform() === "android" ||
+    process.env.TERMUX_VERSION !== undefined ||
+    (process.env.PREFIX?.includes("com.termux") ?? false)
+  );
+}
 
 export function currentPlatform(): Platform {
+  // Android is checked first: a Termux install must not fall through to the
+  // generic Linux branch, which assumes /bin/bash and /etc.
+  if (isTermux()) return "android";
   const value = osPlatform();
   if (value === "win32") return "win32";
   if (value === "darwin") return "darwin";
@@ -52,6 +69,14 @@ export function shellForPlatform(): ShellSpec {
     return { file: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c"], label: "cmd.exe" };
   }
 
+  // Termux has no /bin/bash; the shell lives under $PREFIX/bin.
+  if (currentPlatform() === "android") {
+    const prefix = process.env.PREFIX ?? "/data/data/com.termux/files/usr";
+    const termuxBash = join(prefix, "bin", "bash");
+    if (existsSync(termuxBash)) return { file: termuxBash, args: ["-lc"], label: "Termux bash" };
+    return { file: join(prefix, "bin", "sh"), args: ["-lc"], label: "Termux sh" };
+  }
+
   return { file: "/bin/bash", args: ["-lc"], label: "bash" };
 }
 
@@ -63,6 +88,11 @@ export function systemConfigPath(): string {
   if (isWindows()) {
     const base = process.env.PROGRAMDATA ?? "C:\\ProgramData";
     return join(base, "carls", ".carlsrc.json");
+  }
+  // Termux has no /etc; the writable equivalent is $PREFIX/etc.
+  if (currentPlatform() === "android") {
+    const prefix = process.env.PREFIX ?? "/data/data/com.termux/files/usr";
+    return join(prefix, "etc", "carls", ".carlsrc.json");
   }
   return join("/etc", "carls", ".carlsrc.json");
 }
@@ -160,10 +190,7 @@ export function processListCommand(): ShellSpec {
 export function enableWindowsVirtualTerminal(): void {
   if (!isWindows()) return;
   try {
-    // Imported lazily: this module is only useful on Windows and must not fail
-    // the build or the run on other platforms.
-    const childProcess = require("node:child_process") as typeof import("node:child_process");
-    childProcess.execFileSync(
+    execFileSync(
       "powershell.exe",
       ["-NoProfile", "-Command", "$null=[console]::OutputEncoding=[System.Text.Encoding]::UTF8"],
       { stdio: "ignore" },

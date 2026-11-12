@@ -8,6 +8,14 @@ import type { ContentBlock, Message, ToolSchema } from "../types/llm.js";
  */
 const CHARS_PER_TOKEN = 3.6;
 
+/**
+ * The estimator's inverse, for callers that need a character budget rather than
+ * a token budget (e.g. clipping one oversized block to a hard token cap).
+ */
+export function charsForTokens(tokens: number): number {
+  return Math.max(0, Math.floor(tokens * CHARS_PER_TOKEN));
+}
+
 export function estimateTokens(text: string): number {
   if (text.length === 0) return 0;
   return Math.ceil(text.length / CHARS_PER_TOKEN);

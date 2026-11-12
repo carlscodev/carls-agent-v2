@@ -21,6 +21,7 @@ import { runUpdate } from "../update/Updater.js";
 import { applyPreset, discoverAgents, findAgent } from "../agents/Presets.js";
 import { writeTranscript } from "./Export.js";
 import { composeInEditor, editorSpec } from "./Editor.js";
+import { ExecutionReceipt } from "../symbiosis/ExecutionReceipt.js";
 
 export interface CommandContext {
   runtime: Runtime;
@@ -28,6 +29,17 @@ export interface CommandContext {
   retryLast: () => Promise<void>;
   /** Puts text back into the prompt line, used by /editor. */
   composePrompt?: (text: string) => void;
+  /**
+   * Session-tab controls, wired by the REPL. Absent in one-shot and headless
+   * runs, where there is no tab strip, so `/tab` degrades to a message.
+   */
+  tabs?: {
+    list: () => { title: string; active: boolean }[];
+    open: () => Promise<void>;
+    close: () => Promise<void>;
+    next: () => void;
+    sidebar: () => Promise<void>;
+  };
 }
 
 export interface CommandSpec {
@@ -347,6 +359,78 @@ export const COMMANDS: CommandSpec[] = [
     },
   },
   {
+    name: "/checkpoint",
+    aliases: ["/cp"],
+    usage: "/checkpoint [label]",
+    summary: "Snapshot the whole working tree as a git checkpoint",
+    run: (args, ctx) => {
+      const shadow = ctx.runtime.shadowGit;
+      if (!shadow.enabled) {
+        printError("Checkpoints need a git repository. Run git init, or use /undo for file-level reverts.");
+        return false;
+      }
+      const label = args.join(" ").trim() || "manual checkpoint";
+      const checkpoint = shadow.create(label);
+      if (checkpoint === undefined) {
+        printInfo("Nothing to checkpoint, or the snapshot could not be created.");
+        return false;
+      }
+      printInfo(`Checkpoint ${checkpoint.id} · ${checkpoint.files} files · "${checkpoint.label}"`);
+      printInfo(`Rewind with /rewind ${checkpoint.id}`);
+      return false;
+    },
+  },
+  {
+    name: "/rewind",
+    usage: "/rewind [id|list]",
+    summary: "Restore the whole working tree to a checkpoint",
+    run: (args, ctx) => {
+      const shadow = ctx.runtime.shadowGit;
+      if (!shadow.enabled) {
+        printError("Checkpoints need a git repository. Run git init, or use /undo for file-level reverts.");
+        return false;
+      }
+
+      const target = args[0];
+      if (target === "list") {
+        const checkpoints = shadow.list();
+        if (checkpoints.length === 0) {
+          printInfo("No checkpoints yet. Create one with /checkpoint.");
+          return false;
+        }
+        for (const checkpoint of checkpoints) {
+          printInfo(`${checkpoint.id}  ${checkpoint.at}  ${checkpoint.label}`);
+        }
+        return false;
+      }
+
+      const checkpoint = shadow.resolve(target ?? "");
+      if (checkpoint === undefined) {
+        printError(
+          target === undefined
+            ? "No checkpoints to rewind to. Create one with /checkpoint."
+            : `No checkpoint matches "${target}". Try /rewind list.`,
+        );
+        return false;
+      }
+
+      // Rewinding discards work, so the state it is about to replace is itself
+      // snapshotted first: the rewind is then undoable with /rewind <new id>.
+      const safety = shadow.create(`before rewind to ${checkpoint.id}`);
+      try {
+        const result = shadow.rewind(checkpoint);
+        printInfo(`Rewound to ${checkpoint.id} · restored ${result.restored} files`);
+        if (result.deleted.length > 0) {
+          printInfo(`Removed ${result.deleted.length} file(s) added since then: ${result.deleted.slice(0, 5).join(", ")}`);
+        }
+        if (safety !== undefined) printInfo(`Undo this rewind with /rewind ${safety.id}`);
+      } catch (error) {
+        printError(`Rewind failed: ${(error as Error).message}`);
+      }
+      return false;
+    },
+  },
+  {
     name: "/skills",
     usage: "/skills [list|search <q>|show <name>|review|new <name>]",
     summary: "List, inspect and review the reusable skills",
@@ -658,6 +742,44 @@ export const COMMANDS: CommandSpec[] = [
     },
   },
   {
+    name: "/tab",
+    aliases: ["/tabs"],
+    usage: "/tab [new|close|next|list]",
+    summary: "Manage session tabs (new, close, next, list)",
+    run: async (args, ctx) => {
+      if (ctx.tabs === undefined) {
+        printInfo("Session tabs are only available in the interactive REPL.");
+        return false;
+      }
+      switch ((args[0] ?? "list").toLowerCase()) {
+        case "new":
+          await ctx.tabs.open();
+          return false;
+        case "close":
+          await ctx.tabs.close();
+          return false;
+        case "next":
+          ctx.tabs.next();
+          return false;
+        case "sidebar":
+        case "ls":
+          await ctx.tabs.sidebar();
+          return false;
+        case "list":
+        default: {
+          const rows = ctx.tabs.list();
+          const lines = rows.map((row, index) => {
+            const marker = row.active ? pc.cyan("●") : " ";
+            return `  ${marker} ${pc.bold(String(index + 1))}  ${row.title}`;
+          });
+          printPanel(`Session tabs (${rows.length})`, lines);
+          printInfo("ctrl+t new · ctrl+x close · ctrl+n next · ctrl+b sidebar");
+          return false;
+        }
+      }
+    },
+  },
+  {
     name: "/sessions",
     aliases: ["/history"],
     usage: "/sessions [id]",
@@ -878,6 +1000,75 @@ export const COMMANDS: CommandSpec[] = [
     summary: "Install the latest release (or only check for one)",
     run: async (args) => {
       await runUpdate({ check: args.includes("--check") || args.includes("check") });
+      return false;
+    },
+  },
+  {
+    name: "/plan",
+    usage: "/plan",
+    summary: "Show the persistent task graph and where it stopped",
+    run: (_args, ctx) => {
+      const dag = ctx.runtime.dag;
+      if (dag.all().length === 0) {
+        printInfo("No plan yet. Ask the agent to plan a multi-step task, or it will create one automatically.");
+        return false;
+      }
+      const snapshot = dag.snapshot();
+      printInfo(`Objective: ${snapshot.objective}`);
+      for (const node of dag.all()) {
+        const marker =
+          node.status === "completed" ? "[x]" : node.status === "running" ? "[>]" : node.status === "verifying" ? "[~]" : node.status === "failed" ? "[!]" : "[ ]";
+        const criteria = node.acceptanceCriteria.length > 0 ? ` — done when: ${node.acceptanceCriteria}` : "";
+        printInfo(`${marker} ${node.id} ${node.title}${criteria}`);
+      }
+      const next = dag.next();
+      printInfo(
+        next !== undefined
+          ? `Next: ${next.id} ${next.title}`
+          : snapshot.done
+            ? "Plan complete."
+            : "Nothing is runnable; a failed node needs a decision (retry or roll back).",
+      );
+      return false;
+    },
+  },
+  {
+    name: "/rules",
+    usage: "/rules [forget <id>]",
+    summary: "List the rules the operator taught this workspace",
+    run: (args, ctx) => {
+      const memory = ctx.runtime.operatorMemory;
+      if (args[0] === "forget") {
+        const id = args[1];
+        if (id === undefined) {
+          printError("Usage: /rules forget <id>");
+          return false;
+        }
+        printInfo(memory.forget(id) ? `Forgot rule ${id}.` : `No rule with id ${id}.`);
+        return false;
+      }
+      const rules = memory.all();
+      if (rules.length === 0) {
+        printInfo("No rules learned yet. Correct the agent mid-run and it will remember the lesson.");
+        return false;
+      }
+      for (const rule of rules) {
+        printInfo(`${rule.id}  (${rule.kind}, confirmed ${rule.confirmations}x)  ${rule.text}`);
+      }
+      return false;
+    },
+  },
+  {
+    name: "/receipt",
+    usage: "/receipt",
+    summary: "Show what the last task changed, verified and rolled back",
+    run: (_args, ctx) => {
+      const receipt = ctx.runtime.lastReceipt;
+      if (receipt === undefined) {
+        printInfo("No task has finished yet in this session.");
+        return false;
+      }
+      printPanel("Execution receipt", ExecutionReceipt.format(receipt).split("\n"));
       return false;
     },
   },

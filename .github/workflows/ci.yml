@@ -77,6 +77,12 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
 
+      # The suite is POSIX-only (it needs bash, symlinks and chmod), but the
+      # line-ending cases are platform independent: they write CRLF themselves.
+      # They are the ones that guard the Windows editing path, so run them here.
+      - name: Line-ending tests
+        run: npm run test:eol
+
       - name: CLI smoke test
         shell: pwsh
         run: |

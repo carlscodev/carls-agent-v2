@@ -26,6 +26,7 @@ and in order. `⇉` marks the parallel-safe ones in `/tools`.
 | Tool | What it does |
 | --- | --- |
 | `glob_files` ⇉ | glob with `.gitignore` respected |
+| `repo_map` ⇉ | symbol and signature index for the workspace: `find` a name to see where it is declared and what depends on it, `budget_tokens` caps the rendered size. Cheaper than reading whole files before a change |
 | `grep_search` ⇉ | JS regex over file contents: `pattern`, `glob`, `max_results`, `context` (0-5 surrounding lines), `case_sensitive` |
 | `lsp` ⇉ | talks to the configured language server: `action: diagnostics` for errors, `hover` for the type/docs at a position, `definition` for where a symbol lives, `codeActions` for the quick fixes offered there |
 | `lsp_edit` | applies a language-server edit: `action: rename` with `newName` renames the symbol across files, `action: codeAction` with the 1-based `index` applies one quick fix; `dryRun` reports the files instead of writing |
@@ -65,9 +66,18 @@ and in order. `⇉` marks the parallel-safe ones in `/tools`.
 | Tool | What it does |
 | --- | --- |
 | `todo_write` | the plan the model keeps updated; `/todo` renders it |
-| `delegate_task` ⇉ | isolated read-only sub-agent, returns a JSON conclusion |
+| `delegate_task` ⇉ | isolated read-only sub-agents: one `goal` with a `role` (explorer/planner/auditor/tester), or a `tasks` array run in parallel, up to 6 per call |
 | `use_skill` ⇉ | load a skill body by name |
 | `save_skill` | write a project skill into `.agents/skills/<name>/SKILL.md` |
+| `plan_task` | record a multi-step plan as a persistent task graph; survives a restart, replaces any previous plan |
+| `advance_task` | move a node to `running`/`verifying`/`completed`/`failed`/`rolled_back`; a node must pass through `verifying` before `completed` |
+| `read_task_graph` | show the active plan, the current node and the next one |
+| `resume_task` | load a plan left behind by an earlier session and report where it stopped |
+| `evolve_skill` | create or revise a skill through the curation gate; every accepted version is recorded |
+| `review_skills` | list skills needing attention: flagged wrong, stale against a dependency, or never used |
+| `skill_history` | show every recorded revision of a skill and its note |
+| `revert_skill` | restore the previous revision of a skill |
+| `skill_graph` | show the dependency graph declared through `requires`/`extends` |
 | `mcp__<server>__<tool>` | whatever a connected MCP server exposes |
 
 ## Notes

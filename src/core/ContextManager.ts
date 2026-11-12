@@ -9,6 +9,15 @@ export interface ContextManagerOptions {
   truncateLimit: number;
   /** Messages kept verbatim at the tail after a compaction pass. */
   keepRecent?: number;
+  /**
+   * Ratio at which old observations are masked before a full compaction. Below
+   * the compaction threshold on purpose: masking is lossless for reasoning (the
+   * call and its outcome stay), while compaction replaces whole turns with a
+   * summary, so it is worth trying the cheaper pass first.
+   */
+  maskThreshold?: number;
+  /** Observations shorter than this are never masked: the digest would cost more. */
+  maskMinChars?: number;
 }
 
 export interface CompactionResult {
@@ -27,12 +36,16 @@ export class ContextManager {
   private readonly compactThreshold: number;
   private readonly truncateLimit: number;
   private readonly keepRecent: number;
+  private readonly maskThreshold: number;
+  private readonly maskMinChars: number;
 
   constructor(options: ContextManagerOptions) {
     this.contextWindow = options.contextWindow;
     this.compactThreshold = options.compactThreshold;
     this.truncateLimit = options.truncateLimit;
     this.keepRecent = options.keepRecent ?? 8;
+    this.maskThreshold = options.maskThreshold ?? 0.6;
+    this.maskMinChars = options.maskMinChars ?? 1200;
   }
 
   /**
@@ -59,6 +72,51 @@ export class ContextManager {
   /** Recorta una observación larga antes de inyectarla en el historial. */
   truncateObservation(text: string): string {
     return truncate(text, this.truncateLimit).text;
+  }
+
+  /** How many observations the last `maskObservations` call replaced. */
+  lastMaskedCount = 0;
+
+  /** True when history is large enough that masking old observations is worth it. */
+  shouldMask(messages: Message[]): boolean {
+    return this.usedRatio(messages) >= this.maskThreshold;
+  }
+
+  /**
+   * Replaces the body of old `tool_result` blocks with a one-line digest.
+   *
+   * This is the cheap pass before a full compaction. It never removes a block and
+   * never reorders anything, so a `tool_use`/`tool_result` pair always stays
+   * intact and the provider still accepts the request. What is lost is the raw
+   * text of an observation the agent has already acted on; the digest keeps the
+   * fact that the call happened and whether it succeeded.
+   *
+   * The recent tail is left alone: that is where the current reasoning lives.
+   */
+  maskObservations(messages: Message[], keepTail = this.keepRecent * 2): Message[] {
+    const cut = Math.max(0, messages.length - keepTail);
+    let masked = 0;
+
+    const next = messages.map((message, index) => {
+      if (index >= cut) return message;
+      // Only the user-side tool_result carrier is touched; assistant turns and
+      // user text are left verbatim.
+      if (message.role !== "user") return message;
+      let changed = false;
+      const content = message.content.map((block) => {
+        if (block.type !== "tool_result") return block;
+        if (block.content.length < this.maskMinChars) return block;
+        // A failure the agent may still be fixing keeps its detail.
+        if (block.is_error && block.content.length < this.maskMinChars * 3) return block;
+        changed = true;
+        masked++;
+        return { ...block, content: digest(block.content, block.is_error) };
+      });
+      return changed ? { ...message, content } : message;
+    });
+
+    this.lastMaskedCount = masked;
+    return masked > 0 ? next : messages;
   }
 
   /**
@@ -167,6 +225,50 @@ function extractPath(input: unknown): string | undefined {
     if (typeof value === "string") return value;
   }
   return undefined;
+}
+
+/**
+ * Compresses one observation into a single line that keeps its outcome.
+ *
+ * The digest is extracted from the text, never invented: the exit code, a test
+ * tally, an error count or the size of the output. When nothing recognisable is
+ * found it falls back to a size marker, which is still enough for the model to
+ * know the call happened and roughly what came back.
+ */
+export function digest(content: string, isError: boolean): string {
+  const lines = content.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  const facts: string[] = [];
+
+  // Exit code as reported by the bash tool.
+  const exit = content.match(/\[exit code\]\s*(-?\d+|null)/);
+  if (exit?.[1] !== undefined) facts.push(`exit ${exit[1]}`);
+
+  // A test tally. Runners disagree on the order: vitest prints "Tests  186 passed",
+  // mocha-style output prints "186 passing", so both shapes are matched.
+  const passed = content.match(/(?:tests?|specs?)\s+(\d+)\s+(?:passed|ok)|(\d+)\s+(?:tests?|specs?)\s+(?:passed|ok)/i);
+  if (passed !== null) {
+    const count = passed[1] ?? passed[2];
+    if (count !== undefined) facts.push(`${count} tests ok`);
+  }
+  const failed = content.match(/(?:tests?|specs?)\s+(\d+)\s+failed|(\d+)\s+(?:tests?|specs?)\s+failed/i);
+  if (failed !== null) {
+    const count = failed[1] ?? failed[2];
+    if (count !== undefined) facts.push(`${count} failed`);
+  }
+
+  // A build/test error count.
+  const errors = content.match(/(\d+)\s+errors?\b/i);
+  if (errors?.[1] !== undefined) facts.push(`${errors[1]} errors`);
+
+  // A unified diff, which the model does not need to re-read after the fact.
+  const hunks = content.match(/^@@/gm);
+  if (hunks !== null && hunks.length > 0) facts.push(`${hunks.length} hunks`);
+
+  const kind = isError ? "failed" : "ok";
+  const head = `[observation masked · ${kind}`;
+  const detail = facts.length > 0 ? ` · ${facts.join(", ")}` : "";
+  const shape = `${lines.length} lines, ${content.length} chars`;
+  return `${head}${detail} · ${shape}]`;
 }
 
 /** Convenience used by the REPL `/context` command. */

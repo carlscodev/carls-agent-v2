@@ -4,7 +4,7 @@ import { loadConfig } from "../config/Config.js";
 import { Logger } from "../utils/Logger.js";
 import { SessionStore } from "../core/SessionStore.js";
 import { Runtime } from "../core/Runtime.js";
-import { Spinner, bannerLines, modeTag, printAssistantHeader, printCost, printError, printInfo, printStatusBar } from "./TerminalUI.js";
+import { Spinner, bannerLines, modeTag, printAssistantHeader, printCost, printError, printInfo, printStatusBar, tabStripLine } from "./TerminalUI.js";
 import { Chrome } from "./Chrome.js";
 import { Splash } from "./Splash.js";
 import { closeBrowser } from "../tools/BrowserOps.js";
@@ -19,6 +19,7 @@ import { openCommandPalette } from "./CommandPalette.js";
 import { expandMentions, listWorkspaceFiles } from "./Mentions.js";
 import { PromptQueue, collectTypedLines, drainQueue } from "./Queue.js";
 import { selectList } from "./SelectList.js";
+import { TabManager, shortTitle, type Tab } from "./Tabs.js";
 
 export interface SessionOptions {
   overrides: Partial<ResolvedConfig>;
@@ -29,19 +30,42 @@ export interface SessionOptions {
 
 export async function runRepl(options: SessionOptions): Promise<number> {
   const logger = new Logger(options.config.logLevel);
-  const session = new SessionStore(options.config.cwd, options.config.model, options.sessionId);
-  const runtime = new Runtime(
-    { config: options.config, logger, session },
-    options.resumeMessages ?? [],
+
+  /**
+   * Builds one tab's runtime. The config is cloned so a model or mode change in
+   * one tab cannot leak into another; the session store is per-tab because its
+   * id is the log file name.
+   */
+  const makeTab = async (
+    sessionId: string | undefined,
+    resumeMessages: import("../types/llm.js").Message[],
+    title: string,
+  ): Promise<Tab<Runtime>> => {
+    const session = new SessionStore(options.config.cwd, options.config.model, sessionId);
+    const runtime = new Runtime(
+      { config: structuredClone(options.config), logger, session },
+      resumeMessages,
+    );
+    await runtime.connectMcpServers();
+    await runtime.start();
+    return { id: session.id, title, payload: runtime };
+  };
+
+  const tabs = new TabManager<Runtime>(
+    await makeTab(options.sessionId, options.resumeMessages ?? [], "main"),
   );
-  await runtime.connectMcpServers();
-  await runtime.start();
+  /**
+   * The active tab's runtime, reassigned on every tab switch. Keeping it a
+   * `let` rather than a getter leaves the rest of the loop untouched: each
+   * closure below reads the current tab's conversation, not a stale one.
+   */
+  let runtime = tabs.current().payload;
 
   const banner = bannerLines({
     model: options.config.model,
     provider: options.config.provider,
     cwd: options.config.cwd,
-    sessionId: session.id,
+    sessionId: tabs.current().id,
     mode: options.config.mode,
     contextWindow: options.config.contextWindow,
     ...(options.config.effort !== undefined ? { effort: options.config.effort } : {}),
@@ -172,10 +196,89 @@ export async function runRepl(options: SessionOptions): Promise<number> {
 
   if (useChrome) chrome.setStatus(statusLine());
 
+  /**
+   * Repaints the tab strip and footer for the active tab. Called after every
+   * switch, so the strip, the status line and the prompt all describe the same
+   * conversation.
+   */
+  const showTabs = (): void => {
+    if (!useChrome) return;
+    chrome.setTabs(tabStripLine(tabs.all(), tabs.activeIndex));
+    showStatus();
+  };
+
+  /** Points `runtime` at the tab in `index` and repaints. */
+  const activateTab = (index: number): void => {
+    tabs.select(index);
+    runtime = tabs.current().payload;
+    showTabs();
+  };
+
+  /** Opens a fresh tab with an empty conversation and switches to it. */
+  const openTab = async (): Promise<void> => {
+    const tab = await makeTab(undefined, [], shortTitle("new session"));
+    const index = tabs.add(tab);
+    activateTab(index);
+    if (useChrome) chrome.writeRegion(`${theme().paint(theme().colors.text.faint, `— tab ${index + 1}: ${tab.title} —`)}\n`);
+    else process.stderr.write(pc.gray(`— tab ${index + 1} —\n`));
+  };
+
+  /** Closes the active tab, unless it is the last one. */
+  const closeTab = async (): Promise<void> => {
+    const index = tabs.activeIndex;
+    if (tabs.size <= 1) {
+      printInfo("Only one tab open; /exit to quit.");
+      return;
+    }
+    const closing = tabs.current();
+    tabs.close(index);
+    runtime = tabs.current().payload;
+    showTabs();
+    await closing.payload.close();
+    if (useChrome) chrome.writeRegion(`${theme().paint(theme().colors.text.faint, `— closed tab ${index + 1} —`)}\n`);
+    else process.stderr.write(pc.gray(`— closed tab ${index + 1} —\n`));
+  };
+
+  /**
+   * Full-screen sidebar listing every tab, mirroring opencode's session picker.
+   * Selecting a row switches tabs; the closing key leaves the active tab alone.
+   */
+  const openSidebar = async (): Promise<void> => {
+    const t = theme();
+    const choice = await selectList({
+      title: `${t.paint(t.colors.accent, "Sessions")} ${t.paint(t.colors.text.faint, `${tabs.size} open`)}`,
+      current: tabs.current().id,
+      items: tabs.all().map((tab, index) => {
+        const turns = tab.payload.history.filter((message) => message.role === "user").length;
+        return {
+          id: String(index),
+          label: `${index + 1}  ${tab.title}`,
+          detail: index === tabs.activeIndex ? t.paint(t.colors.accent, "● active") : "",
+          preview: [
+            `${turns} turn${turns === 1 ? "" : "s"} · ${tab.payload.config.model}`,
+            `${tab.payload.cost.format()}`,
+          ],
+        };
+      }),
+    });
+    if (choice === undefined) {
+      showStatus();
+      return;
+    }
+    activateTab(Number.parseInt(choice.id, 10));
+  };
+
   const runGoal = async (goal: string): Promise<void> => {
     busy = true;
     interruptCount = 0;
     activeAbort = new AbortController();
+    // The first goal names the tab; later goals leave it, so the strip keeps
+    // pointing at what the conversation is about rather than its last message.
+    const tab = tabs.current();
+    if (tab.title === "main" || tab.title === "new session") {
+      tab.title = shortTitle(goal);
+      showTabs();
+    }
     const markdown = new MarkdownRenderer(useChrome ? process.stderr : process.stdout);
     let streamed = false;
     if (useChrome) chrome.moveToRegionBottom();
@@ -283,6 +386,27 @@ export async function runRepl(options: SessionOptions): Promise<number> {
         });
         resume = undefined;
         if (result.type === "eof") break;
+        if (result.type === "new-tab") {
+          await openTab();
+          continue;
+        }
+        if (result.type === "close-tab") {
+          await closeTab();
+          continue;
+        }
+        if (result.type === "next-tab") {
+          activateTab((tabs.activeIndex + 1) % tabs.size);
+          continue;
+        }
+        if (result.type === "sidebar") {
+          if (useChrome) chrome.suspend();
+          try {
+            await openSidebar();
+          } finally {
+            if (useChrome) chrome.resume();
+          }
+          continue;
+        }
         if (result.type === "mention") {
           // The picker is full-screen, so release the scrolling region around it.
           if (useChrome) chrome.suspend();
@@ -349,6 +473,15 @@ export async function runRepl(options: SessionOptions): Promise<number> {
         try {
           shouldExit = await runCommand(input, {
             runtime,
+            tabs: {
+              list: () =>
+                tabs.all().map((tab, index) => ({ title: tab.title, active: index === tabs.activeIndex })),
+              open: openTab,
+              close: closeTab,
+              next: () => activateTab((tabs.activeIndex + 1) % tabs.size),
+              // The command dispatch already suspended the scrolling region.
+              sidebar: openSidebar,
+            },
             retryLast: async () => {
               if (lastGoal === undefined) {
                 printInfo("Nothing to retry yet.");
@@ -418,7 +551,9 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     spinner.stop();
     chrome.disable();
     await closeBrowser();
-    await runtime.close();
+    // Every tab owns a runtime, an MCP client set and a session-end hook, so all
+    // of them have to be closed, not just the one on screen.
+    await Promise.all(tabs.all().map((tab) => tab.payload.close()));
   }
   return 0;
 }

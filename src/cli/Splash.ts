@@ -1,6 +1,6 @@
 import * as readline from "node:readline";
 import pc from "picocolors";
-import { visibleWidth } from "./Text.js";
+import { terminalDimension, visibleWidth } from "./Text.js";
 
 const EYES = ["◕   ◕", "◔   ◔", "•   •", "◕   ◕"];
 const ANTENNA = ["●", "◉", "○", "◉"];
@@ -39,8 +39,8 @@ export class Splash {
 
     const draw = (): void => {
       const art = Splash.art(frame, info);
-      const width = out.columns ?? 80;
-      const height = out.rows ?? 24;
+      const width = terminalDimension(out.columns);
+      const height = terminalDimension(out.rows, 24);
       const top = Math.max(1, Math.floor((height - art.length) / 2));
       let buffer = "\u001b[2J\u001b[H";
       for (let index = 0; index < top - 1; index++) buffer += "\n";
