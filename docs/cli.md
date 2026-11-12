@@ -38,6 +38,11 @@ Print mode writes the answer to stdout and everything else to stderr, so
 While a turn is running the spinner shows the current step and elapsed seconds.
 `Esc`/`Ctrl+C` aborts the turn without ending the session.
 
+Typing while the agent works **queues** the message instead of losing it: press
+Enter to queue, Escape to discard what you typed, Ctrl+C to abort the turn. The
+footer shows `↑n queued`, and queued prompts run in order when the current turn
+finishes — each one expands its own `@file` mentions.
+
 ## Commands
 
 | Command | Purpose |

@@ -577,11 +577,15 @@ export const COMMANDS: CommandSpec[] = [
       ctx.runtime.setTools(next.tools);
       ctx.runtime.setModel(next.model);
       ctx.runtime.setEffort(next.effort);
+      ctx.runtime.setPermissions(next.permissions);
       ctx.runtime.setAgent(preset.name, preset.prompt);
       const parts = [
         preset.mode !== undefined ? `mode ${preset.mode}` : undefined,
         preset.tools !== undefined ? `${preset.tools.length} tools` : undefined,
         preset.model !== undefined ? `model ${preset.model}` : undefined,
+        preset.permission?.edit !== undefined ? `edit ${preset.permission.edit}` : undefined,
+        preset.permission?.webfetch !== undefined ? `webfetch ${preset.permission.webfetch}` : undefined,
+        preset.permission?.bash !== undefined ? `${preset.permission.bash.length} bash rules` : undefined,
       ].filter((part): part is string => part !== undefined);
       printInfo(`agent → ${preset.name}${parts.length > 0 ? ` · ${parts.join(" · ")}` : ""}`);
       return false;

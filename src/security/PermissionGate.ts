@@ -77,9 +77,23 @@ export class PermissionGate {
     return tool.readOnly ? "read" : "write";
   }
 
+  /**
+   * Tool-name rules from an agent preset or the config. A `deny` is checked
+   * first so an allow-list can never widen it by accident.
+   */
+  private toolDenied(tool: Tool): boolean {
+    return matchesAny(this.config.permissions.toolDeny ?? [], tool.name);
+  }
+
+  private toolAllowed(tool: Tool): boolean {
+    return matchesAny(this.config.permissions.toolAllow ?? [], tool.name);
+  }
+
   /** Read-only tools never prompt; they cannot mutate the workspace. */
   needsApproval(tool: Tool, input: unknown): boolean {
     if (tool.readOnly) return false;
+    if (this.toolDenied(tool)) return true;
+    if (this.toolAllowed(tool)) return false;
     if (this.alwaysAllowed.has(tool.name)) return false;
     if (PermissionGate.categoryOf(tool) === "write" && this.autoApprovesWrites()) return false;
 
@@ -127,11 +141,19 @@ export class PermissionGate {
       this.logger.debug(`yolo: auto-allowing "${request.tool.name}".`);
       return "allow";
     }
+    if (this.toolDenied(request.tool)) {
+      process.stderr.write(pc.red(`Denied by the active agent: ${request.tool.name}\n`));
+      return "deny";
+    }
     if (deniedByConfig) {
       process.stderr.write(pc.red(`Denied by config deny-list: ${command}\n`));
       return "deny";
     }
     if (this.alwaysAllowed.has(request.tool.name)) return "allow";
+    if (this.toolAllowed(request.tool)) {
+      this.logger.debug(`allowed by the active agent: "${request.tool.name}".`);
+      return "allow";
+    }
     if (category === "write" && this.autoApprovesWrites()) {
       this.logger.debug(`${mode} mode: auto-allowing write "${request.tool.name}".`);
       return "allow";

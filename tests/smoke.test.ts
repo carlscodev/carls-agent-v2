@@ -2182,6 +2182,149 @@ describe("workspace path guard", () => {
   });
 });
 
+describe("prompt queue", () => {
+  it("keeps order, ignores blank lines and honours the cap", async () => {
+    const { PromptQueue } = await import("../src/cli/Queue.js");
+    const queue = new PromptQueue(2);
+    expect(queue.push("first")).toBe(1);
+    expect(queue.push("   ")).toBe(1);
+    expect(queue.push("second")).toBe(2);
+    expect(queue.push("third")).toBe(2);
+    expect(queue.list()).toEqual(["first", "second"]);
+    expect(queue.shift()).toBe("first");
+    expect(queue.length).toBe(1);
+  });
+
+  it("drains prompts queued while draining", async () => {
+    const { PromptQueue, drainQueue } = await import("../src/cli/Queue.js");
+    const queue = new PromptQueue();
+    queue.push("one");
+    queue.push("two");
+    const seen: string[] = [];
+    await drainQueue(queue, async (text) => {
+      seen.push(text);
+      if (text === "one") queue.push("three");
+    });
+    expect(seen).toEqual(["one", "two", "three"]);
+    expect(queue.length).toBe(0);
+  });
+
+  it("collects typed lines while a turn runs", async () => {
+    const { PromptQueue, collectTypedLines } = await import("../src/cli/Queue.js");
+    const { PassThrough } = await import("node:stream");
+    const input = new PassThrough() as unknown as NodeJS.ReadStream;
+    const output = new PassThrough() as unknown as NodeJS.WriteStream;
+    output.on("data", () => undefined);
+    const queue = new PromptQueue();
+    let interrupts = 0;
+    const stop = collectTypedLines({ input, output, queue, onInterrupt: () => (interrupts += 1) });
+
+    const press = (sequence: string, key: Record<string, unknown>): void => {
+      input.emit("keypress", sequence, key);
+    };
+    press("h", { name: "h" });
+    press("i", { name: "i" });
+    press("\r", { name: "return" });
+    press("x", { name: "x" });
+    press("\b", { name: "backspace" });
+    press("\r", { name: "return" });
+    press("\u0003", { name: "c", ctrl: true });
+    stop();
+
+    expect(queue.list()).toEqual(["hi"]);
+    expect(interrupts).toBe(1);
+    // The listener is gone once stopped: later keys cannot queue anything.
+    press("z", { name: "z" });
+    press("\r", { name: "return" });
+    expect(queue.list()).toEqual(["hi"]);
+  });
+});
+
+describe("agent permission blocks", () => {
+  const preset = [
+    "---",
+    "description: Reviewer that never writes",
+    "permission:",
+    "  edit: deny",
+    "  webfetch: deny",
+    "  bash:",
+    '    "*": ask',
+    '    "git diff": allow',
+    '    "rm -rf *": deny',
+    "---",
+    "You review diffs.",
+  ].join("\n");
+
+  it("parses edit, webfetch and bash rules", async () => {
+    const { parsePreset } = await import("../src/agents/Presets.js");
+    const parsed = parsePreset("reviewer", preset, "project", "/tmp/r.md");
+    expect(parsed.permission?.edit).toBe("deny");
+    expect(parsed.permission?.webfetch).toBe("deny");
+    expect(parsed.permission?.bash).toEqual([
+      { pattern: "*", action: "ask" },
+      { pattern: "git diff", action: "allow" },
+      { pattern: "rm -rf *", action: "deny" },
+    ]);
+    // Unknown actions are dropped instead of silently becoming a deny.
+    const odd = parsePreset("odd", "---\npermission:\n  edit: maybe\n---\nbody", "project", "/tmp/o.md");
+    expect(odd.permission).toBeUndefined();
+  });
+
+  it("folds the block into tool and command rules the gate enforces", async () => {
+    const { parsePreset, applyPreset } = await import("../src/agents/Presets.js");
+    const { loadConfig } = await import("../src/config/Config.js");
+    const { PermissionGate } = await import("../src/security/PermissionGate.js");
+    const workspace = join(dir, "permission-workspace");
+    await mkdir(workspace, { recursive: true });
+    const previous = process.env.CARLS_SYSTEM_CONFIG;
+    process.env.CARLS_SYSTEM_CONFIG = join(workspace, "missing.json");
+    try {
+      const base = loadConfig({}, workspace);
+      const next = applyPreset(base, parsePreset("reviewer", preset, "project", "/tmp/r.md"));
+      expect(next.permissions.toolDeny).toContain("edit_file");
+      expect(next.permissions.toolDeny).toContain("web_search");
+      expect(next.permissions.deny).toContain("rm -rf *");
+      expect(next.permissions.allow).toContain("git diff");
+
+      const gate = new PermissionGate(next, new Logger("error"), async () => "y");
+      const edit = new FileEdit();
+      expect(
+        await gate.authorize({ tool: edit, input: { path: "a.ts", old_string: "a", new_string: "b" }, preview: "" }),
+      ).toBe("deny");
+      const bash = new BashExecution();
+      expect(await gate.authorize({ tool: bash, input: { command: "rm -rf /tmp/x" }, preview: "" })).toBe("deny");
+    } finally {
+      if (previous === undefined) delete process.env.CARLS_SYSTEM_CONFIG;
+      else process.env.CARLS_SYSTEM_CONFIG = previous;
+    }
+  });
+
+  it("lets a preset allow edits without prompting", async () => {
+    const { parsePreset, applyPreset } = await import("../src/agents/Presets.js");
+    const { loadConfig } = await import("../src/config/Config.js");
+    const { PermissionGate } = await import("../src/security/PermissionGate.js");
+    const workspace = join(dir, "permission-allow");
+    await mkdir(workspace, { recursive: true });
+    const previous = process.env.CARLS_SYSTEM_CONFIG;
+    process.env.CARLS_SYSTEM_CONFIG = join(workspace, "missing.json");
+    try {
+      const base = loadConfig({}, workspace);
+      const next = applyPreset(
+        base,
+        parsePreset("writer", "---\npermission:\n  edit: allow\n---\nbody", "project", "/tmp/w.md"),
+      );
+      const gate = new PermissionGate(next, new Logger("error"), async () => "n");
+      expect(gate.needsApproval(new FileEdit(), { path: "a.ts" })).toBe(false);
+      expect(
+        await gate.authorize({ tool: new FileEdit(), input: { path: "a.ts" }, preview: "" }),
+      ).toBe("allow");
+    } finally {
+      if (previous === undefined) delete process.env.CARLS_SYSTEM_CONFIG;
+      else process.env.CARLS_SYSTEM_CONFIG = previous;
+    }
+  });
+});
+
 describe("external editor", () => {
   it("picks the editor in the order a terminal respects", async () => {
     const { editorSpec } = await import("../src/cli/Editor.js");

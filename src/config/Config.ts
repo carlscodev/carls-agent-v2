@@ -82,7 +82,7 @@ export interface ConfigFileShape {
   bashTimeoutMs?: number;
   truncateLimit?: number;
   compactThreshold?: number;
-  permissions?: { allow?: string[]; deny?: string[] };
+  permissions?: { allow?: string[]; deny?: string[]; toolAllow?: string[]; toolDeny?: string[] };
   hooks?: Partial<HooksConfig>;
   mcpServers?: Record<string, McpServerConfig>;
   /** Keyed by extension (".ts") or file name, e.g. "Makefile". */
@@ -130,7 +130,14 @@ export interface ResolvedConfig {
   bashTimeoutMs: number;
   truncateLimit: number;
   compactThreshold: number;
-  permissions: { allow: string[]; deny: string[] };
+  permissions: {
+    allow: string[];
+    deny: string[];
+    /** Tool names that never prompt, e.g. an agent preset with `edit: allow`. */
+    toolAllow?: string[];
+    /** Tool names that are refused outright, e.g. `edit: deny`. */
+    toolDeny?: string[];
+  };
   hooks: HooksConfig;
   mcpServers: Record<string, McpServerConfig>;
   lspServers?: Record<string, LspServerSpec>;
@@ -223,6 +230,8 @@ export function loadConfig(overrides: ConfigOverrides = {}, cwd = process.cwd())
     permissions: {
       allow: file.permissions?.allow ?? [],
       deny: file.permissions?.deny ?? [],
+      ...(file.permissions?.toolAllow !== undefined ? { toolAllow: file.permissions.toolAllow } : {}),
+      ...(file.permissions?.toolDeny !== undefined ? { toolDeny: file.permissions.toolDeny } : {}),
     },
     hooks: { ...DEFAULT_HOOKS, ...file.hooks },
     mcpServers: file.mcpServers ?? {},

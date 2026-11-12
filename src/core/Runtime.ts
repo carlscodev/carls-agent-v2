@@ -423,6 +423,11 @@ export class Runtime {
     this.config.mode = mode;
   }
 
+  /** Applies a preset's tool and command rules; the gate reads the same object. */
+  setPermissions(permissions: ResolvedConfig["permissions"]): void {
+    this.config.permissions = permissions;
+  }
+
   /** Narrows or widens the advertised tools; execution stays untouched. */
   setTools(tools: string[] | undefined): void {
     if (tools === undefined || tools.length === 0) delete this.config.tools;

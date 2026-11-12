@@ -17,6 +17,7 @@ import { MarkdownRenderer } from "./Markdown.js";
 import { theme } from "./Theme.js";
 import { openCommandPalette } from "./CommandPalette.js";
 import { expandMentions, listWorkspaceFiles } from "./Mentions.js";
+import { PromptQueue, collectTypedLines, drainQueue } from "./Queue.js";
 import { selectList } from "./SelectList.js";
 
 export interface SessionOptions {
@@ -64,6 +65,8 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     process.stderr.write(`${banner.join("\n")}\n\n`);
   }
   const spinner = new Spinner();
+  /** Messages typed while a turn was running, drained in order afterwards. */
+  const queue = new PromptQueue();
   let busy = false;
   let interruptCount = 0;
   let lastGoal: string | undefined;
@@ -145,6 +148,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       parts.push(t.paint(t.colors.accent, `@${runtime.config.agentName}`));
     }
     if (runtime.config.effort !== undefined) parts.push(t.paint(t.colors.accent, runtime.config.effort));
+    if (queue.length > 0) parts.push(t.paint(t.colors.feedback.warning, `↑${queue.length} queued`));
     parts.push(t.paint(paint, `${tokenCount(used)}/${tokenCount(runtime.config.contextWindow)}`));
     parts.push(t.paint(t.colors.text.faint, runtime.cost.format()));
     parts.push(t.paint(t.colors.text.faint, cwd));
@@ -176,6 +180,25 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     let streamed = false;
     if (useChrome) chrome.moveToRegionBottom();
     spinner.start("thinking");
+    // Typing during a turn queues the message instead of dropping it. The
+    // composer owns stdin while it runs, so it must stop before the prompt.
+    const stopComposer = interactive
+      ? collectTypedLines({
+          input: process.stdin,
+          output: process.stderr,
+          queue,
+          // With the fixed layout the footer is redrawn constantly, so only the
+          // final "queued" line is printed there.
+          echo: !useChrome,
+          onQueued: (text, depth) => {
+            const line = `${pc.gray("↳ queued")} ${pc.gray(depth > 1 ? `(${depth}) ` : "")}${theme().paint(theme().colors.text.muted, text)}`;
+            if (useChrome) chrome.writeRegion(`${line}\n`);
+            else process.stderr.write(`\r\u001b[K${line}\n`);
+          },
+          // Raw mode swallows Ctrl+C, so raise the signal the handler expects.
+          onInterrupt: () => process.kill(process.pid, "SIGINT"),
+        })
+      : undefined;
     try {
       const result = await runtime.runTurn(goal, {
         signal: activeAbort.signal,
@@ -214,6 +237,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       markdown.flush();
       printError((error as Error).message);
     } finally {
+      stopComposer?.();
       busy = false;
       activeAbort = undefined;
       if (useChrome) {
@@ -357,6 +381,19 @@ export async function runRepl(options: SessionOptions): Promise<number> {
 
       lastGoal = input;
       await runGoal(expanded.text);
+
+      // Queued while the turn ran; each one expands its own mentions.
+      await drainQueue(queue, async (queued) => {
+        lastGoal = queued;
+        const echo = `${promptGlyph()}${queued}`;
+        if (useChrome) chrome.writeRegion(`${echo}\n`);
+        else process.stderr.write(`${echo}\n`);
+        const queuedExpanded = expandMentions(queued, runtime.config.cwd);
+        if (queuedExpanded.attached.length > 0) {
+          printInfo(`attached ${queuedExpanded.attached.join(", ")}`);
+        }
+        await runGoal(queuedExpanded.text);
+      });
     }
   } finally {
     process.off("SIGINT", onSigint);

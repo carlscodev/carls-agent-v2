@@ -16,7 +16,8 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 | Sessions | persisted transcripts, `/resume`, `/sessions` picker |
 | Undo / redo | per-file snapshots behind `/undo`, session redo stack behind `/redo` |
 | `@file` mentions | `@` opens a picker over tracked files; the content rides along in the message, capped at 8 files / 60k chars. Works in the REPL and in `carls -p` |
-| Agent presets | `.agents/agents/<name>.md` with mode/tools/model/effort frontmatter; `--agent <name>` and `/agents` |
+| Agent presets | `.agents/agents/<name>.md` with mode/tools/model/effort frontmatter and a `permission:` block (edit, webfetch, bash patterns); `--agent <name>` and `/agents` |
+| Queue | typing during a turn queues the message; prompts run in order when it finishes, `↑n` in the footer |
 | Web reading | `web_fetch` (HTML reduced to text, title included) and `web_search` over DuckDuckGo's keyless HTML endpoint |
 | Export | `/export [path]` writes the transcript as markdown, tool calls and results included |
 | LSP | `lsp` speaks JSON-RPC to the configured server: diagnostics, hover and definition, without a build |
@@ -43,7 +44,8 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 1. **Code actions from the LSP.** Diagnostics, hover and definition are wired;
    quick fixes and rename are not.
 2. **Session tabs and a sidebar.** One session on screen at a time today.
-3. **Queue and steer.** Submitting while a turn runs queues nothing yet.
+3. **Steer a running turn.** Messages typed during a turn are queued for after it;
+   injecting one into the running turn is not supported.
 4. **Headless server + remote client.** The runtime is embeddable, but there is
    no HTTP/WS server mode.
 5. **Custom keybinds and per-project TUI config.**

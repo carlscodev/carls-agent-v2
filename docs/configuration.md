@@ -192,6 +192,39 @@ sets are applied: no `model` keeps your model, no `mode` keeps your mode. Invali
 values (`mode: sideways`) are ignored instead of failing the session, and a file
 without frontmatter is simply instructions.
 
+### Permission blocks
+
+A preset can narrow what the agent is allowed to do, which is what makes a
+`reviewer` that cannot write trustworthy:
+
+```markdown
+---
+description: Reviews diffs, never edits
+permission:
+  edit: deny
+  webfetch: deny
+  bash:
+    "*": ask
+    "git diff": allow
+    "git log*": allow
+    "rm -rf *": deny
+---
+You review diffs and report findings only.
+```
+
+| Value | Meaning |
+| --- | --- |
+| `edit: deny` | every file-mutating tool is refused (`edit_file`, `write_file`, `apply_patch`, …) |
+| `edit: allow` | those tools run without prompting, even in `ask` mode |
+| `webfetch: deny` | `web_fetch`, `web_search`, `network_request`, `http_download` are refused |
+| `bash: { "pattern": allow }` | the command runs without prompting (glob, last rule wins) |
+| `bash: { "pattern": deny }` | the command is refused even in `auto` mode |
+| `ask` | the default: prompt in `ask`/`build`, allowed in `auto` |
+
+A `deny` always wins over an `allow`. `yolo` still overrides everything, and
+`/agents` shows the rules it applied. The same rules are available without a
+preset through `permissions.toolAllow` / `permissions.toolDeny`.
+
 ```bash
 carls --agent reviewer "look at the last commit"
 ```

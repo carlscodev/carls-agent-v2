@@ -24,6 +24,31 @@ import { userDataDir } from "../utils/platform.js";
  * `~/.carls/agents/*.md`. A project file with the same name wins.
  */
 
+export type AgentPermissionAction = "allow" | "ask" | "deny";
+
+/** The `permission:` block, shaped like the one the terminal world expects. */
+export interface AgentPermission {
+  edit?: AgentPermissionAction;
+  webfetch?: AgentPermissionAction;
+  bash?: { pattern: string; action: AgentPermissionAction }[];
+}
+
+/** Tools a preset means by `permission.edit`. */
+export const EDIT_TOOLS = [
+  "edit_file",
+  "write_file",
+  "write_many",
+  "apply_patch",
+  "file_append",
+  "file_delete",
+  "file_move",
+  "file_copy",
+  "make_dir",
+];
+
+/** Tools a preset means by `permission.webfetch`. */
+export const WEB_TOOLS = ["web_fetch", "web_search", "network_request", "http_download"];
+
 export interface AgentPreset {
   name: string;
   description: string;
@@ -33,6 +58,8 @@ export interface AgentPreset {
   tools?: string[];
   model?: string;
   effort?: Effort;
+  /** Tool and command rules; a `deny` always wins over an `allow`. */
+  permission?: AgentPermission;
   source: "project" | "user";
   path: string;
 }
@@ -43,11 +70,18 @@ const FRONTMATTER_KEYS = new Set(["description", "mode", "tools", "model", "effo
  * Splits a preset file into frontmatter and body. A file without a leading
  * `---` is all body, which keeps a plain markdown note usable as a preset.
  */
-export function splitFrontmatter(raw: string): { meta: Record<string, string>; body: string } {
+export function splitFrontmatter(raw: string): {
+  meta: Record<string, string>;
+  body: string;
+  /** Raw indented lines of the `permission:` block, parsed separately. */
+  permissionLines: string[];
+} {
   const text = raw.replace(/^\uFEFF/, "");
   const lines = text.split(/\r?\n/);
-  if ((lines[0] ?? "").trim() !== "---") return { meta: {}, body: text.trim() };
+  if ((lines[0] ?? "").trim() !== "---") return { meta: {}, body: text.trim(), permissionLines: [] };
   const meta: Record<string, string> = {};
+  const permissionLines: string[] = [];
+  let collectingPermission = false;
   let end = -1;
   for (let index = 1; index < lines.length; index++) {
     const line = lines[index] ?? "";
@@ -55,16 +89,73 @@ export function splitFrontmatter(raw: string): { meta: Record<string, string>; b
       end = index;
       break;
     }
+    // Indented lines belong to the block above them, which can only be
+    // `permission:`; nothing else in the frontmatter nests.
+    if (/^\s+\S/.test(line)) {
+      if (collectingPermission) permissionLines.push(line);
+      continue;
+    }
+    collectingPermission = false;
     const separator = line.indexOf(":");
     if (separator === -1) continue;
     const key = line.slice(0, separator).trim().toLowerCase();
     const value = line.slice(separator + 1).trim();
+    if (key === "permission" && value.length === 0) {
+      collectingPermission = true;
+      continue;
+    }
     if (FRONTMATTER_KEYS.has(key) && value.length > 0) {
       meta[key] = value.replace(/^["'](.*)["']$/, "$1");
     }
   }
-  if (end === -1) return { meta: {}, body: text.trim() };
-  return { meta, body: lines.slice(end + 1).join("\n").trim() };
+  if (end === -1) return { meta: {}, body: text.trim(), permissionLines: [] };
+  return { meta, body: lines.slice(end + 1).join("\n").trim(), permissionLines };
+}
+
+function actionOf(value: string): AgentPermissionAction | undefined {
+  const normalized = value.trim().toLowerCase().replace(/^["']|["']$/g, "");
+  return normalized === "allow" || normalized === "ask" || normalized === "deny" ? normalized : undefined;
+}
+
+/**
+ * Parses the `permission:` block. Two levels only: `edit`/`webfetch` are an
+ * action, `bash` is a map from command pattern to action.
+ */
+export function parsePermission(lines: string[]): AgentPermission | undefined {
+  const result: AgentPermission = {};
+  let inBash = false;
+  for (const raw of lines) {
+    const line = raw.replace(/\t/g, "  ");
+    const indent = line.length - line.trimStart().length;
+    const body = line.trim();
+    const separator = body.indexOf(":");
+    if (separator === -1) continue;
+    const key = body.slice(0, separator).trim();
+    const value = body.slice(separator + 1).trim();
+
+    if (indent <= 2) {
+      const lower = key.toLowerCase();
+      inBash = false;
+      if (lower === "bash" && value.length === 0) {
+        inBash = true;
+        result.bash ??= [];
+        continue;
+      }
+      const action = actionOf(value);
+      if (action === undefined) continue;
+      if (lower === "edit") result.edit = action;
+      else if (lower === "webfetch") result.webfetch = action;
+      continue;
+    }
+
+    if (!inBash) continue;
+    const pattern = key.replace(/^["']|["']$/g, "");
+    const action = actionOf(value);
+    if (pattern.length === 0 || action === undefined) continue;
+    result.bash ??= [];
+    result.bash.push({ pattern, action });
+  }
+  return Object.keys(result).length === 0 ? undefined : result;
 }
 
 function parseMode(value: string | undefined): PermissionMode | undefined {
@@ -82,7 +173,7 @@ export function parsePreset(
   source: "project" | "user",
   path: string,
 ): AgentPreset {
-  const { meta, body } = splitFrontmatter(raw);
+  const { meta, body, permissionLines } = splitFrontmatter(raw);
   const preset: AgentPreset = {
     name,
     description: meta.description ?? `agent from ${path}`,
@@ -102,6 +193,8 @@ export function parsePreset(
       .filter((tool) => tool.length > 0);
     if (tools.length > 0) preset.tools = tools;
   }
+  const permission = parsePermission(permissionLines);
+  if (permission !== undefined) preset.permission = permission;
   return preset;
 }
 
@@ -151,5 +244,43 @@ export function applyPreset(config: ResolvedConfig, preset: AgentPreset): Resolv
   if (preset.effort !== undefined) next.effort = preset.effort;
   if (preset.model !== undefined) next.model = preset.model;
   if (preset.tools !== undefined) next.tools = preset.tools;
+  if (preset.permission !== undefined) next.permissions = foldPermission(config.permissions, preset.permission);
+  return next;
+}
+
+function pushUnique(list: string[], items: readonly string[]): void {
+  for (const item of items) if (!list.includes(item)) list.push(item);
+}
+
+/**
+ * Turns the preset's `permission:` block into the two lists the gate already
+ * understands: tool names, and bash command patterns. `ask` is the default, so
+ * it only removes the pattern from the allow list.
+ */
+export function foldPermission(
+  base: ResolvedConfig["permissions"],
+  permission: AgentPermission,
+): ResolvedConfig["permissions"] {
+  const next: ResolvedConfig["permissions"] = {
+    allow: [...base.allow],
+    deny: [...base.deny],
+    toolAllow: [...(base.toolAllow ?? [])],
+    toolDeny: [...(base.toolDeny ?? [])],
+  };
+  const toolAllow = next.toolAllow ?? [];
+  const toolDeny = next.toolDeny ?? [];
+
+  if (permission.edit === "deny") pushUnique(toolDeny, EDIT_TOOLS);
+  if (permission.edit === "allow") pushUnique(toolAllow, EDIT_TOOLS);
+  if (permission.webfetch === "deny") pushUnique(toolDeny, WEB_TOOLS);
+  if (permission.webfetch === "allow") pushUnique(toolAllow, WEB_TOOLS);
+
+  for (const rule of permission.bash ?? []) {
+    if (rule.action === "allow") pushUnique(next.allow, [rule.pattern]);
+    if (rule.action === "deny") pushUnique(next.deny, [rule.pattern]);
+    if (rule.action === "ask") {
+      next.allow = next.allow.filter((pattern) => pattern !== rule.pattern);
+    }
+  }
   return next;
 }
