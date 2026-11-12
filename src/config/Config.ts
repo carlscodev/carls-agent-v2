@@ -61,7 +61,7 @@ export interface HooksFileShape extends Partial<HooksConfig> {
   "session.idle"?: string[];
 }
 
-/** How to start a language server for one file type (`lsp_diagnostics`). */
+/** How to start a language server for one file type (`lsp`, `lsp_edit`). */
 export interface LspServerSpec {
   command: string;
   args?: string[];

@@ -103,7 +103,7 @@ claims something works without running it.
 | Sub-agents | isolated read-only exploration with a structured report |
 | Permissions | six modes from read-only to full auto, allow/deny lists, preset `permission:` blocks, diff preview |
 | Hooks | shell hooks around tool calls and sessions, plugin-style events and JSON rewrites |
-| Tools | 51 built-in plus MCP, every schema derived from zod |
+| Tools | 52 built-in plus MCP, every schema derived from zod |
 | MCP | stdio, SSE, Streamable HTTP, `/mcp` inspection |
 | Skills | reusable procedures in three layers, with a usage ledger |
 | TUI | fixed header, scrolling region, streaming markdown, real diffs, command palette, queue while busy |
@@ -180,6 +180,10 @@ node ./bin/carls.mjs --help
 
 `AGENTS.md` is the instruction file the agent reads on every turn — edit it to
 change how the agent works in your repository.
+
+Commits run `npm run typecheck && npm test` through husky (`.husky/pre-commit`),
+so a broken tree cannot be committed. Skip it with `git commit --no-verify` when
+you have a reason to.
 
 ## License
 

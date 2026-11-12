@@ -75,7 +75,7 @@ setup at all.
 | `hooks` | `{}` | shell commands around tool use and sessions, plugin-style; see [Hooks](#hooks) |
 | `permissions.toolAllow` / `toolDeny` | — | tool names (glob) allowed without asking / refused outright, usually filled by an agent preset |
 | `mcpServers` | `{}` | MCP servers, see below |
-| `lspServers` | — | language servers for `lsp_diagnostics`, keyed by extension or file name |
+| `lspServers` | — | language servers for `lsp` / `lsp_edit`, keyed by extension or file name |
 
 ## Hooks
 
@@ -193,7 +193,8 @@ stdout. `preToolUse` can block a call by exiting with code 2 or printing
 
 ## Language servers
 
-`lsp_diagnostics` runs the server you name here and opens the file in it. Nothing
+`lsp` runs the server you name here and opens the file in it; `lsp_edit` uses the
+same server to apply a rename or a quick fix. Nothing
 is installed or guessed — a coding agent spawning an unexpected binary is not a
 feature.
 

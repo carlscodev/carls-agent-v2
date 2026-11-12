@@ -27,7 +27,8 @@ and in order. `⇉` marks the parallel-safe ones in `/tools`.
 | --- | --- |
 | `glob_files` ⇉ | glob with `.gitignore` respected |
 | `grep_search` ⇉ | JS regex over file contents: `pattern`, `glob`, `max_results`, `context` (0-5 surrounding lines), `case_sensitive` |
-| `lsp` ⇉ | talks to the configured language server: `action: diagnostics` for errors, `hover` for the type/docs at a position, `definition` for where a symbol lives |
+| `lsp` ⇉ | talks to the configured language server: `action: diagnostics` for errors, `hover` for the type/docs at a position, `definition` for where a symbol lives, `codeActions` for the quick fixes offered there |
+| `lsp_edit` | applies a language-server edit: `action: rename` with `newName` renames the symbol across files, `action: codeAction` with the 1-based `index` applies one quick fix; `dryRun` reports the files instead of writing |
 
 ## Shell and system
 

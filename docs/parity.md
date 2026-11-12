@@ -27,7 +27,8 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 | Permissions | 6 modes, allow/deny lists, diff preview, `Shift+Tab` |
 | MCP | stdio, SSE and Streamable HTTP, remote auth, `/mcp` |
 | Skills | discovery from 3 layers, usage ledger, review queue, `save_skill` |
-| Tools | 51 built-in, plus MCP tools, all zod-schema'd |
+| Tools | 52 built-in, plus MCP tools, all zod-schema'd |
+| LSP | diagnostics, hover, definition, code actions, and `lsp_edit` applying renames and quick fixes across files |
 | Hooks | `preToolUse` / `postToolUse` / session events, plus the plugin API's `tool.execute.before` / `tool.execute.after` / `session.idle` with input rewrite and observation override |
 | Plan / todo | `todo_write`, `/todo` |
 | Terminal UI | fixed header, scrolling region, boxed panels, diffs, markdown stream, palette |
@@ -41,14 +42,12 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 
 ## Missing, in the order I would build it
 
-1. **Code actions from the LSP.** Diagnostics, hover and definition are wired;
-   quick fixes and rename are not.
-2. **Session tabs and a sidebar.** One session on screen at a time today.
-3. **Headless server + remote client.** The runtime is embeddable, but there is
+1. **Session tabs and a sidebar.** One session on screen at a time today.
+2. **Headless server + remote client.** The runtime is embeddable, but there is
    no HTTP/WS server mode.
-4. **Custom keybinds and per-project TUI config.**
-5. **Share links.** `/export` writes a local file; there is no hosted share URL.
-6. **In-process plugins.** The hooks are shell commands (the same events,
+3. **Custom keybinds and per-project TUI config.**
+4. **Share links.** `/export` writes a local file; there is no hosted share URL.
+5. **In-process plugins.** The hooks are shell commands (the same events,
    payloads and JSON contract) rather than JS modules loaded into the runtime.
 
 ## Ground rules for closing the list

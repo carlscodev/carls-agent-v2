@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import type { WorkspaceEdit } from "./Edits.js";
 
 /**
  * Minimal LSP client.
@@ -271,6 +272,64 @@ export class LspClient {
       });
     }
     return locations;
+  }
+
+  /** `textDocument/codeAction`, for the quick fixes at a position. */
+  async codeActions(
+    path: string,
+    line: number,
+    character: number,
+    diagnostics: LspDiagnostic[],
+    timeoutMs: number,
+  ): Promise<{ title: string; kind?: string; edit?: WorkspaceEdit }[]> {
+    const position = { line: Math.max(0, line - 1), character: Math.max(0, character - 1) };
+    const reply = await this.request(
+      {
+        method: "textDocument/codeAction",
+        params: {
+          textDocument: { uri: pathToFileURL(path).toString() },
+          range: { start: position, end: position },
+          context: { diagnostics },
+        },
+      },
+      timeoutMs,
+    );
+    const raw = reply.result;
+    const list = Array.isArray(raw) ? raw : raw === null || raw === undefined ? [] : [raw];
+    const actions: { title: string; kind?: string; edit?: WorkspaceEdit }[] = [];
+    for (const entry of list) {
+      const action = entry as { title?: unknown; kind?: unknown; edit?: WorkspaceEdit };
+      if (typeof action.title !== "string" || action.title.length === 0) continue;
+      actions.push({
+        title: action.title,
+        ...(typeof action.kind === "string" ? { kind: action.kind } : {}),
+        ...(action.edit !== undefined ? { edit: action.edit } : {}),
+      });
+    }
+    return actions;
+  }
+
+  /** `textDocument/rename`, returned as the edit to apply (never applied here). */
+  async rename(
+    path: string,
+    line: number,
+    character: number,
+    newName: string,
+    timeoutMs: number,
+  ): Promise<WorkspaceEdit | undefined> {
+    const reply = await this.request(
+      {
+        method: "textDocument/rename",
+        params: {
+          textDocument: { uri: pathToFileURL(path).toString() },
+          position: { line: Math.max(0, line - 1), character: Math.max(0, character - 1) },
+          newName,
+        },
+      },
+      timeoutMs,
+    );
+    const result = reply.result as WorkspaceEdit | null | undefined;
+    return result === null || result === undefined ? undefined : result;
   }
 
   private finishAll(): void {

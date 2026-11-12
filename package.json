@@ -4,15 +4,25 @@
   "description": "Autonomous AI coding agent CLI harness (Gather-Act-Verify, compaction, sub-agents, permission gate).",
   "type": "module",
   "license": "MIT",
-  "bin": { "carls": "./bin/carls.mjs" },
-  "engines": { "node": ">=20" },
-  "files": ["dist", "bin", "skills", "README.md"],
+  "bin": {
+    "carls": "./bin/carls.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "skills",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node ./bin/carls.mjs",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepare": "husky || true"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
@@ -22,6 +32,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.9.0",
+    "husky": "^9.1.7",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "vitest": "^2.1.5"

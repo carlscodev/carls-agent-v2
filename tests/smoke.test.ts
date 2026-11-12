@@ -2701,6 +2701,9 @@ describe("lsp diagnostics", () => {
         '    if (message.method === "initialize") send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { textDocumentSync: 1 } } });',
         '    if (message.method === "textDocument/hover") send({ jsonrpc: "2.0", id: message.id, result: { contents: { kind: "markdown", value: "**const a: number**" } } });',
         '    if (message.method === "textDocument/definition") send({ jsonrpc: "2.0", id: message.id, result: [{ uri: message.params.textDocument.uri, range: { start: { line: 4, character: 2 }, end: { line: 4, character: 8 } } }] });',
+        '    if (message.method === "textDocument/codeAction") send({ jsonrpc: "2.0", id: message.id, result: [{ title: "Use let", kind: "quickfix", edit: { changes: { [message.params.textDocument.uri]: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } }, newText: "let" }] } } }, { title: "Organize imports", kind: "source.organizeImports", command: { title: "organize", command: "fake.organize" } }] });',
+        '    if (message.method === "textDocument/rename") { const uri = message.params.textDocument.uri; const sibling = uri.replace(/rename\\.ts$/, "other.ts");',
+        '      send({ jsonrpc: "2.0", id: message.id, result: { changes: { [uri]: [{ range: { start: { line: 0, character: 6 }, end: { line: 0, character: 7 } }, newText: message.params.newName }, { range: { start: { line: 1, character: 10 }, end: { line: 1, character: 11 } }, newText: message.params.newName }], [sibling]: [{ range: { start: { line: 0, character: 9 }, end: { line: 0, character: 10 } }, newText: message.params.newName }] } } }); }',
         '    if (message.method === "textDocument/didOpen") {',
         '      send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri: message.params.textDocument.uri,',
         '        diagnostics: [{ range: { start: { line: 2, character: 4 }, end: { line: 2, character: 9 } }, severity: 1, source: "fake", code: 2322, message: "Type string is not assignable to number" }] } }); }',
@@ -2754,6 +2757,82 @@ describe("lsp diagnostics", () => {
     const noPosition = await new LspTool().run({ path: "file.ts", action: "hover" }, context);
     expect(noPosition.ok).toBe(false);
     expect(noPosition.error).toContain("needs a position");
+  }, 30000);
+
+  it("lists code actions and applies them and renames across files", async () => {
+    const { LspTool } = await import("../src/tools/Lsp.js");
+    const { LspEdit } = await import("../src/tools/LspEdit.js");
+    const { applyTextEdits } = await import("../src/lsp/Edits.js");
+
+    // Pure offset math first: edits must apply back to front to stay valid.
+    expect(
+      applyTextEdits("abc", [
+        { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, newText: "X" },
+        { range: { start: { line: 0, character: 2 }, end: { line: 0, character: 3 } }, newText: "Y" },
+      ]),
+    ).toBe("XbY");
+
+    const workspace = join(dir, "lsp-edit-workspace");
+    await mkdir(workspace, { recursive: true });
+    const script = await writeFakeServer("edit");
+    const target = join(workspace, "rename.ts");
+    const sibling = join(workspace, "other.ts");
+    await writeFile(target, "const a = 1;\nconst b = a;\n");
+    await writeFile(sibling, 'import { a } from "./rename";\n');
+
+    const context = { ...makeContext(), cwd: workspace } as ReturnType<typeof makeContext> & {
+      cwd: string;
+    };
+    context.config.cwd = workspace;
+    context.config.lspServers = { ".ts": { command: process.execPath, args: [script] } };
+
+    const listed = await new LspTool().run(
+      { path: "rename.ts", action: "codeActions", line: 1, character: 7 },
+      context,
+    );
+    expect(listed.ok).toBe(true);
+    expect(listed.output).toContain("2 code actions");
+    expect(listed.output).toContain("1. Use let [quickfix]");
+    expect(listed.output).toContain("command only");
+
+    // Rename first: its ranges are fixed to the original "const a = 1;" text.
+    const preview = await new LspEdit().run(
+      { path: "rename.ts", line: 1, character: 7, action: "rename", newName: "renamed", dryRun: true },
+      context,
+    );
+    expect(preview.ok).toBe(true);
+    expect(preview.output).toContain("would change 2 files");
+    expect(await readFile(sibling, "utf8")).toBe('import { a } from "./rename";\n');
+
+    const renamed = await new LspEdit().run(
+      { path: "rename.ts", line: 1, character: 7, action: "rename", newName: "renamed" },
+      context,
+    );
+    expect(renamed.ok).toBe(true);
+    expect(renamed.output).toContain("applied to 2 files");
+    expect(await readFile(target, "utf8")).toBe("const renamed = 1;\nconst b = renamed;\n");
+    expect(await readFile(sibling, "utf8")).toBe('import { renamed } from "./rename";\n');
+
+    const applied = await new LspEdit().run(
+      { path: "rename.ts", line: 1, character: 7, action: "codeAction", index: 1 },
+      context,
+    );
+    expect(applied.ok).toBe(true);
+    expect(await readFile(target, "utf8")).toBe("let renamed = 1;\nconst b = renamed;\n");
+
+    const commandOnly = await new LspEdit().run(
+      { path: "rename.ts", line: 1, character: 7, action: "codeAction", index: 2 },
+      context,
+    );
+    expect(commandOnly.ok).toBe(false);
+    expect(commandOnly.error).toContain("carries no edit");
+
+    const missingName = await new LspEdit().run(
+      { path: "rename.ts", line: 1, character: 7, action: "rename" },
+      context,
+    );
+    expect(missingName.ok).toBe(false);
+    expect(missingName.error).toContain("needs newName");
   }, 30000);
 
   it("explains how to configure a server when none is set", async () => {

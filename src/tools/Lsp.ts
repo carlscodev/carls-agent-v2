@@ -9,7 +9,7 @@ import { guardPath, toDisplayPath } from "../utils/paths.js";
 import { LspClient, severityLabel } from "../lsp/Client.js";
 
 /**
- * `lsp_diagnostics`.
+ * `lsp` — the read half of the language-server support.
  *
  * Runs the language server the project configured for an extension, opens the
  * file and reports the diagnostics it pushes back. No server is installed or
@@ -39,7 +39,7 @@ export function specForPath(
 
 interface LspInput {
   path: string;
-  action?: "diagnostics" | "hover" | "definition" | undefined;
+  action?: "diagnostics" | "hover" | "definition" | "codeActions" | undefined;
   line?: number | undefined;
   character?: number | undefined;
 }
@@ -47,17 +47,22 @@ interface LspInput {
 export class LspTool implements Tool<LspInput> {
   readonly name = "lsp";
   readonly description =
-    "Ask the project's language server about one file: errors and warnings (diagnostics), the type or docs at a position (hover), or where a symbol is defined (definition). Needs lspServers in the config, e.g. {\"lspServers\": {\".ts\": {\"command\": \"typescript-language-server\", \"args\": [\"--stdio\"]}}}.";
+    "Ask the project's language server about one file: errors and warnings (diagnostics), the type or docs at a position (hover), where a symbol is defined (definition), or the quick fixes offered at a position (codeActions). Apply one with lsp_edit. Needs lspServers in the config, e.g. {\"lspServers\": {\".ts\": {\"command\": \"typescript-language-server\", \"args\": [\"--stdio\"]}}}.";
   readonly readOnly = true;
   readonly category = "read" as const;
   private readonly schemaDef = z.object({
     path: z.string().describe("File to check, absolute or workspace-relative."),
     action: z
-      .enum(["diagnostics", "hover", "definition"])
+      .enum(["diagnostics", "hover", "definition", "codeActions"])
       .optional()
       .describe("What to ask for; defaults to diagnostics."),
-    line: z.number().int().positive().optional().describe("1-based line, for hover and definition."),
-    character: z.number().int().positive().optional().describe("1-based column, for hover and definition."),
+    line: z.number().int().positive().optional().describe("1-based line, for hover, definition and codeActions."),
+    character: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe("1-based column, for hover, definition and codeActions."),
   });
 
   schema(): ToolSchema {
@@ -125,6 +130,28 @@ export class LspTool implements Tool<LspInput> {
       }
 
       const diagnostics = await client.diagnosticsFor(target, text, languageId, DIAGNOSTICS_TIMEOUT_MS);
+
+      if (action === "codeActions") {
+        const line = input.line ?? 1;
+        const character = input.character ?? 1;
+        const actions = await client.codeActions(target, line, character, diagnostics, DIAGNOSTICS_TIMEOUT_MS);
+        if (actions.length === 0) {
+          return { ok: false, output: "", error: `the language server offers no code actions at ${display}:${line}:${character}` };
+        }
+        const rows = actions.map((entry, index) => {
+          const kind = entry.kind !== undefined ? ` [${entry.kind}]` : "";
+          // A command-only action cannot be applied by us, so say it up front.
+          const applicability = entry.edit === undefined ? " (no edit — command only)" : "";
+          return `${index + 1}. ${entry.title}${kind}${applicability}`;
+        });
+        return {
+          ok: true,
+          output:
+            `${actions.length} code action${actions.length === 1 ? "" : "s"} at ${display}:${line}:${character}\n` +
+            `${rows.join("\n")}\nApply one with lsp_edit(action: "codeAction", index: N).`,
+        };
+      }
+
       if (diagnostics.length === 0) return { ok: true, output: `${display}: no diagnostics.` };
 
       const lines = diagnostics.map((diagnostic) => {
