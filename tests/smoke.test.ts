@@ -2480,6 +2480,150 @@ describe("agent permission blocks", () => {
   });
 });
 
+describe("plugin hooks", () => {
+  const hookScript = [
+    'import { appendFileSync } from "node:fs";',
+    'let raw = "";',
+    'process.stdin.setEncoding("utf8");',
+    'process.stdin.on("data", (chunk) => (raw += chunk));',
+    'process.stdin.on("end", () => {',
+    '  const payload = JSON.parse(raw || "{}");',
+    '  appendFileSync(new URL("./hook-log.txt", import.meta.url), `${payload.event}|${payload.toolName ?? ""}|${payload.input?.command ?? ""}\\n`);',
+    '  if (payload.event === "tool.execute.before") {',
+    '    if (payload.input.command === "forbidden") { process.exitCode = 2; process.stdout.write("not allowed"); return; }',
+    '    process.stdout.write(JSON.stringify({ args: { command: `${payload.input.command} && echo rewritten` } }));',
+    '    return;',
+    "  }",
+    '  if (payload.event === "tool.execute.after") process.stdout.write(JSON.stringify({ output: "observation replaced" }));',
+    "});",
+  ].join("\n");
+
+  it("accepts the dotted plugin names in the config", async () => {
+    const cwd = join(dir, "hooks-config");
+    await mkdir(cwd, { recursive: true });
+    await writeFile(
+      join(cwd, ".carlsrc.json"),
+      JSON.stringify({
+        hooks: {
+          "tool.execute.before": ["echo before"],
+          "tool.execute.after": ["echo after"],
+          "session.idle": ["echo idle"],
+          preToolUse: ["echo pre"],
+        },
+      }),
+      "utf8",
+    );
+    const config = loadConfig({}, cwd);
+    expect(config.hooks.toolExecuteBefore).toEqual(["echo before"]);
+    expect(config.hooks.toolExecuteAfter).toEqual(["echo after"]);
+    expect(config.hooks.sessionIdle).toEqual(["echo idle"]);
+    expect(config.hooks.preToolUse).toEqual(["echo pre"]);
+  });
+
+  it("vetoes a call, rewrites its input and replaces the observation", async () => {
+    const { AgentLoop } = await import("../src/core/AgentLoop.js");
+    const { CostTracker } = await import("../src/core/CostTracker.js");
+    const { Hooks } = await import("../src/core/Hooks.js");
+    const { BashExecution } = await import("../src/tools/BashExecution.js");
+
+    const workspace = join(dir, "hooks-run");
+    await mkdir(workspace, { recursive: true });
+    const script = join(workspace, "hook.mjs");
+    await writeFile(script, hookScript, "utf8");
+
+    const registry = new ToolRegistry();
+    registry.register(new BashExecution());
+    const config = loadConfig({ yolo: true, maxSteps: 6 }, workspace);
+    config.hooks.toolExecuteBefore = [`node ${script}`];
+    config.hooks.toolExecuteAfter = [`node ${script}`];
+    const session = new SessionStore(workspace, config.model, undefined, join(workspace, "sessions"));
+
+    const scripted: import("../src/types/llm.js").LLMResponse[] = [
+      {
+        content: [{ type: "tool_use", id: "a", name: "bash", input: { command: "echo original" } }],
+        stopReason: "tool_use",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+      {
+        content: [{ type: "tool_use", id: "b", name: "bash", input: { command: "forbidden" } }],
+        stopReason: "tool_use",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+      { content: [{ type: "text", text: "done" }], stopReason: "end_turn", usage: { inputTokens: 10, outputTokens: 5 } },
+    ];
+    const requests: Message[][] = [];
+    const provider: import("../src/types/llm.js").Provider = {
+      name: "scripted",
+      async complete(args) {
+        requests.push(args.messages.map((m) => ({ role: m.role, content: [...m.content] })));
+        const next = scripted.shift();
+        if (next === undefined) throw new Error("scripted provider exhausted");
+        return next;
+      },
+    };
+
+    const loop = new AgentLoop({
+      provider,
+      registry,
+      gate: new PermissionGate(config, logger, async () => "y"),
+      contextManager: new ContextManager({ contextWindow: 200000, compactThreshold: 0.75, truncateLimit: 8000 }),
+      session,
+      costTracker: new CostTracker(config.model),
+      hooks: new Hooks(config.hooks, logger, workspace),
+      config,
+      logger,
+      systemPrompt: "test",
+      toolContext: { cwd: workspace, config, session, logger },
+    });
+
+    const history: Message[] = [{ role: "user", content: [{ type: "text", text: "run it" }] }];
+    const result = await loop.run(history, "run it", { silent: true });
+    expect(result.stoppedReason).toBe("completed");
+
+    const third = requests[2] ?? [];
+    const blocks = third.flatMap((message) => message.content);
+    const results = blocks.filter(
+      (block): block is Extract<Message["content"][number], { type: "tool_result" }> => block.type === "tool_result",
+    );
+    expect(results[0]?.content).toBe("observation replaced");
+    expect(results[1]?.content).toContain("Blocked by a before hook: not allowed");
+
+    // The rewrite reached bash, not just the hook.
+    const log = await readFile(join(workspace, "hook-log.txt"), "utf8");
+    expect(log).toContain("tool.execute.before|bash|echo original");
+    expect(log).toContain("tool.execute.after|bash|echo original && echo rewritten");
+  });
+
+  it("fires session.idle when a turn finishes", async () => {
+    const { Runtime } = await import("../src/core/Runtime.js");
+
+    const workspace = join(dir, "hooks-idle");
+    await mkdir(workspace, { recursive: true });
+    const script = join(workspace, "hook.mjs");
+    await writeFile(script, hookScript, "utf8");
+
+    const config = loadConfig({ yolo: true }, workspace);
+    config.apiKey = "test-key";
+    config.hooks.sessionIdle = [`node ${script}`];
+    const session = new SessionStore(workspace, config.model, undefined, join(workspace, "sessions"));
+    const runtime = new Runtime({ config, logger, session });
+    runtime.loop.setProvider({
+      name: "idle",
+      async complete() {
+        return {
+          content: [{ type: "text", text: "nothing to do" }],
+          stopReason: "end_turn",
+          usage: { inputTokens: 5, outputTokens: 2 },
+        };
+      },
+    });
+
+    await runtime.runTurn("say hi", { silent: true });
+    const log = await readFile(join(workspace, "hook-log.txt"), "utf8");
+    expect(log).toContain("session.idle|");
+  });
+});
+
 describe("external editor", () => {
   it("picks the editor in the order a terminal respects", async () => {
     const { editorSpec } = await import("../src/cli/Editor.js");

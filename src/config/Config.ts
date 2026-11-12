@@ -43,6 +43,22 @@ export interface HooksConfig {
   postToolUse: string[];
   sessionStart: string[];
   sessionEnd: string[];
+  /** Runs before every tool call; can veto it or rewrite its input. */
+  toolExecuteBefore: string[];
+  /** Runs after every tool call; can replace the observation the model sees. */
+  toolExecuteAfter: string[];
+  /** Runs when a turn ends and the agent goes back to waiting for input. */
+  sessionIdle: string[];
+}
+
+/**
+ * The config file also accepts the dotted names the plugin API uses, so a
+ * settings file written for it keeps working verbatim.
+ */
+export interface HooksFileShape extends Partial<HooksConfig> {
+  "tool.execute.before"?: string[];
+  "tool.execute.after"?: string[];
+  "session.idle"?: string[];
 }
 
 /** How to start a language server for one file type (`lsp_diagnostics`). */
@@ -83,7 +99,7 @@ export interface ConfigFileShape {
   truncateLimit?: number;
   compactThreshold?: number;
   permissions?: { allow?: string[]; deny?: string[]; toolAllow?: string[]; toolDeny?: string[] };
-  hooks?: Partial<HooksConfig>;
+  hooks?: HooksFileShape;
   mcpServers?: Record<string, McpServerConfig>;
   /** Keyed by extension (".ts") or file name, e.g. "Makefile". */
   lspServers?: Record<string, LspServerSpec>;
@@ -164,6 +180,9 @@ const DEFAULT_HOOKS: HooksConfig = {
   postToolUse: [],
   sessionStart: [],
   sessionEnd: [],
+  toolExecuteBefore: [],
+  toolExecuteAfter: [],
+  sessionIdle: [],
 };
 
 /** Credential variable for a provider id, falling back to a generic name. */
@@ -233,7 +252,13 @@ export function loadConfig(overrides: ConfigOverrides = {}, cwd = process.cwd())
       ...(file.permissions?.toolAllow !== undefined ? { toolAllow: file.permissions.toolAllow } : {}),
       ...(file.permissions?.toolDeny !== undefined ? { toolDeny: file.permissions.toolDeny } : {}),
     },
-    hooks: { ...DEFAULT_HOOKS, ...file.hooks },
+    hooks: {
+      ...DEFAULT_HOOKS,
+      ...file.hooks,
+      toolExecuteBefore: file.hooks?.toolExecuteBefore ?? file.hooks?.["tool.execute.before"] ?? [],
+      toolExecuteAfter: file.hooks?.toolExecuteAfter ?? file.hooks?.["tool.execute.after"] ?? [],
+      sessionIdle: file.hooks?.sessionIdle ?? file.hooks?.["session.idle"] ?? [],
+    },
     mcpServers: file.mcpServers ?? {},
     ...(file.lspServers !== undefined ? { lspServers: file.lspServers } : {}),
     allowOutsideWorkspace: file.allowOutsideWorkspace ?? process.env.CARLS_ALLOW_OUTSIDE === "1",

@@ -275,9 +275,19 @@ export class AgentLoop {
       return { ok: false, output: "", error: `Invalid input for ${name}: ${(error as Error).message}` };
     }
 
-    const hookDecision = await this.deps.hooks.preToolUse({ toolName: name, input: parsed });
+    // Before hooks can veto the call or hand back different arguments. A
+    // rewrite goes through `parse` again, so a hook cannot smuggle in input the
+    // schema would have rejected.
+    const hookDecision = await this.deps.hooks.toolBefore({ toolName: name, input: parsed });
     if (hookDecision.block) {
-      return { ok: false, output: "", error: `Blocked by preToolUse hook: ${hookDecision.reason ?? ""}` };
+      return { ok: false, output: "", error: `Blocked by a before hook: ${hookDecision.reason ?? ""}` };
+    }
+    if (hookDecision.input !== undefined) {
+      try {
+        parsed = tool.parse(hookDecision.input);
+      } catch (error) {
+        return { ok: false, output: "", error: `A before hook rewrote ${name} input into something invalid: ${(error as Error).message}` };
+      }
     }
 
     // A preview may reject the path (outside the workspace) or fail outright.
@@ -303,11 +313,12 @@ export class AgentLoop {
       result = { ok: false, output: "", error: `Tool ${name} threw: ${(error as Error).message}` };
     }
 
-    await this.deps.hooks.postToolUse({
+    const after = await this.deps.hooks.toolAfter({
       toolName: name,
       input: parsed,
       result: { ok: result.ok, output: result.output.slice(0, 2000) },
     });
+    if (after.output !== undefined) result = { ...result, output: after.output };
 
     return result;
   }

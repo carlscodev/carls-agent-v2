@@ -37,7 +37,10 @@ setup at all.
     "preToolUse": ["node scripts/guard.mjs"],
     "postToolUse": [],
     "sessionStart": [],
-    "sessionEnd": []
+    "sessionEnd": [],
+    "tool.execute.before": ["node scripts/rewrite.mjs"],
+    "tool.execute.after": [],
+    "session.idle": ["node scripts/notify.mjs"]
   },
   "mcpServers": {
     "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] },
@@ -69,9 +72,54 @@ setup at all.
 | `tools` | all | tools advertised to the model. Everything stays callable; this only narrows the prompt |
 | `permissions.allow` | — | commands that run without prompting |
 | `permissions.deny` | — | commands refused even in `auto` mode (`yolo` ignores the list) |
-| `hooks` | `{}` | shell commands around tool use and sessions |
+| `hooks` | `{}` | shell commands around tool use and sessions, plugin-style; see [Hooks](#hooks) |
+| `permissions.toolAllow` / `toolDeny` | — | tool names (glob) allowed without asking / refused outright, usually filled by an agent preset |
 | `mcpServers` | `{}` | MCP servers, see below |
 | `lspServers` | — | language servers for `lsp_diagnostics`, keyed by extension or file name |
+
+## Hooks
+
+Hooks are shell commands run around the agent's work. Each one receives a JSON
+payload on stdin under `CARLS_HOOK=1`, and may answer with JSON on stdout or an
+exit code; 30s timeout, output is never printed to the model unless it is the
+result of a rewrite below.
+
+| Event | When | Can change behaviour |
+| --- | --- | --- |
+| `preToolUse` | before a tool call | exit 2 / `{"block": true, "reason"}` vetoes it |
+| `tool.execute.before` | right after `preToolUse` | same veto, plus `{"args": {...}}` replaces the tool input |
+| `postToolUse` | after a tool call | observation only |
+| `tool.execute.after` | right after `postToolUse` | `{"output": "..."}` replaces the observation the model reads |
+| `sessionStart` / `sessionEnd` | session boundaries | — |
+| `session.idle` | a turn finished, the agent is waiting for input | — |
+
+The dotted names are the plugin API's, and both spellings work (`toolExecuteBefore`
+is the same key). `tool.execute.before` hooks run in order and each sees the
+input the previous one produced; a rewritten input is validated against the
+tool's schema again, so a hook cannot smuggle in something the model could not
+have asked for.
+
+```json
+{
+  "hooks": {
+    "tool.execute.before": ["node scripts/rewrite.mjs"],
+    "tool.execute.after": ["node scripts/quiet.mjs"],
+    "session.idle": ["node scripts/notify.mjs"]
+  }
+}
+```
+
+```js
+// rewrite.mjs — pin every file read to the docs directory
+let raw = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => (raw += chunk));
+process.stdin.on("end", () => {
+  const { toolName, input } = JSON.parse(raw);
+  if (toolName !== "read_file") return;
+  process.stdout.write(JSON.stringify({ args: { ...input, path: `docs/${input.path}` } }));
+});
+```
 
 ## Permission modes
 

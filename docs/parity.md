@@ -28,7 +28,7 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 | MCP | stdio, SSE and Streamable HTTP, remote auth, `/mcp` |
 | Skills | discovery from 3 layers, usage ledger, review queue, `save_skill` |
 | Tools | 51 built-in, plus MCP tools, all zod-schema'd |
-| Hooks | `preToolUse` / `postToolUse` / session events |
+| Hooks | `preToolUse` / `postToolUse` / session events, plus the plugin API's `tool.execute.before` / `tool.execute.after` / `session.idle` with input rewrite and observation override |
 | Plan / todo | `todo_write`, `/todo` |
 | Terminal UI | fixed header, scrolling region, boxed panels, diffs, markdown stream, palette |
 | Themes | dark/light, 256-colour and no-colour degradation |
@@ -48,8 +48,8 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
    no HTTP/WS server mode.
 4. **Custom keybinds and per-project TUI config.**
 5. **Share links.** `/export` writes a local file; there is no hosted share URL.
-6. **Plugins.** No plugin API; MCP tools, skills and hooks are the extension
-    points.
+6. **In-process plugins.** The hooks are shell commands (the same events,
+   payloads and JSON contract) rather than JS modules loaded into the runtime.
 
 ## Ground rules for closing the list
 

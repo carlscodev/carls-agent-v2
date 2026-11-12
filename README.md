@@ -22,8 +22,17 @@ and the provider SDKs.
   read-only loop and returns a conclusion, not a transcript.
 - **Every provider, one config.** 33 bundled ids plus any OpenAI-compatible
   gateway, and keyless local backends (Ollama, LM Studio, vLLM, llama.cpp).
+- **Steer without stopping.** Press Enter while the agent works and the message
+  joins the running turn at the next step boundary, with every observation it
+  has gathered so far; if it arrives too late it is queued instead of lost.
+- **Permissions a preset can narrow.** An agent's `permission:` block (`edit`,
+  `webfetch`, bash patterns) folds into the same gate as your config, and a deny
+  always beats an allow.
 - **MCP over three transports.** stdio, SSE and Streamable HTTP, including
   remote servers with a bearer token.
+- **Hooks with the plugin API's events.** `tool.execute.before` can veto a call
+  or rewrite its arguments, `tool.execute.after` can replace the observation,
+  and `session.idle` fires when a turn ends.
 - **Updates pinned to a tag.** `carls update` installs exactly the release it
   reported.
 
@@ -92,17 +101,20 @@ claims something works without running it.
 | Agent loop | gather-act-verify, parallel read-only batches, abort mid-turn |
 | Context | token budget, 75% compaction, checkpoint summaries, bounded observations |
 | Sub-agents | isolated read-only exploration with a structured report |
-| Permissions | six modes from read-only to full auto, allow/deny lists, diff preview |
+| Permissions | six modes from read-only to full auto, allow/deny lists, preset `permission:` blocks, diff preview |
+| Hooks | shell hooks around tool calls and sessions, plugin-style events and JSON rewrites |
 | Tools | 51 built-in plus MCP, every schema derived from zod |
 | MCP | stdio, SSE, Streamable HTTP, `/mcp` inspection |
 | Skills | reusable procedures in three layers, with a usage ledger |
-| TUI | fixed header, scrolling region, streaming markdown, real diffs, command palette |
+| TUI | fixed header, scrolling region, streaming markdown, real diffs, command palette, queue while busy |
 
 ## Commands
 
 Inside the session: `/` or `Ctrl+P` opens the palette, `Shift+Tab` cycles the
 permission mode, `@` picks a file and attaches its contents to the message, `!`
-runs a shell command, `#` adds a note without calling the model.
+runs a shell command, `#` adds a note without calling the model. Typing while a
+turn runs steers it: Enter applies the message to the running turn, Escape
+discards it.
 
 | Command | Purpose |
 | --- | --- |
@@ -131,7 +143,12 @@ One JSON file, layered `./.carlsrc.json` → `~/.carlsrc.json` →
   "provider": "anthropic",
   "model": "claude-sonnet-4-20250514",
   "mode": "ask",
-  "permissions": { "allow": ["npm test", "git status"], "deny": ["git push *"] },
+  "permissions": {
+    "allow": ["npm test", "git status"],
+    "deny": ["git push *"],
+    "toolDeny": ["web_fetch"]
+  },
+  "hooks": { "tool.execute.before": ["node scripts/guard.mjs"] },
   "mcpServers": {
     "docs": { "url": "https://example.com/mcp" }
   }

@@ -380,7 +380,16 @@ export class Runtime {
     const userMessage: Message = { role: "user", content: [{ type: "text", text: goal }] };
     this.history.push(userMessage);
     this.session.recordMessage(userMessage);
-    return this.loop.run(this.history, goal, options);
+    const result = await this.loop.run(this.history, goal, options);
+    // The turn is over and the agent is waiting for input again, which is the
+    // plugin API's `session.idle`.
+    await this.hooks.sessionIdle({
+      sessionId: this.session.id,
+      goal,
+      steps: result.steps,
+      stoppedReason: result.stoppedReason,
+    });
+    return result;
   }
 
   contextReport(): string {
