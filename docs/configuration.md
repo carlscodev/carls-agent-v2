@@ -71,6 +71,7 @@ setup at all.
 | `permissions.deny` | — | commands refused even in `auto` mode (`yolo` ignores the list) |
 | `hooks` | `{}` | shell commands around tool use and sessions |
 | `mcpServers` | `{}` | MCP servers, see below |
+| `lspServers` | — | language servers for `lsp_diagnostics`, keyed by extension or file name |
 
 ## Permission modes
 
@@ -141,6 +142,27 @@ stdout. `preToolUse` can block a call by exiting with code 2 or printing
 | `~/.carls/update-check.json` | cached release check (24h), plus which version was auto-installed or failed |
 | `.carls/skill-usage.json` | skill usage ledger (`/skills review`) |
 | `.carls/backups/` | file snapshots behind `/undo` and `/redo` |
+
+## Language servers
+
+`lsp_diagnostics` runs the server you name here and opens the file in it. Nothing
+is installed or guessed — a coding agent spawning an unexpected binary is not a
+feature.
+
+```json
+{
+  "lspServers": {
+    ".ts": { "command": "typescript-language-server", "args": ["--stdio"] },
+    ".py": { "command": "pylsp", "args": [] },
+    "go":  { "command": "gopls", "args": [] }
+  }
+}
+```
+
+The key is an extension (`.ts`) or a file name (`Makefile`). `languageId`
+overrides the id sent to the server (default: the extension without the dot) and
+`initOptions` is passed as `initializationOptions`. A missing server for a file is
+reported as a tool error with this example, not as a crash.
 
 ## Agent presets
 

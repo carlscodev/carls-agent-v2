@@ -145,6 +145,8 @@ function titleFor(name: string, input: unknown): string {
       return `Fetch ${truncate(str("url"), 70)}`;
     case "web_search":
       return `Search ${truncate(str("query"), 60)}`;
+    case "lsp_diagnostics":
+      return `LSP ${short(str("path"))}`;
     case "env_get":
       return `Env ${str("name") || str("prefix")}`;
     case "sleep_wait":

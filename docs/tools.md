@@ -27,6 +27,7 @@ and in order. `⇉` marks the parallel-safe ones in `/tools`.
 | --- | --- |
 | `glob_files` ⇉ | glob with `.gitignore` respected |
 | `grep_search` ⇉ | JS regex over file contents: `pattern`, `glob`, `max_results`, `context` (0-5 surrounding lines), `case_sensitive` |
+| `lsp_diagnostics` ⇉ | opens a file in the configured language server and returns its diagnostics, without running a build |
 
 ## Shell and system
 

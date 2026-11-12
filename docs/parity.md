@@ -19,12 +19,13 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 | Agent presets | `.agents/agents/<name>.md` with mode/tools/model/effort frontmatter; `--agent <name>` and `/agents` |
 | Web reading | `web_fetch` (HTML reduced to text, title included) and `web_search` over DuckDuckGo's keyless HTML endpoint |
 | Export | `/export [path]` writes the transcript as markdown, tool calls and results included |
+| LSP diagnostics | `lsp_diagnostics` speaks JSON-RPC to the configured server and reports its diagnostics without a build |
 | Providers | 33 bundled ids, custom gateway via `baseUrl`, Ollama/LM Studio/vLLM/llama.cpp |
 | Models | `/models` against the live endpoint, effort plumbing |
 | Permissions | 6 modes, allow/deny lists, diff preview, `Shift+Tab` |
 | MCP | stdio, SSE and Streamable HTTP, remote auth, `/mcp` |
 | Skills | discovery from 3 layers, usage ledger, review queue, `save_skill` |
-| Tools | 50 built-in, plus MCP tools, all zod-schema'd |
+| Tools | 51 built-in, plus MCP tools, all zod-schema'd |
 | Hooks | `preToolUse` / `postToolUse` / session events |
 | Plan / todo | `todo_write`, `/todo` |
 | Terminal UI | fixed header, scrolling region, boxed panels, diffs, markdown stream, palette |
@@ -38,8 +39,8 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 
 ## Missing, in the order I would build it
 
-1. **LSP diagnostics.** An `lsp` tool that reports errors and hover info after an
-   edit would catch whole classes of mistakes without running a build.
+1. **Hover and code actions from the LSP.** Diagnostics are wired; hover, definition
+   and quick fixes are not.
 2. **Session tabs and a sidebar.** One session on screen at a time today.
 3. **External editor handoff** (`/editor`, `$EDITOR`) for long prompts.
 4. **Queue and steer.** Submitting while a turn runs queues nothing yet.

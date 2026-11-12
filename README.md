@@ -93,7 +93,7 @@ claims something works without running it.
 | Context | token budget, 75% compaction, checkpoint summaries, bounded observations |
 | Sub-agents | isolated read-only exploration with a structured report |
 | Permissions | six modes from read-only to full auto, allow/deny lists, diff preview |
-| Tools | 50 built-in plus MCP, every schema derived from zod |
+| Tools | 51 built-in plus MCP, every schema derived from zod |
 | MCP | stdio, SSE, Streamable HTTP, `/mcp` inspection |
 | Skills | reusable procedures in three layers, with a usage ledger |
 | TUI | fixed header, scrolling region, streaming markdown, real diffs, command palette |

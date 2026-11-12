@@ -45,6 +45,15 @@ export interface HooksConfig {
   sessionEnd: string[];
 }
 
+/** How to start a language server for one file type (`lsp_diagnostics`). */
+export interface LspServerSpec {
+  command: string;
+  args?: string[];
+  /** LSP languageId; defaults to the extension without the dot. */
+  languageId?: string;
+  initOptions?: unknown;
+}
+
 export interface McpServerConfig {
   /** Local server executable (stdio transport). */
   command?: string;
@@ -76,6 +85,8 @@ export interface ConfigFileShape {
   permissions?: { allow?: string[]; deny?: string[] };
   hooks?: Partial<HooksConfig>;
   mcpServers?: Record<string, McpServerConfig>;
+  /** Keyed by extension (".ts") or file name, e.g. "Makefile". */
+  lspServers?: Record<string, LspServerSpec>;
   /** Allow tools to touch paths outside the workspace root. */
   allowOutsideWorkspace?: boolean;
   /** What to do when a newer release exists. Defaults to "auto". */
@@ -122,6 +133,7 @@ export interface ResolvedConfig {
   permissions: { allow: string[]; deny: string[] };
   hooks: HooksConfig;
   mcpServers: Record<string, McpServerConfig>;
+  lspServers?: Record<string, LspServerSpec>;
   /** Off by default: a prompt-injected call cannot reach ~/.ssh or C:\Windows. */
   allowOutsideWorkspace: boolean;
   /** Startup release handling; see `AutoUpdateMode`. */
@@ -214,6 +226,7 @@ export function loadConfig(overrides: ConfigOverrides = {}, cwd = process.cwd())
     },
     hooks: { ...DEFAULT_HOOKS, ...file.hooks },
     mcpServers: file.mcpServers ?? {},
+    ...(file.lspServers !== undefined ? { lspServers: file.lspServers } : {}),
     allowOutsideWorkspace: file.allowOutsideWorkspace ?? process.env.CARLS_ALLOW_OUTSIDE === "1",
     // Anything that is not one of the two conservative modes keeps the default:
     // a typo must not silently disable updates, nor make them more aggressive.

@@ -18,11 +18,91 @@ import { zodToJsonSchema } from "../utils/schema.js";
  */
 
 const DEFAULT_SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/";
+/** Tried when the primary endpoint answers 429, 5xx or a challenge page. */
+const FALLBACK_SEARCH_ENDPOINT = "https://lite.duckduckgo.com/lite/";
 const FETCH_TIMEOUT_MS = 20_000;
 const SEARCH_TIMEOUT_MS = 15_000;
 const DEFAULT_FETCH_CHARS = 20_000;
 const MAX_FETCH_CHARS = 200_000;
+/** Nothing a page needs to say is bigger than this; reading more is a memory bug. */
+const MAX_BODY_BYTES = 4 * 1024 * 1024;
+const SEARCH_ATTEMPTS = 2;
+const SEARCH_RETRY_DELAY_MS = 500;
 const USER_AGENT = "carls-code/1.0 (+terminal coding agent)";
+/** Tracking parameters that make the same result look like two results. */
+const TRACKING_PARAMS = /^(utm_[a-z]+|gclid|fbclid|mc_cid|mc_eid|rut|ref_src|ref_url)$/i;
+
+/**
+ * Hosts a tool must not reach on its own initiative.
+ *
+ * A model reading a web page is exactly the situation where a prompt injection
+ * asks for `http://169.254.169.254/latest/meta-data/` or the admin panel on
+ * localhost. `CARLS_ALLOW_LOCAL_FETCH=1` is the escape hatch for development
+ * against a local server.
+ */
+export function localHostReason(hostname: string): string | undefined {
+  if (process.env.CARLS_ALLOW_LOCAL_FETCH === "1") return undefined;
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (host.length === 0) return "empty host";
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".internal") || host.endsWith(".local")) {
+    return "loopback or private host";
+  }
+  if (host === "::1" || host === "::" || /^(fc|fd|fe80)[0-9a-f:]*$/.test(host)) {
+    return "private IPv6 address";
+  }
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (v4 !== null) {
+    const first = Number(v4[1]);
+    const second = Number(v4[2]);
+    if (first === 0 || first === 10 || first === 127) return "loopback or private address";
+    // Link-local, which is where cloud metadata lives.
+    if (first === 169 && second === 254) return "link-local address (cloud metadata)";
+    if (first === 172 && second >= 16 && second <= 31) return "private address";
+    if (first === 192 && second === 168) return "private address";
+    if (first === 100 && second >= 64 && second <= 127) return "carrier-grade NAT address";
+  }
+  return undefined;
+}
+
+/** Rejects a URL the tools refuse to fetch, with the reason. */
+export function urlProblem(raw: string): string | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return "not an absolute URL";
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return `protocol ${parsed.protocol} is not allowed (http and https only)`;
+  }
+  const local = localHostReason(parsed.hostname);
+  if (local !== undefined) {
+    return `${local}; set CARLS_ALLOW_LOCAL_FETCH=1 to allow it deliberately`;
+  }
+  return undefined;
+}
+
+/** Reads at most `MAX_BODY_BYTES`, so a hostile page cannot exhaust memory. */
+async function readBounded(response: Response): Promise<string> {
+  const body = response.body;
+  if (body === null) return "";
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value === undefined) continue;
+    total += value.byteLength;
+    if (total > MAX_BODY_BYTES) {
+      chunks.push(value.slice(0, Math.max(0, value.byteLength - (total - MAX_BODY_BYTES))));
+      await reader.cancel().catch(() => undefined);
+      break;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8");
+}
 
 const NAMED_ENTITIES: Record<string, string> = {
   amp: "&",
@@ -119,9 +199,10 @@ export class WebFetch implements Tool<{ url: string; max_chars?: number | undefi
     input: { url: string; max_chars?: number; raw?: boolean },
     _ctx: ToolContext,
   ): Promise<ToolResult> {
-    if (!/^https?:\/\//i.test(input.url)) {
-      return { ok: false, output: "", error: "url must start with http:// or https://" };
-    }
+    // Checked before the request: scheme, and a host the agent has no business
+    // reaching on its own (loopback, private ranges, cloud metadata).
+    const problem = urlProblem(input.url);
+    if (problem !== undefined) return { ok: false, output: "", error: problem };
     const limit = input.max_chars ?? DEFAULT_FETCH_CHARS;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -132,7 +213,12 @@ export class WebFetch implements Tool<{ url: string; max_chars?: number | undefi
         signal: controller.signal,
       });
       const contentType = response.headers.get("content-type") ?? "";
-      const body = await response.text();
+      // A redirect can land somewhere the first check could not see.
+      const landed = urlProblem(response.url || input.url);
+      if (landed !== undefined) {
+        return { ok: false, output: "", error: `redirected to a refused host: ${landed}` };
+      }
+      const body = await readBounded(response);
       if (!response.ok) {
         return {
           ok: false,
@@ -181,6 +267,28 @@ function unwrapResultUrl(href: string): string {
  * Parses the HTML results page. Two passes rather than a DOM: the anchor classes
  * are stable, and a real parser would be a dependency for one screen of markup.
  */
+/** Drops tracking parameters and the fragment: the page is the same without them. */
+export function cleanUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    for (const key of [...url.searchParams.keys()]) {
+      if (TRACKING_PARAMS.test(key)) url.searchParams.delete(key);
+    }
+    url.hash = "";
+    const text = url.toString();
+    return url.search.length === 0 && text.endsWith("/") ? text.slice(0, -1) : text;
+  } catch {
+    return raw;
+  }
+}
+
+/** DuckDuckGo answers a suspicious burst with a page that is not results. */
+export function looksLikeChallenge(html: string): boolean {
+  const text = htmlToText(html).slice(0, 4000).toLowerCase();
+  if (text.includes("anomaly") || text.includes("unusual traffic") || text.includes("captcha")) return true;
+  return /class="[^"]*(challenge|anomaly)/i.test(html);
+}
+
 export function parseSearchResults(html: string, limit: number): SearchHit[] {
   const hits: SearchHit[] = [];
   const links = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
@@ -189,14 +297,25 @@ export function parseSearchResults(html: string, limit: number): SearchHit[] {
   for (const match of html.matchAll(snippets)) {
     snippetList.push(htmlToText(match[1] ?? "").replace(/\s+/g, " ").trim());
   }
+  const seen = new Set<string>();
+  const candidates: SearchHit[] = [];
   for (const match of html.matchAll(links)) {
-    if (hits.length >= limit) break;
-    const url = unwrapResultUrl(match[1] ?? "");
+    const rawUrl = unwrapResultUrl(match[1] ?? "");
     const title = htmlToText(match[2] ?? "").replace(/\s+/g, " ").trim();
-    if (!/^https?:\/\//i.test(url)) continue;
-    hits.push({ title: title.length > 0 ? title : url, url, snippet: snippetList[hits.length] ?? "" });
+    if (!/^https?:\/\//i.test(rawUrl)) continue;
+    // Sponsored placements route through /y.js and are not answers.
+    if (/\/y\.js\?|duckduckgo\.com\/y\.js|ad_provider=/i.test(rawUrl)) continue;
+    const url = cleanUrl(rawUrl);
+    if (seen.has(url)) continue;
+    // A result pointing at a private host is an injection, not a source.
+    if (urlProblem(url) !== undefined) continue;
+    seen.add(url);
+    candidates.push({ title: title.length > 0 ? title : url, url, snippet: "" });
   }
-  return hits;
+  return candidates.slice(0, limit).map((hit, index) => ({
+    ...hit,
+    snippet: (snippetList[index] ?? "").slice(0, 300),
+  }));
 }
 
 function searchEndpoint(): string {
@@ -224,43 +343,80 @@ export class WebSearch implements Tool<{ query: string; max_results?: number | u
 
   async run(input: { query: string; max_results?: number }, _ctx: ToolContext): Promise<ToolResult> {
     const limit = input.max_results ?? 6;
-    const endpoint = searchEndpoint();
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
-    try {
-      const response = await fetch(`${endpoint}${endpoint.includes("?") ? "&" : "?"}q=${encodeURIComponent(input.query)}`, {
-        headers: {
-          "user-agent": USER_AGENT,
-          accept: "text/html",
-          "accept-language": "en;q=0.9",
-        },
-        redirect: "follow",
-        signal: controller.signal,
-      });
-      const html = await response.text();
-      if (!response.ok) {
-        return {
-          ok: false,
-          output: "",
-          error: `search endpoint answered HTTP ${response.status}. Try web_fetch on a known URL instead.`,
-        };
+    const primary = searchEndpoint();
+    const endpoints = primary === FALLBACK_SEARCH_ENDPOINT ? [primary] : [primary, FALLBACK_SEARCH_ENDPOINT];
+    const problems: string[] = [];
+    let lastBody = "";
+
+    for (const endpoint of endpoints) {
+      for (let attempt = 1; attempt <= SEARCH_ATTEMPTS; attempt++) {
+        const result = await requestSearch(endpoint, input.query);
+        if (result.error !== undefined) {
+          problems.push(`${endpoint}: ${result.error}`);
+          await delay(SEARCH_RETRY_DELAY_MS * attempt);
+          continue;
+        }
+        lastBody = result.body;
+        // 429 and 5xx are worth one more try; a challenge is not, it needs a
+        // different endpoint, and a 4xx is our bug.
+        if (result.status === 429 || result.status >= 500) {
+          problems.push(`${endpoint}: HTTP ${result.status}`);
+          await delay(SEARCH_RETRY_DELAY_MS * attempt);
+          continue;
+        }
+        if (result.status !== 200) {
+          problems.push(`${endpoint}: HTTP ${result.status}`);
+          break;
+        }
+        if (looksLikeChallenge(result.body)) {
+          problems.push(`${endpoint}: challenge page (rate limited)`);
+          break;
+        }
+        const hits = parseSearchResults(result.body, limit);
+        if (hits.length === 0) {
+          problems.push(`${endpoint}: no results parsed`);
+          break;
+        }
+        const output = hits
+          .map((hit, index) => `${index + 1}. ${hit.title}\n   ${hit.url}${hit.snippet.length > 0 ? `\n   ${hit.snippet}` : ""}`)
+          .join("\n");
+        return { ok: true, output: `${hits.length} results for "${input.query}"\n\n${output}` };
       }
-      const hits = parseSearchResults(html, limit);
-      if (hits.length === 0) {
-        return {
-          ok: false,
-          output: htmlToText(html).slice(0, 400),
-          error: "no results were parsed; the endpoint may have returned a challenge page instead of results",
-        };
-      }
-      const output = hits
-        .map((hit, index) => `${index + 1}. ${hit.title}\n   ${hit.url}${hit.snippet.length > 0 ? `\n   ${hit.snippet}` : ""}`)
-        .join("\n");
-      return { ok: true, output: `${hits.length} results for "${input.query}"\n\n${output}` };
-    } catch (error) {
-      return { ok: false, output: "", error: `search failed: ${(error as Error).message}` };
-    } finally {
-      clearTimeout(timer);
     }
+
+    return {
+      ok: false,
+      output: htmlToText(lastBody).slice(0, 400),
+      error: `search failed (${problems.join("; ")}). Try a different query, or web_fetch a URL you already know.`,
+    };
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** One search request, bounded in time and size. Errors come back as data. */
+async function requestSearch(
+  endpoint: string,
+  query: string,
+): Promise<{ status: number; body: string; error?: undefined } | { error: string; status?: undefined; body?: undefined }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${endpoint}${endpoint.includes("?") ? "&" : "?"}q=${encodeURIComponent(query)}`, {
+      headers: {
+        "user-agent": USER_AGENT,
+        accept: "text/html",
+        "accept-language": "en;q=0.9",
+      },
+      redirect: "follow",
+      signal: controller.signal,
+    });
+    return { status: response.status, body: await readBounded(response) };
+  } catch (error) {
+    return { error: (error as Error).message };
+  } finally {
+    clearTimeout(timer);
   }
 }

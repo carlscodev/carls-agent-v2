@@ -2182,6 +2182,78 @@ describe("workspace path guard", () => {
   });
 });
 
+describe("lsp diagnostics", () => {
+  /** A language server that answers initialize and pushes one diagnostic. */
+  async function writeFakeServer(name: string): Promise<string> {
+    const path = join(dir, `fake-${name}-lsp.mjs`);
+    await writeFile(
+      path,
+      [
+        'const send = (message) => { const body = Buffer.from(JSON.stringify(message));',
+        '  process.stdout.write(Buffer.concat([Buffer.from(`Content-Length: ${body.length}\\r\\n\\r\\n`), body])); };',
+        'let buffer = Buffer.alloc(0);',
+        'process.stdin.on("data", (chunk) => { buffer = Buffer.concat([buffer, chunk]);',
+        '  for (;;) { const end = buffer.indexOf("\\r\\n\\r\\n"); if (end === -1) break;',
+        '    const length = Number(/content-length:\\s*(\\d+)/i.exec(buffer.subarray(0, end).toString())[1]);',
+        '    const start = end + 4; if (buffer.length < start + length) break;',
+        '    const message = JSON.parse(buffer.subarray(start, start + length).toString());',
+        '    buffer = buffer.subarray(start + length);',
+        '    if (message.method === "initialize") send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { textDocumentSync: 1 } } });',
+        '    if (message.method === "textDocument/didOpen") {',
+        '      send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri: message.params.textDocument.uri,',
+        '        diagnostics: [{ range: { start: { line: 2, character: 4 }, end: { line: 2, character: 9 } }, severity: 1, source: "fake", code: 2322, message: "Type string is not assignable to number" }] } }); }',
+        '    if (message.id !== undefined && message.method === "shutdown") send({ jsonrpc: "2.0", id: message.id, result: null });',
+        '  } });',
+      ].join("\n"),
+    );
+    return path;
+  }
+
+  it("frames and unframes JSON-RPC messages", async () => {
+    const { frameMessage, unframe } = await import("../src/lsp/Client.js");
+    const framed = frameMessage({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+    expect(framed.toString("utf8")).toMatch(/^Content-Length: \d+\r\n\r\n/);
+    const split = unframe(Buffer.concat([framed, framed.subarray(0, 10)]));
+    expect(split.messages).toHaveLength(1);
+    expect(split.rest.length).toBe(10);
+    expect(split.messages[0]?.method).toBe("initialize");
+  });
+
+  it("reports what the language server pushes for the file", async () => {
+    const { LspDiagnostics } = await import("../src/tools/Lsp.js");
+    const workspace = join(dir, "lsp-workspace");
+    await mkdir(workspace, { recursive: true });
+    const script = await writeFakeServer("ok");
+    await writeFile(join(workspace, "file.ts"), "const a: number = 'x';\n");
+
+    const context = { ...makeContext(), cwd: workspace } as ReturnType<typeof makeContext> & {
+      cwd: string;
+    };
+    context.config.cwd = workspace;
+    context.config.lspServers = { ".ts": { command: process.execPath, args: [script] } };
+
+    const result = await new LspDiagnostics().run({ path: "file.ts" }, context);
+    expect(result.ok).toBe(false);
+    expect(result.output).toContain("1 diagnostic (1 error)");
+    expect(result.output).toContain("file.ts:3:5 error: Type string is not assignable to number");
+    expect(result.output).toContain("[2322]");
+  }, 30000);
+
+  it("explains how to configure a server when none is set", async () => {
+    const { LspDiagnostics } = await import("../src/tools/Lsp.js");
+    const workspace = join(dir, "lsp-unconfigured");
+    await mkdir(workspace, { recursive: true });
+    await writeFile(join(workspace, "file.py"), "print(1)\n");
+    const context = { ...makeContext(), cwd: workspace } as ReturnType<typeof makeContext> & {
+      cwd: string;
+    };
+    context.config.cwd = workspace;
+    const result = await new LspDiagnostics().run({ path: "file.py" }, context);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("lspServers");
+  });
+});
+
 describe("web tools", () => {
   it("reduces HTML to readable text", async () => {
     const { htmlToText, pageTitle, decodeEntities } = await import("../src/tools/WebOps.js");
@@ -2199,8 +2271,25 @@ describe("web tools", () => {
     expect(decodeEntities("&#65;&#x42;&nbsp;&mdash;&bogus;")).toBe("AB —&bogus;");
   });
 
+  it("refuses loopback, private hosts and non-http schemes", async () => {
+    const { urlProblem, WebFetch } = await import("../src/tools/WebOps.js");
+    expect(urlProblem("http://169.254.169.254/latest/meta-data/")).toContain("cloud metadata");
+    expect(urlProblem("http://127.0.0.1:8080/admin")).toContain("loopback");
+    expect(urlProblem("http://10.1.2.3/")).toContain("private");
+    expect(urlProblem("http://[::1]/")).toContain("IPv6");
+    expect(urlProblem("file:///etc/passwd")).toContain("not allowed");
+    expect(urlProblem("not a url")).toBe("not an absolute URL");
+    expect(urlProblem("https://example.com/docs")).toBeUndefined();
+    // The tool itself must refuse before opening a socket.
+    const blocked = await new WebFetch().run({ url: "http://127.0.0.1:1/" }, makeContext());
+    expect(blocked.ok).toBe(false);
+    expect(blocked.error).toContain("loopback");
+  });
+
   it("fetches a page as text and truncates it", async () => {
     const { WebFetch } = await import("../src/tools/WebOps.js");
+    const previousAllow = process.env.CARLS_ALLOW_LOCAL_FETCH;
+    process.env.CARLS_ALLOW_LOCAL_FETCH = "1";
     const server = createServer((req, res) => {
       if (req.url === "/missing") {
         res.writeHead(404, { "content-type": "text/html" }).end("<h1>gone</h1>");
@@ -2226,6 +2315,8 @@ describe("web tools", () => {
       const bad = await tool.run({ url: "file:///etc/passwd" }, makeContext());
       expect(bad.ok).toBe(false);
     } finally {
+      if (previousAllow === undefined) delete process.env.CARLS_ALLOW_LOCAL_FETCH;
+      else process.env.CARLS_ALLOW_LOCAL_FETCH = previousAllow;
       server.close();
     }
   });
@@ -2240,7 +2331,7 @@ describe("web tools", () => {
     ].join("");
 
     const hits = parseSearchResults(page, 5);
-    expect(hits.map((hit) => hit.url)).toEqual(["https://nodejs.org/en/", "https://example.test/two"]);
+    expect(hits.map((hit) => hit.url)).toEqual(["https://nodejs.org/en", "https://example.test/two"]);
     expect(hits[0]?.title).toBe("Node.js — Run JavaScript");
     expect(hits[1]?.snippet).toBe("Another hit.");
 
@@ -2252,16 +2343,65 @@ describe("web tools", () => {
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as AddressInfo).port;
     const previous = process.env.CARLS_SEARCH_ENDPOINT;
+    const previousAllow = process.env.CARLS_ALLOW_LOCAL_FETCH;
     process.env.CARLS_SEARCH_ENDPOINT = `http://127.0.0.1:${port}/html/`;
+    process.env.CARLS_ALLOW_LOCAL_FETCH = "1";
     try {
       const result = await new WebSearch().run({ query: "node runtime", max_results: 1 }, makeContext());
       expect(result.ok).toBe(true);
       expect(asked).toContain("q=node%20runtime");
-      expect(result.output).toContain("https://nodejs.org/en/");
+      expect(result.output).toContain("https://nodejs.org/en");
       expect(result.output).not.toContain("example.test/two");
     } finally {
       if (previous === undefined) delete process.env.CARLS_SEARCH_ENDPOINT;
       else process.env.CARLS_SEARCH_ENDPOINT = previous;
+      if (previousAllow === undefined) delete process.env.CARLS_ALLOW_LOCAL_FETCH;
+      else process.env.CARLS_ALLOW_LOCAL_FETCH = previousAllow;
+      server.close();
+    }
+  });
+
+  it("drops ads, tracking parameters and duplicate results", async () => {
+    const { parseSearchResults, cleanUrl } = await import("../src/tools/WebOps.js");
+    const page = [
+      '<a class="result__a" href="https://example.test/doc?utm_source=ddg&amp;utm_medium=web&amp;id=7">Docs</a>',
+      '<a class="result__a" href="https://example.test/doc?id=7">Docs again</a>',
+      '<a class="result__a" href="//duckduckgo.com/y.js?ad_provider=bing">Sponsored</a>',
+      '<a class="result__a" href="http://127.0.0.1/admin">Injected</a>',
+    ].join("");
+    const hits = parseSearchResults(page, 10);
+    expect(hits.map((hit) => hit.url)).toEqual(["https://example.test/doc?id=7"]);
+    expect(cleanUrl("https://example.test/a/?utm_campaign=x#frag")).toBe("https://example.test/a");
+  });
+
+  it("retries a rate limit and falls back when the endpoint is a challenge", async () => {
+    const { WebSearch } = await import("../src/tools/WebOps.js");
+    let calls = 0;
+    const page = '<a class="result__a" href="https://example.test/ok">Ok</a>';
+    const server = createServer((_req, res) => {
+      calls += 1;
+      if (calls === 1) {
+        res.writeHead(429, { "content-type": "text/html" }).end("slow down");
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html" }).end(page);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const previous = process.env.CARLS_SEARCH_ENDPOINT;
+    const previousAllow = process.env.CARLS_ALLOW_LOCAL_FETCH;
+    process.env.CARLS_SEARCH_ENDPOINT = `http://127.0.0.1:${port}/`;
+    process.env.CARLS_ALLOW_LOCAL_FETCH = "1";
+    try {
+      const result = await new WebSearch().run({ query: "retry me" }, makeContext());
+      expect(result.ok).toBe(true);
+      expect(calls).toBe(2);
+      expect(result.output).toContain("https://example.test/ok");
+    } finally {
+      if (previous === undefined) delete process.env.CARLS_SEARCH_ENDPOINT;
+      else process.env.CARLS_SEARCH_ENDPOINT = previous;
+      if (previousAllow === undefined) delete process.env.CARLS_ALLOW_LOCAL_FETCH;
+      else process.env.CARLS_ALLOW_LOCAL_FETCH = previousAllow;
       server.close();
     }
   });
