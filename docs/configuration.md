@@ -141,6 +141,41 @@ stdout. `preToolUse` can block a call by exiting with code 2 or printing
 | `.carls/skill-usage.json` | skill usage ledger (`/skills review`) |
 | `.carls/backups/` | file snapshots behind `/undo` and `/redo` |
 
+## Agent presets
+
+A preset is a markdown file with frontmatter. The body is appended to the system
+prompt; the frontmatter narrows the session:
+
+```markdown
+---
+description: Reviews a diff for correctness, never edits
+mode: plan
+tools: read_file, grep_search, glob_files, bash
+effort: high
+---
+You are a reviewer. Read the diff, list concrete defects with file and line,
+and stop. Do not edit anything.
+```
+
+Where they live, project first:
+
+| Path | Scope |
+| --- | --- |
+| `.agents/agents/<name>.md` | this project, committed with the code |
+| `~/.carls/agents/<name>.md` | every project on this machine |
+
+A project file wins over a global one with the same name. Only keys the preset
+sets are applied: no `model` keeps your model, no `mode` keeps your mode. Invalid
+values (`mode: sideways`) are ignored instead of failing the session, and a file
+without frontmatter is simply instructions.
+
+```bash
+carls --agent reviewer "look at the last commit"
+```
+
+Inside a session, `/agents` opens a picker (or `/agents reviewer`) and switches
+live: mode, advertised tools, model, effort and instructions.
+
 ## Updates
 
 A check runs at most once per 24h and only in an interactive session, so a

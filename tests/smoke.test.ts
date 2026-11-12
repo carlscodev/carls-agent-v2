@@ -2119,6 +2119,86 @@ describe("local model support", () => {
   });
 });
 
+describe("agent presets", () => {
+  const preset = [
+    "---",
+    "description: Reviews a diff, never edits",
+    "mode: plan",
+    "tools: read_file, grep_search",
+    "effort: high",
+    "---",
+    "You are a reviewer. Read the diff and report findings.",
+  ].join("\n");
+
+  it("splits frontmatter from the instruction body", async () => {
+    const { splitFrontmatter, parsePreset } = await import("../src/agents/Presets.js");
+    const split = splitFrontmatter(preset);
+    expect(split.meta.mode).toBe("plan");
+    expect(split.body.startsWith("You are a reviewer.")).toBe(true);
+
+    const parsed = parsePreset("reviewer", preset, "project", "/tmp/reviewer.md");
+    expect(parsed.mode).toBe("plan");
+    expect(parsed.effort).toBe("high");
+    expect(parsed.tools).toEqual(["read_file", "grep_search"]);
+
+    // A file without frontmatter is all body, and bad values are dropped.
+    const plain = parsePreset("plain", "just instructions", "user", "/tmp/plain.md");
+    expect(plain.prompt).toBe("just instructions");
+    expect(plain.mode).toBeUndefined();
+    const broken = parsePreset("broken", "---\nmode: sideways\neffort: extreme\n---\nbody", "project", "/tmp/b.md");
+    expect(broken.mode).toBeUndefined();
+    expect(broken.effort).toBeUndefined();
+    expect(broken.prompt).toBe("body");
+  });
+
+  it("discovers project and global presets, project winning on a name clash", async () => {
+    const { discoverAgents } = await import("../src/agents/Presets.js");
+    const previousHome = process.env.HOME;
+    const home = join(dir, "preset-home");
+    const project = join(dir, "preset-project");
+    await mkdir(join(home, ".carls", "agents"), { recursive: true });
+    await mkdir(join(project, ".agents", "agents"), { recursive: true });
+    await writeFile(join(home, ".carls", "agents", "docs.md"), "global docs agent");
+    await writeFile(join(home, ".carls", "agents", "reviewer.md"), "global reviewer");
+    await writeFile(join(project, ".agents", "agents", "reviewer.md"), "project reviewer");
+    process.env.HOME = home;
+    try {
+      const agents = discoverAgents(project);
+      expect(agents.map((agent) => agent.name)).toEqual(["docs", "reviewer"]);
+      expect(agents.find((agent) => agent.name === "reviewer")?.prompt).toBe("project reviewer");
+      expect(agents.find((agent) => agent.name === "reviewer")?.source).toBe("project");
+      expect(agents.find((agent) => agent.name === "docs")?.source).toBe("user");
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
+  it("folds a preset into the config and the system prompt", async () => {
+    const { parsePreset, applyPreset } = await import("../src/agents/Presets.js");
+    const { loadConfig } = await import("../src/config/Config.js");
+    const { buildSystemPrompt } = await import("../src/core/Runtime.js");
+    const workspace = join(dir, "preset-apply");
+    await mkdir(workspace, { recursive: true });
+    const previous = process.env.CARLS_SYSTEM_CONFIG;
+    process.env.CARLS_SYSTEM_CONFIG = join(workspace, "missing.json");
+    try {
+      const base = loadConfig({ model: "gpt-4o" }, workspace);
+      const next = applyPreset(base, parsePreset("reviewer", preset, "project", "/tmp/r.md"));
+      expect(next.mode).toBe("plan");
+      expect(next.model).toBe("gpt-4o");
+      expect(next.tools).toEqual(["read_file", "grep_search"]);
+      expect(next.agentName).toBe("reviewer");
+      expect(buildSystemPrompt(next)).toContain("You are a reviewer.");
+      expect(buildSystemPrompt(next)).toContain("Agent: reviewer");
+      expect(buildSystemPrompt(base)).not.toContain("You are a reviewer.");
+    } finally {
+      if (previous === undefined) delete process.env.CARLS_SYSTEM_CONFIG;
+      else process.env.CARLS_SYSTEM_CONFIG = previous;
+    }
+  });
+});
+
 describe("@file mentions", () => {
   it("parses mentions only at a word boundary", async () => {
     const { parseMentions } = await import("../src/cli/Mentions.js");
@@ -2171,6 +2251,23 @@ describe("@file mentions", () => {
     expect(result.text.length).toBeLessThan(400);
   });
 
+  it("refuses a symlink that points out of the workspace", async () => {
+    const { expandMentions } = await import("../src/cli/Mentions.js");
+    const root = join(dir, "mention-symlink");
+    await mkdir(root, { recursive: true });
+    await writeFile(join(dir, "mention-outside.txt"), "secret-value");
+    await writeFile(join(root, "inside.txt"), "keep-me");
+    await symlink(join(dir, "mention-outside.txt"), join(root, "link.txt"));
+    await symlink(join(root, "inside.txt"), join(root, "alias.txt"));
+
+    const result = expandMentions("read @link.txt and @alias.txt", root);
+    expect(result.attached).toEqual(["alias.txt"]);
+    expect(result.skipped).toEqual([
+      { path: "link.txt", reason: "symlink points outside the workspace" },
+    ]);
+    expect(result.text).not.toContain("secret-value");
+  });
+
   it("lists workspace files without build output or dependencies", async () => {
     const { listWorkspaceFiles } = await import("../src/cli/Mentions.js");
     const root = join(dir, "mention-list");
@@ -2185,4 +2282,54 @@ describe("@file mentions", () => {
     expect(files).toContain("src/index.ts");
     expect(files.some((path) => path.includes("node_modules"))).toBe(false);
   });
+
+  it("attaches mentions in print mode, without a terminal", async () => {
+    const { runOneShot } = await import("../src/cli/OneShot.js");
+    const { loadConfig } = await import("../src/config/Config.js");
+    const workspace = join(dir, "mention-oneshot");
+    await mkdir(workspace, { recursive: true });
+    await writeFile(join(workspace, "note.txt"), "the answer is 42");
+
+    let sent = "";
+    const server = createServer((req, res) => {
+      if (req.url?.includes("chat/completions") !== true) {
+        res.writeHead(404, { "content-type": "application/json" }).end("{}");
+        return;
+      }
+      req.on("data", (chunk: Buffer) => (sent += chunk.toString("utf8")));
+      req.on("end", () => {
+        // Print mode asks for a plain completion, not a stream.
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            id: "1",
+            object: "chat.completion",
+            created: 0,
+            model: "gpt-4o",
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 },
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const previous = process.env.CARLS_SYSTEM_CONFIG;
+    process.env.CARLS_SYSTEM_CONFIG = join(workspace, "missing.json");
+    try {
+      const config = {
+        ...loadConfig({ provider: "openai", model: "gpt-4o", baseUrl: `http://127.0.0.1:${port}/v1` }, workspace),
+        apiKey: "test-key",
+      };
+      const code = await runOneShot("summarise @note.txt", config, new Logger("error"));
+      expect(code).toBe(0);
+      // The request the model actually received carries the file.
+      expect(sent).toContain("the answer is 42");
+      expect(sent).toContain("file path=\\\"note.txt\\\"");
+    } finally {
+      if (previous === undefined) delete process.env.CARLS_SYSTEM_CONFIG;
+      else process.env.CARLS_SYSTEM_CONFIG = previous;
+      server.close();
+    }
+  }, 30000);
 });

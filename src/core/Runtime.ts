@@ -418,6 +418,26 @@ export class Runtime {
     this.config.mode = mode;
   }
 
+  /** Narrows or widens the advertised tools; execution stays untouched. */
+  setTools(tools: string[] | undefined): void {
+    if (tools === undefined || tools.length === 0) delete this.config.tools;
+    else this.config.tools = tools;
+    this.advertised = this.selectAdvertisedTools();
+    this.loop.setAdvertised(this.advertised);
+  }
+
+  /** Switches the active agent preset, rebuilding the system prompt. */
+  setAgent(name: string | undefined, prompt: string | undefined): void {
+    if (name === undefined || prompt === undefined) {
+      delete this.config.agentName;
+      delete this.config.agentPrompt;
+    } else {
+      this.config.agentName = name;
+      this.config.agentPrompt = prompt;
+    }
+    this.loop.setSystemPrompt(buildSystemPrompt(this.config));
+  }
+
   /** Manual compaction; returns true when it actually compacted. */
   async compactNow(): Promise<boolean> {
     const compaction = await this.contextManager.compact(
@@ -486,6 +506,13 @@ export function buildSystemPrompt(config: ResolvedConfig): string {
         index,
       ].join("\n"),
     );
+  }
+
+  // An agent preset comes last: it is the most specific instruction in the
+  // prompt, and it should be the freshest thing the model read.
+  if (config.agentPrompt !== undefined && config.agentPrompt.trim().length > 0) {
+    const label = config.agentName !== undefined ? `Agent: ${config.agentName}` : "Active agent";
+    sections.push(`${label}\n${config.agentPrompt.trim()}`);
   }
 
   return sections.join("\n\n");

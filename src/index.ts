@@ -5,13 +5,16 @@ import { SessionStore } from "./core/SessionStore.js";
 import { Runtime, packageVersion } from "./core/Runtime.js";
 import { parseArgs, ArgError, HELP_TEXT } from "./cli/ArgsParser.js";
 import { runRepl } from "./cli/REPL.js";
-import { Spinner, printCost, printError, printInfo } from "./cli/TerminalUI.js";
+import { printInfo } from "./cli/TerminalUI.js";
+import { runOneShot } from "./cli/OneShot.js";
 import { resolveApiKey } from "./providers/ProviderBase.js";
 import { needsOnboarding, runOnboarding } from "./setup/Onboarding.js";
 import { formatProviderTable } from "./cli/ProviderList.js";
 import { enableWindowsVirtualTerminal } from "./utils/platform.js";
 import { collectDoctorRows } from "./cli/Doctor.js";
 import { announceUpdate, runUpdate } from "./update/Updater.js";
+import { applyPreset, discoverAgents, findAgent } from "./agents/Presets.js";
+import { join } from "node:path";
 
 async function main(): Promise<number> {
   // Windows consoles need this before any ANSI colour or cursor control works.
@@ -84,6 +87,24 @@ async function main(): Promise<number> {
     }
   }
 
+  // An agent preset is folded into the config before anything reads it, so the
+  // model, mode and tool set are right from the first request.
+  if (args.agent !== undefined) {
+    const presets = discoverAgents(config.cwd);
+    const preset = findAgent(presets, args.agent);
+    if (preset === undefined) {
+      process.stderr.write(
+        `${pc.red("error:")} unknown agent "${args.agent}". ` +
+          (presets.length > 0
+            ? `Available: ${presets.map((entry) => entry.name).join(", ")}.\n`
+            : `No presets found in ${join(config.cwd, ".agents", "agents")}.\n`),
+      );
+      return 2;
+    }
+    config = applyPreset(config, preset);
+    printInfo(`agent ${preset.name}${preset.mode !== undefined ? ` · ${preset.mode}` : ""}`);
+  }
+
   const logger = new Logger(config.logLevel);
 
   // A keyless backend (Ollama, LM Studio, vLLM, llama.cpp) serves requests
@@ -138,42 +159,6 @@ async function main(): Promise<number> {
     resumeMessages,
   });
   return code;
-}
-
-async function runOneShot(
-  query: string,
-  config: import("./config/Config.js").ResolvedConfig,
-  logger: Logger,
-): Promise<number> {
-  const session = new SessionStore(config.cwd, config.model);
-  const runtime = new Runtime({ config, logger, session });
-  const spinner = new Spinner(process.stderr.isTTY === true);
-  let streamed = false;
-  try {
-    await runtime.connectMcpServers();
-    await runtime.start();
-    spinner.start("working");
-    const result = await runtime.runTurn(query, {
-      onText: (chunk) => {
-        spinner.stop();
-        streamed = true;
-        process.stdout.write(chunk);
-      },
-    });
-    spinner.stop();
-    // In print mode the answer may arrive without any streamed delta (for
-    // example when the model only calls tools), so emit the final text then.
-    if (!streamed && result.finalText.length > 0) process.stdout.write(result.finalText);
-    process.stdout.write("\n");
-    printCost(runtime.cost.format());
-    return result.stoppedReason === "error" ? 1 : 0;
-  } catch (error) {
-    spinner.stop();
-    printError((error as Error).message);
-    return 1;
-  } finally {
-    await runtime.close();
-  }
 }
 
 main()

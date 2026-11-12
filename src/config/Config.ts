@@ -133,6 +133,10 @@ export interface ResolvedConfig {
   allowOutsideWorkspace: boolean;
   /** Startup release handling; see `AutoUpdateMode`. */
   autoUpdate: AutoUpdateMode;
+  /** Active agent preset name, when one is loaded. */
+  agentName?: string;
+  /** Preset body appended to the system prompt. */
+  agentPrompt?: string;
   /** Tools to advertise, or undefined for all of them. */
   tools?: string[];
   /** True when the config named a contextWindow, so discovery must not override it. */

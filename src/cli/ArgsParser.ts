@@ -26,6 +26,8 @@ export interface ParsedArgs {
   updateDryRun?: boolean;
   /** API key supplied on the command line (setup only; prefer the env var). */
   apiKey?: string;
+  /** Agent preset from .agents/agents/<name>.md to start with. */
+  agent?: string;
 }
 
 export class ArgError extends Error {}
@@ -194,6 +196,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--debug":
         parsed.overrides.logLevel = "debug";
         break;
+      case "--agent":
+        parsed.agent = next(arg);
+        break;
       case "--resume": {
         const value = argv[i + 1];
         if (value === undefined || value.startsWith("--")) {
@@ -247,6 +252,7 @@ OPTIONS
       --max-steps <n>         Max agent steps per turn (default 30)
       --max-tokens <n>        Max output tokens per model call (default 8192)
       --model <name>          Override the model
+      --agent <name>          Start with a preset from .agents/agents/<name>.md
       --provider <name>       Provider id (see --providers); defaults to anthropic
       --base-url <url>        Override the provider base URL
       --tools <a,b,c>         Tools advertised to the model (local backends

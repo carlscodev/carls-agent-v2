@@ -18,6 +18,7 @@ import { collectDoctorRows } from "./Doctor.js";
 import { loadConfig, specFor } from "../config/Config.js";
 import { apiKeyEnvFor } from "../config/Config.js";
 import { runUpdate } from "../update/Updater.js";
+import { applyPreset, discoverAgents, findAgent } from "../agents/Presets.js";
 
 export interface CommandContext {
   runtime: Runtime;
@@ -476,6 +477,57 @@ export const COMMANDS: CommandSpec[] = [
       );
       printPanel("Modified files", rows);
       printInfo("Use /undo to revert the most recent edit.");
+      return false;
+    },
+  },
+  {
+    name: "/agents",
+    usage: "/agents [name]",
+    summary: "Switch the agent preset from .agents/agents/*.md",
+    run: async (args, ctx) => {
+      const presets = discoverAgents(ctx.runtime.config.cwd);
+      if (presets.length === 0) {
+        printInfo("No agents found. Create .agents/agents/<name>.md with frontmatter:");
+        printInfo("  ---|description: …|mode: plan|tools: read_file, grep_search|effort: high|---");
+        printInfo("The file body is appended to the system prompt.");
+        return false;
+      }
+      let preset: (typeof presets)[number] | undefined;
+      const wanted = args[0];
+      if (wanted !== undefined) {
+        preset = findAgent(presets, wanted);
+        if (preset === undefined) {
+          printError(`Unknown agent "${wanted}". Available: ${presets.map((entry) => entry.name).join(", ")}.`);
+          return false;
+        }
+      } else {
+        const choice = await selectList({
+          title: `${theme().paint(theme().colors.accent, "Agents")} ${theme().paint(theme().colors.text.faint, `${presets.length} available`)}`,
+          items: presets.map((entry) => ({
+            id: entry.name,
+            label: entry.name,
+            detail: entry.description,
+            section: entry.source === "project" ? "this project" : "global",
+          })),
+        });
+        if (choice === undefined) return false;
+        preset = findAgent(presets, choice.id);
+      }
+      if (preset === undefined) return false;
+
+      // The preset decides what it knows; anything it leaves out stays as it is.
+      const next = applyPreset(ctx.runtime.config, preset);
+      ctx.runtime.setMode(next.mode);
+      ctx.runtime.setTools(next.tools);
+      ctx.runtime.setModel(next.model);
+      ctx.runtime.setEffort(next.effort);
+      ctx.runtime.setAgent(preset.name, preset.prompt);
+      const parts = [
+        preset.mode !== undefined ? `mode ${preset.mode}` : undefined,
+        preset.tools !== undefined ? `${preset.tools.length} tools` : undefined,
+        preset.model !== undefined ? `model ${preset.model}` : undefined,
+      ].filter((part): part is string => part !== undefined);
+      printInfo(`agent → ${preset.name}${parts.length > 0 ? ` · ${parts.join(" · ")}` : ""}`);
       return false;
     },
   },

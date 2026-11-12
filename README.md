@@ -112,6 +112,7 @@ runs a shell command, `#` adds a note without calling the model.
 | `/undo`, `/redo`, `/files`, `/diff` | revert, re-apply, list and inspect the agent's edits |
 | `/compact`, `/clear`, `/resume` | context and sessions |
 | `/agent <goal>` | run a sub-agent and print its conclusion |
+| `/agents [name]` | switch the agent preset from `.agents/agents/*.md` |
 | `/tools`, `/mcp`, `/skills` | what the agent can use |
 | `/setup`, `/providers`, `/doctor` | configuration and diagnostics |
 | `/update [--check]` | install or check for a newer release |

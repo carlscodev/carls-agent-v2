@@ -139,6 +139,11 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       modeTag(runtime.config.mode),
       t.paint(t.colors.text.muted, `${runtime.config.provider}/${runtime.config.model}`),
     ];
+    // The active preset changes the mode and the tool set, so the footer has to
+    // say which one is in charge or the change is invisible.
+    if (runtime.config.agentName !== undefined) {
+      parts.push(t.paint(t.colors.accent, `@${runtime.config.agentName}`));
+    }
     if (runtime.config.effort !== undefined) parts.push(t.paint(t.colors.accent, runtime.config.effort));
     parts.push(t.paint(paint, `${tokenCount(used)}/${tokenCount(runtime.config.contextWindow)}`));
     parts.push(t.paint(t.colors.text.faint, runtime.cost.format()));

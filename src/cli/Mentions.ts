@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
+import { assertInsideWorkspace, assertNoSymlinkEscape } from "../utils/paths.js";
 
 /**
  * `@path` mentions.
@@ -128,13 +129,6 @@ export interface ExpandResult {
   skipped: { path: string; reason: string }[];
 }
 
-/** True when `target` is inside `root`; symlinks are resolved first. */
-function insideWorkspace(root: string, target: string): boolean {
-  const rootReal = resolve(root);
-  const targetReal = resolve(target);
-  return targetReal === rootReal || targetReal.startsWith(rootReal + sep);
-}
-
 /**
  * Turns a user line into the message the model receives. Missing or refused
  * mentions become a one-line marker instead of an error, because a typo in a
@@ -159,8 +153,14 @@ export function expandMentions(
       continue;
     }
     const target = isAbsolute(mention) ? mention : join(root, mention);
-    if (!insideWorkspace(root, target)) {
+    if (assertInsideWorkspace(root, target) !== undefined) {
       skipped.push({ path: mention, reason: "outside the workspace" });
+      continue;
+    }
+    // The lexical check above cannot see a symlink: `@link/secret` is inside the
+    // workspace by name and outside it by realpath. Only realpath knows.
+    if (assertNoSymlinkEscape(root, target) !== undefined) {
+      skipped.push({ path: mention, reason: "symlink points outside the workspace" });
       continue;
     }
     if (!existsSync(target)) {

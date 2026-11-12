@@ -10,6 +10,7 @@
 | `--plan`, `--yolo` | shorthands for the two extremes |
 | `--effort <level>` | `minimal`, `low`, `medium`, `high` |
 | `--model <id>`, `--provider <id>`, `--base-url <url>` | override the config for this run |
+| `--agent <name>` | start with a preset from `.agents/agents/<name>.md` |
 | `--max-steps <n>`, `--max-tokens <n>` | loop and output limits |
 | `--tools <a,b,c>` | tools advertised to the model |
 | `--resume [id]` | continue the latest session in this directory, or one by id |
@@ -30,7 +31,7 @@ Print mode writes the answer to stdout and everything else to stderr, so
 | `/` | command palette (also `Ctrl+P`) |
 | `!<command>` | run a shell command in the workspace, no model call |
 | `#<note>` | append a note to the session context, no model call |
-| `@` | pick a file and attach its contents to the message |
+| `@` | pick a file and attach its contents to the message (also works in `-p`) |
 | `Shift+Tab` | cycle the permission mode |
 | `Ctrl+C` | interrupt the running turn; twice to exit |
 
@@ -52,6 +53,7 @@ While a turn is running the spinner shows the current step and elapsed seconds.
 | `/compact` | compact now instead of waiting for the threshold |
 | `/clear` | start a fresh session |
 | `/undo [n]`, `/redo [n]` | revert the last edits, or re-apply what an undo removed |
+| `/agents [name]` | switch the agent preset from `.agents/agents/*.md` |
 | `/files`, `/diff` | files the agent touched, and the working-tree diff |
 | `/todo` | the agent's current plan |
 | `/agent <goal>` | run an isolated sub-agent and print its conclusion |

@@ -105,6 +105,11 @@ export class AgentLoop {
     this.deps.advertise = registry;
   }
 
+  /** Replaces the system prompt, used when an agent preset is switched. */
+  setSystemPrompt(prompt: string): void {
+    this.deps.systemPrompt = prompt;
+  }
+
   /** The registry whose schemas go to the model. */
   private advertised(): ToolRegistry {
     return this.deps.advertise ?? this.deps.registry;
