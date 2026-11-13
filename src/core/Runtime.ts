@@ -574,7 +574,10 @@ export class Runtime {
     const decision = this.steeringClassifier.classify(trimmed);
     // A correction or a stated preference is worth remembering; an approval and a
     // question are not.
-    this.operatorMemory.learn(decision, trimmed);
+    const learned = this.operatorMemory.learn(decision, trimmed);
+    if (learned !== undefined) {
+      this.events.emit("operator.rule", { id: learned.id, kind: learned.kind, at: Date.now() });
+    }
 
     if (decision.intent === "approve") return "ignored";
     // The caller owns the abort controller, so it must know the operator asked to

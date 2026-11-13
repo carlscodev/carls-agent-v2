@@ -84,6 +84,27 @@ export interface SubAgentStatusEvent {
   at: number;
 }
 
+/** A skill the discovery pass injected into the turn prompt. */
+export interface SkillActiveEvent {
+  name: string;
+  at: number;
+}
+
+/** A whole-tree checkpoint written by ShadowGit. */
+export interface CheckpointCreatedEvent {
+  id: string;
+  files: number;
+  label: string;
+  at: number;
+}
+
+/** A rule the operator taught this workspace. */
+export interface OperatorRuleEvent {
+  id: string;
+  kind: string;
+  at: number;
+}
+
 export interface CarlsEventMap {
   "turn.start": TurnStartEvent;
   "turn.end": TurnEndEvent;
@@ -95,6 +116,9 @@ export interface CarlsEventMap {
   "compaction.layer": CompactionLayerEvent;
   "steer.queued": SteerQueuedEvent;
   "subagent.status": SubAgentStatusEvent;
+  "skill.active": SkillActiveEvent;
+  "checkpoint.created": CheckpointCreatedEvent;
+  "operator.rule": OperatorRuleEvent;
 }
 
 export type CarlsEventName = keyof CarlsEventMap;

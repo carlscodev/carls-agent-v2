@@ -380,6 +380,12 @@ export const COMMANDS: CommandSpec[] = [
       }
       printInfo(`Checkpoint ${checkpoint.id} · ${checkpoint.files} files · "${checkpoint.label}"`);
       ctx.runtime.setLastCheckpoint(checkpoint);
+      ctx.runtime.events.emit("checkpoint.created", {
+        id: checkpoint.id,
+        files: checkpoint.files,
+        label: checkpoint.label,
+        at: Date.now(),
+      });
       printInfo(`Rewind with /rewind ${checkpoint.id}`);
       return false;
     },
