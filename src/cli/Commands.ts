@@ -988,24 +988,102 @@ export const COMMANDS: CommandSpec[] = [
   },
   {
     name: "/mcp",
-    summary: "Show the connected MCP servers and their tools",
-    run: (_args, ctx) => {
+    usage: "/mcp [status|presets|add <preset|name> [k=v...]|test <name>]",
+    summary: "Manage MCP servers: status, presets, hot-add and handshake test",
+    run: async (args, ctx) => {
+      const sub = args[0] ?? "status";
+      const { MCP_PRESETS, findPreset, instantiatePreset } = await import("../mcp/McpPresets.js");
+
+      if (sub === "presets") {
+        printPanel(
+          "MCP presets",
+          MCP_PRESETS.map((preset) => {
+            const params = preset.parameters.length > 0 ? pc.gray(` (${preset.parameters.map((p) => p.key).join(", ")})`) : "";
+            return `${theme().paint(theme().colors.accent, "◆")} ${pc.bold(preset.name)}${params} ${pc.gray(preset.summary)}`;
+          }),
+        );
+        printInfo("Add one with /mcp add <preset> [key=value ...]");
+        return false;
+      }
+
+      if (sub === "add") {
+        const target = args[1];
+        if (target === undefined) {
+          printError("Usage: /mcp add <preset|name> [key=value ...]");
+          return false;
+        }
+        const values: Record<string, string> = {};
+        for (const token of args.slice(2)) {
+          const eq = token.indexOf("=");
+          if (eq > 0) values[token.slice(0, eq)] = token.slice(eq + 1);
+        }
+        const preset = findPreset(target);
+        const config = preset !== undefined ? instantiatePreset(preset, values) : { command: target, args: args.slice(2) };
+        const result = await ctx.runtime.addMcpServer(target, config);
+        if (result.ok) {
+          printInfo(`MCP "${target}" connected: ${result.tools} tool(s). Saved to .carls/mcp.json.`);
+        } else {
+          printError(`MCP "${target}" failed: ${result.error ?? "unknown error"}`);
+        }
+        return false;
+      }
+
+      if (sub === "test") {
+        const target = args[1];
+        const servers = ctx.runtime.mcpServers();
+        const names = target !== undefined ? [target] : servers.map((server) => server.name);
+        if (names.length === 0) {
+          printError("No MCP servers to test. Add one with /mcp add <preset>.");
+          return false;
+        }
+        for (const name of names) {
+          const client = ctx.runtime.mcpClient(name);
+          if (client === undefined) {
+            printError(`MCP "${name}" is not connected.`);
+            continue;
+          }
+          try {
+            const latency = await client.ping();
+            const tools = client.toolNames();
+            printPanel(`MCP ${name}`, [
+              `${pc.green("✓")} handshake ok ${pc.gray(`${latency}ms`)}`,
+              ...tools.map((tool) => `${pc.gray("├")} ${tool}`),
+            ]);
+          } catch (error) {
+            printError(`MCP "${name}" test failed: ${(error as Error).message}`);
+          }
+        }
+        return false;
+      }
+
+      // Default: status.
       const servers = ctx.runtime.mcpServers();
       const configured = Object.entries(ctx.runtime.config.mcpServers);
       if (configured.length === 0 && servers.length === 0) {
         printPanel("MCP", [
           "No servers configured.",
-          pc.gray('Add them under "mcpServers" in .carlsrc.json:'),
-          pc.gray('  stdio: { "command": "npx", "args": ["-y", "some-mcp-server"] }'),
-          pc.gray('  http:  { "url": "https://example.com/mcp" }'),
-          pc.gray('  sse:   { "url": "https://example.com/sse", "transport": "sse" }'),
+          pc.gray("Add a preset:  /mcp add filesystem path=."),
+          pc.gray("List presets:  /mcp presets"),
+          pc.gray('Or set "mcpServers" in .carlsrc.json / .carls/mcp.json.'),
         ]);
         return false;
       }
-      const rows = servers.map((server) => {
+      const rows: string[] = [];
+      for (const server of servers) {
         const version = server.version !== undefined ? pc.gray(` v${server.version}`) : "";
-        return `${pc.green("✓")} ${pc.bold(server.name)}${version} ${pc.cyan(server.transport)} · ${server.tools} tools`;
-      });
+        const client = ctx.runtime.mcpClient(server.name);
+        let latency = pc.gray("…");
+        if (client !== undefined) {
+          try {
+            latency = pc.gray(`${await client.ping()}ms`);
+          } catch {
+            latency = pc.red("down");
+          }
+        }
+        rows.push(
+          `${pc.green("✓")} ${pc.bold(server.name)}${version} ${pc.cyan(server.transport)} · ${server.tools} tools · ${latency}`,
+        );
+      }
       const failed = configured
         .map(([name]) => name)
         .filter((name) => !servers.some((server) => server.name === name))

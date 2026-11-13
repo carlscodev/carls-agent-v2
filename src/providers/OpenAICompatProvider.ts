@@ -8,6 +8,7 @@ import type {
 } from "../types/llm.js";
 import { withRetry, httpError, FatalError } from "./retry.js";
 import { estimateTokens } from "../utils/tokens.js";
+import { ThinkTagSplitter, splitThinkTags } from "./ThinkTagSplitter.js";
 
 interface OpenAIToolCall {
   id: string;
@@ -199,6 +200,8 @@ interface StreamState {
   text: string;
   reasoning: string;
   tools: ToolCallAccumulator;
+  /** Splits inline ` thinking` scratchpads out of `delta.content`. */
+  think: ThinkTagSplitter;
   finish: string | null;
   usage?: {
     prompt_tokens?: number;
@@ -215,6 +218,7 @@ function newStreamState(): StreamState {
     text: "",
     reasoning: "",
     tools: new ToolCallAccumulator(),
+    think: new ThinkTagSplitter(),
     finish: null,
     sawUsage: false,
     done: false,
@@ -281,11 +285,21 @@ function applyFrame(frame: string, state: StreamState, args: CompletionArgs): vo
   const delta = choice.delta;
   if (delta?.reasoning_content) {
     state.reasoning += delta.reasoning_content;
-    args.onReasoning?.(delta.reasoning_content);
+    args.onReasoning?.(delta.reasoning_content, "reasoning_content");
   }
   if (delta?.content) {
-    state.text += delta.content;
-    args.onText?.(delta.content);
+    // Some thinking models emit the scratchpad inside `content` as
+    // ` thinking...</think>`; route its interior to the reasoning channel so it
+    // never reaches the rendered answer.
+    const split = state.think.push(delta.content);
+    if (split.reasoning.length > 0) {
+      state.reasoning += split.reasoning;
+      args.onReasoning?.(split.reasoning, "think-tag");
+    }
+    if (split.text.length > 0) {
+      state.text += split.text;
+      args.onText?.(split.text);
+    }
   }
   if (delta?.tool_calls !== undefined) {
     const minIndex = Math.min(...delta.tool_calls.map((fragment) => fragment.index ?? 0));
@@ -319,6 +333,17 @@ function estimatePromptTokens(args: CompletionArgs): number {
 
 /** Turns the accumulated stream state into the same shape as the JSON path. */
 function finishStream(state: StreamState, args: CompletionArgs): LLMResponse {
+  // A `</think>` that never arrived leaves text held back; release it so a lone
+  // `<` at the tail is not silently dropped.
+  const tail = state.think.flush();
+  if (tail.reasoning.length > 0) {
+    state.reasoning += tail.reasoning;
+    args.onReasoning?.(tail.reasoning, "think-tag");
+  }
+  if (tail.text.length > 0) {
+    state.text += tail.text;
+    args.onText?.(tail.text);
+  }
   const content: ContentBlock[] = [];
   if (state.text.length > 0) content.push({ type: "text", text: state.text });
   const toolCalls = state.tools.build();
@@ -504,11 +529,17 @@ export class OpenAICompatProvider implements Provider {
 
     const content: ContentBlock[] = [];
     if (choice.message.reasoning_content) {
-      args.onReasoning?.(choice.message.reasoning_content);
+      args.onReasoning?.(choice.message.reasoning_content, "reasoning_content");
     }
     if (choice.message.content) {
-      content.push({ type: "text", text: choice.message.content });
-      args.onText?.(choice.message.content);
+      // The JSON path can carry the same inline ` thinking` scratchpad; split it
+      // here so the reasoning block and the answer block stay separate.
+      const split = splitThinkTags(choice.message.content);
+      if (split.reasoning.length > 0) args.onReasoning?.(split.reasoning, "think-tag");
+      if (split.text.length > 0) {
+        content.push({ type: "text", text: split.text });
+        args.onText?.(split.text);
+      }
     }
     for (const call of choice.message.tool_calls ?? []) {
       content.push({

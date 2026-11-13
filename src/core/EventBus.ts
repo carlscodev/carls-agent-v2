@@ -1,4 +1,5 @@
 import type { DagSnapshot } from "./PersistentTaskDAG.js";
+import type { ReasoningSource } from "../types/llm.js";
 
 /**
  * A low-latency, strongly typed event bus.
@@ -109,7 +110,7 @@ export interface OperatorRuleEvent {
 export interface ReasoningDeltaEvent {
   text: string;
   /** Which provider field carried it, for the thinking panel's provenance line. */
-  source: "reasoning_content" | "reasoning" | "thinking" | "think-tag";
+  source: ReasoningSource;
   at: number;
 }
 

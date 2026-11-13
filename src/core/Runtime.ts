@@ -1,9 +1,9 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Message, Provider } from "../types/llm.js";
 import type { ToolContext } from "../types/tools.js";
 import type { AgentRunResult, Checkpoint } from "../types/agent.js";
-import type { Effort, PermissionMode, ResolvedConfig } from "../config/Config.js";
+import type { Effort, McpServerConfig, PermissionMode, ResolvedConfig } from "../config/Config.js";
 import { specFor } from "../config/Config.js";
 import { Logger } from "../utils/Logger.js";
 import { createProvider } from "../providers/ProviderBase.js";
@@ -391,41 +391,107 @@ export class Runtime {
   async connectMcpServers(): Promise<void> {
     const entries = Object.entries(this.config.mcpServers);
     for (const [name, serverConfig] of entries) {
-      let client: McpClient | undefined;
-      try {
-        client = new McpClient(name, serverConfig, this.logger, this.config.cwd);
-        await client.initialize();
-        const tools = await client.listTools();
-        let registered = 0;
-        for (const tool of client.asTools()) {
-          // Two servers exposing the same tool name must not take the whole
-          // startup down: keep the first and say which one was skipped.
-          if (this.registry.has(tool.name)) {
-            this.logger.warn(`MCP "${name}": tool ${tool.name} already exists; skipped.`);
-            continue;
-          }
-          this.registry.register(tool);
-          registered++;
-        }
-        const info = client.serverInfo();
-        this.mcpSummary.push({
-          name,
-          transport: client.transportKind,
-          tools: registered,
-          ...(info?.version !== undefined ? { version: info.version } : {}),
-        });
-        this.logger.info(`MCP "${name}" (${client.transportKind}): registered ${registered} tool(s).`);
-        this.mcpClients.push(client);
-      } catch (error) {
-        this.logger.warn(`MCP "${name}" unavailable: ${(error as Error).message}`);
-        await client?.close().catch(() => undefined);
-      }
+      await this.connectMcpServer(name, serverConfig);
     }
+  }
+
+  /**
+   * Connects one MCP server, registering its tools and its summary row. Used at
+   * startup for every configured server and by `/mcp add` at runtime, so both
+   * paths share the collision handling and the reconnect hook.
+   */
+  async connectMcpServer(name: string, serverConfig: McpServerConfig): Promise<{ ok: boolean; tools: number; error?: string }> {
+    let client: McpClient | undefined;
+    try {
+      client = new McpClient(name, serverConfig, this.logger, this.config.cwd);
+      client.onReconnect = () => {
+        this.registerMcpTools(name, client as McpClient, true);
+      };
+      await client.initialize();
+      await client.listTools();
+      const registered = this.registerMcpTools(name, client, false);
+      const info = client.serverInfo();
+      this.mcpSummary.push({
+        name,
+        transport: client.transportKind,
+        tools: registered,
+        ...(info?.version !== undefined ? { version: info.version } : {}),
+      });
+      this.logger.info(`MCP "${name}" (${client.transportKind}): registered ${registered} tool(s).`);
+      this.mcpClients.push(client);
+      return { ok: true, tools: registered };
+    } catch (error) {
+      this.logger.warn(`MCP "${name}" unavailable: ${(error as Error).message}`);
+      await client?.close().catch(() => undefined);
+      return { ok: false, tools: 0, error: (error as Error).message };
+    }
+  }
+
+  /**
+   * Registers a client's tool wrappers. `replace` is the reconnect path: the old
+   * wrappers point at a dead transport, so they are overwritten rather than
+   * skipped as duplicates.
+   */
+  private registerMcpTools(name: string, client: McpClient, replace: boolean): number {
+    let registered = 0;
+    for (const tool of client.asTools()) {
+      // Two servers exposing the same tool name must not take the whole startup
+      // down: keep the first and say which one was skipped.
+      if (this.registry.has(tool.name) && !replace) {
+        this.logger.warn(`MCP "${name}": tool ${tool.name} already exists; skipped.`);
+        continue;
+      }
+      this.registry.register(tool);
+      registered++;
+    }
+    const row = this.mcpSummary.find((entry) => entry.name === name);
+    if (row !== undefined) row.tools = registered;
+    return registered;
   }
 
   /** Connected MCP servers, for `/mcp` and `/doctor`. */
   mcpServers(): { name: string; transport: string; tools: number; version?: string }[] {
     return this.mcpSummary;
+  }
+
+  /** The live client for a server, for `/mcp test`. */
+  mcpClient(name: string): McpClient | undefined {
+    return this.mcpClients.find((client) => client.serverName === name);
+  }
+
+  /**
+   * Connects a server and persists it to `.carls/mcp.json`, so `/mcp add` is not
+   * lost on the next launch. The file is merged, not overwritten.
+   */
+  async addMcpServer(name: string, serverConfig: McpServerConfig): Promise<{ ok: boolean; tools: number; error?: string }> {
+    const result = await this.connectMcpServer(name, serverConfig);
+    if (result.ok) {
+      this.config.mcpServers[name] = serverConfig;
+      this.persistMcpServer(name, serverConfig);
+    }
+    return result;
+  }
+
+  private persistMcpServer(name: string, serverConfig: McpServerConfig): void {
+    try {
+      const dir = join(this.config.cwd, ".carls");
+      mkdirSync(dir, { recursive: true });
+      const path = join(dir, "mcp.json");
+      let file: Record<string, unknown> = {};
+      if (existsSync(path)) {
+        try {
+          file = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+        } catch {
+          file = {};
+        }
+      }
+      const servers = (file.mcpServers as Record<string, McpServerConfig> | undefined) ?? {};
+      servers[name] = serverConfig;
+      file.mcpServers = servers;
+      writeFileSync(path, `${JSON.stringify(file, null, 2)}\n`);
+    } catch (error) {
+      this.logger.warn(`Could not persist MCP server "${name}": ${(error as Error).message}`);
+    }
   }
 
   /** The registry whose schemas are advertised to the model (may be a subset). */

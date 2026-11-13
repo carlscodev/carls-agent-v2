@@ -42,6 +42,9 @@ export interface LLMResponse {
   usage: Usage;
 }
 
+/** Which provider field carried a reasoning delta, for the panel's provenance. */
+export type ReasoningSource = "reasoning_content" | "reasoning" | "thinking" | "think-tag";
+
 export interface CompletionArgs {
   system: string;
   messages: Message[];
@@ -55,9 +58,11 @@ export interface CompletionArgs {
   /**
    * Reasoning deltas from a thinking model (`reasoning_content`). Kept separate
    * from `onText` so the UI can render it as its own dim block instead of
-   * splicing the model's private scratchpad into the answer.
+   * splicing the model's private scratchpad into the answer. `source` names the
+   * field it came from so the panel can show its provenance; it defaults to
+   * `reasoning_content` when a provider does not distinguish.
    */
-  onReasoning?: (chunk: string) => void;
+  onReasoning?: (chunk: string, source?: ReasoningSource) => void;
   /**
    * Fires as soon as a `tool_use` block is complete in the stream, before the
    * turn ends. Read-only calls can start executing while the model is still
