@@ -207,3 +207,36 @@ blob makes it try to recreate files with the file editor and fail. And run the
 whole suite (`npm test`); the sandbox deny-list rejects the bare `rm -rf /`
 pattern that a full `vitest run` output can trip, so scoping to the new test file
 is a safe fallback.
+
+### Merging a `carlscodev` PR from the sandbox
+
+The fine-grained PAT can also merge. Prefer the async merge API over the
+synchronous endpoint (it is the one that supports merge queues and stacked PRs):
+
+```bash
+curl -s -X PUT \
+  "https://api.github.com/repos/carlscodev/carls-agent-v2/pulls/<n>/merge-async" \
+  -H "Authorization: Bearer ${GH_PAT}" \
+  -f merge_method=squash -f sha=<head_sha>
+# 202 -> details.uuid; poll until status is no longer "pending"
+curl -s "https://api.github.com/repos/carlscodev/carls-agent-v2/pulls/<n>/merge-async/<uuid>" \
+  -H "Authorization: Bearer ${GH_PAT}"
+```
+
+Final `status` is `merged`, `enqueued` or `failed`. Then fast-forward the local
+`main` (`git fetch origin main && git merge --ff-only origin/main`).
+
+`gh` authenticates as `BerunHaider` (read-only here), so its API calls report
+stale PR state — use `curl` with `${GH_PAT}` for anything on `carlscodev`.
+
+### Block-4 MCP surface
+
+`tests/mcp-config.test.ts` covers the MCP config/registry/wiring path that
+`smoke.test.ts` only exercises at the transport level: `${ENV}` expansion,
+`.carls/mcp.json` in both spellings, preset instantiation, `withoutMcp`, and
+`Runtime.connectMcpServer`/`addMcpServer` against a fake stdio server.
+
+Note when touching MCP tool names: they are namespaced per server
+(`mcp__<server>__<tool>`), so two different servers never collide; the
+duplicate-name skip in `registerMcpTools` only fires when the same server name
+is connected twice.
