@@ -88,6 +88,40 @@ export class AnimationTicker {
   }
 }
 
+/**
+ * One sub-agent as the fleet line needs it: its role, its goal, and the last
+ * thing it was seen doing.
+ */
+export interface AgentFleetEntry {
+  role: string;
+  goal: string;
+  /** Most recent progress message, e.g. `read_file src/core/Runtime.ts`. */
+  detail?: string;
+}
+
+/**
+ * Renders the live sub-agent fleet as a single row.
+ *
+ * Each child gets a spinner glyph and its goal; the goal shown is the one the
+ * operator can act on, so it is preferred over the raw tool call. The row is the
+ * only place the fleet is visible while it runs, so it must breathe: the glyph
+ * advances with `tick` exactly like the phase timeline.
+ */
+export function renderAgentFleet(agents: readonly AgentFleetEntry[], tick: number, width?: number): string {
+  const t = theme();
+  const spinner = SPINNER_FRAMES[tick % SPINNER_FRAMES.length] ?? "⠋";
+  const parts = agents.map((agent) => {
+    const glyph = t.paint(t.colors.accent, spinner);
+    const role = t.paint(t.colors.text.base, agent.role);
+    const detail = agent.detail !== undefined && agent.detail.length > 0 ? agent.detail : agent.goal;
+    return `${glyph} ${role} ${t.paint(t.colors.text.faint, truncate(detail, 42))}`;
+  });
+  const count = agents.length === 1 ? "1 subagente" : `${agents.length} subagentes`;
+  const head = t.paint(t.colors.text.faint, `⚙ ${count}`);
+  const line = [head, ...parts].join(t.paint(t.colors.border, " · "));
+  return width !== undefined ? truncate(line, width) : line;
+}
+
 export function formatElapsed(ms: number): string {
   const totalTenths = Math.max(0, Math.floor(ms / 100));
   if (totalTenths < 600) return `${(totalTenths / 10).toFixed(1)}s`;

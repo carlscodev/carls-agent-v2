@@ -2,6 +2,8 @@ import pc from "picocolors";
 import { terminalDimension, visibleWidth } from "./Text.js";
 import { FrameRenderer } from "./FrameRenderer.js";
 import { Viewport } from "./Viewport.js";
+import { claimMouse, parseMouseEvent, type MouseEvent } from "./Input.js";
+import { theme } from "./Theme.js";
 
 const ESC = "\u001b[";
 const SAVE = "\u001b7";
@@ -10,8 +12,8 @@ const ENTER_ALT = "\u001b[?1049h";
 const LEAVE_ALT = "\u001b[?1049l";
 const HIDE_CURSOR = "\u001b[?25l";
 const SHOW_CURSOR = "\u001b[?25h";
-const ENABLE_MOUSE = "\u001b[?1000h\u001b[?1002h\u001b[?1006h";
-const DISABLE_MOUSE = "\u001b[?1006l\u001b[?1002l\u001b[?1000l";
+const ENABLE_MOUSE = "\u001b[?1000h\u001b[?1006h";
+const DISABLE_MOUSE = "\u001b[?1006l\u001b[?1000l";
 const ENABLE_PASTE = "\u001b[?2004h";
 const DISABLE_PASTE = "\u001b[?2004l";
 const CLEAR = "\u001b[2J\u001b[H";
@@ -43,6 +45,8 @@ export interface ChromeLayout {
   phaseRow: number;
   /** Row holding the live thinking line, or 0 when not drawn. */
   thoughtRow: number;
+  /** Row holding the live sub-agent fleet line, or 0 when not drawn. */
+  agentsRow: number;
   /** Columns available to conversation lines, excluding the scrollbar. */
   contentWidth: number;
   /** 1-based divider column for the split inspector, or 0 when hidden. */
@@ -84,6 +88,8 @@ export class Chrome {
   /** Animated Gather -> Act -> Verify line drawn above the composer. */
   private phaseText: string | undefined;
   private thoughtText: string | undefined;
+  /** Live sub-agent fleet line, one row above the phase timeline while children run. */
+  private agentsText: string | undefined;
   /** Right-aligned overlay rows (toasts) composited over the top of the region. */
   private overlayLines: string[] = [];
   private readonly out: NodeJS.WriteStream;
@@ -95,8 +101,8 @@ export class Chrome {
   private readonly promptFrame: FrameRenderer;
   private scrollport: Viewport | undefined;
   private viewportTimer: NodeJS.Timeout | undefined;
-  private inputListener: ((chunk: Buffer | string) => void) | undefined;
-  private mouseBuffer = "";
+  private releaseMouse: (() => void) | undefined;
+  private mouseTracking = true;
   private suspended = false;
   /** True while a selector temporarily handed us back the normal buffer. */
   private altSuspended = false;
@@ -173,7 +179,7 @@ export class Chrome {
       this.altSuspended = false;
       this.installWriter();
       this.installMouse();
-      this.write(`${ENTER_ALT}${CLEAR}${ENABLE_MOUSE}${ENABLE_PASTE}${HIDE_CURSOR}`);
+      this.write(`${ENTER_ALT}${CLEAR}${this.mouseTracking ? ENABLE_MOUSE : ""}${ENABLE_PASTE}${HIDE_CURSOR}`);
       this.layout = this.computeLayout();
       this.applyFullscreenSize();
       this.drawHeader();
@@ -205,6 +211,7 @@ export class Chrome {
     composerRows: 1,
     phaseRow: 0,
     thoughtRow: 0,
+    agentsRow: 0,
     contentWidth: 79,
     dividerColumn: 0,
     sidebarWidth: 0,
@@ -247,15 +254,18 @@ export class Chrome {
       // two rows when idle. Reserve each only when there is something to draw.
       const phaseRows = this.phaseText !== undefined ? 1 : 0;
       const thoughtRows = this.thoughtText !== undefined ? 1 : 0;
-      const composerTop = Math.max(3, height - composerRows - phaseRows - thoughtRows);
+      const agentsRows = this.agentsText !== undefined ? 1 : 0;
+      const composerTop = Math.max(3, height - composerRows - phaseRows - thoughtRows - agentsRows);
       const phaseRow = phaseRows === 1 ? composerTop - 1 : 0;
       const thoughtRow = thoughtRows === 1 ? composerTop - 1 - phaseRows : 0;
+      const agentsRow = agentsRows === 1 ? composerTop - 1 - phaseRows - thoughtRows : 0;
       const promptRow = composerTop + 1;
-      const maxMenuRows = Math.max(0, composerTop - 3 - phaseRows - thoughtRows);
+      const maxMenuRows = Math.max(0, composerTop - 3 - phaseRows - thoughtRows - agentsRows);
       const menuRows = Math.min(this.menuLines.length, maxMenuRows);
-      // The menu sits above the phase and thought rows, not over them, or a
+      // The menu sits above the phase, thought and agent rows, not over them, or a
       // completion popup would paint on top of the live status lines.
-      const menuTop = menuRows > 0 ? composerTop - phaseRows - thoughtRows - menuRows : 0;
+      const menuTop =
+        menuRows > 0 ? composerTop - phaseRows - thoughtRows - agentsRows - menuRows : 0;
       const regionTop = 2;
       const regionBottom = Math.max(regionTop, (menuRows > 0 ? menuTop : composerTop) - 1);
       const sidebarWidth =
@@ -279,6 +289,7 @@ export class Chrome {
         composerRows,
         phaseRow,
         thoughtRow,
+        agentsRow,
         contentWidth,
         dividerColumn,
         sidebarWidth,
@@ -312,6 +323,7 @@ export class Chrome {
       composerRows: 1,
       phaseRow: 0,
       thoughtRow: 0,
+      agentsRow: 0,
       contentWidth: width,
       dividerColumn: 0,
       sidebarWidth: 0,
@@ -335,6 +347,7 @@ export class Chrome {
       this.drawStatus();
       this.drawThought();
       this.drawPhase();
+      this.drawAgents();
       if (this.lastPrompt !== undefined) {
         this.redrawPrompt();
       }
@@ -446,6 +459,7 @@ export class Chrome {
     this.drawStatus();
     this.drawThought();
     this.drawPhase();
+    this.drawAgents();
     if (this.lastPrompt !== undefined) {
       this.redrawPrompt();
     }
@@ -573,6 +587,7 @@ export class Chrome {
       if (had !== has) this.relayoutStatusRows();
       this.drawPhase();
       this.drawThought();
+      this.drawAgents();
       this.redrawPrompt();
       return;
     }
@@ -592,10 +607,31 @@ export class Chrome {
       if (had !== has) this.relayoutStatusRows();
       this.drawThought();
       this.drawPhase();
+      this.drawAgents();
       this.redrawPrompt();
       return;
     }
     this.drawThought();
+  }
+
+  /**
+   * Sets the live sub-agent fleet line drawn above the phase timeline. Passing
+   * undefined removes the row so an idle session reserves nothing for it.
+   */
+  setAgents(text: string | undefined): void {
+    const had = this.agentsText !== undefined;
+    const has = text !== undefined;
+    this.agentsText = text;
+    if (!this.enabled) return;
+    if (this.fullscreenMode) {
+      if (had !== has) this.relayoutStatusRows();
+      this.drawAgents();
+      this.drawThought();
+      this.drawPhase();
+      this.redrawPrompt();
+      return;
+    }
+    this.drawAgents();
   }
 
   /**
@@ -608,6 +644,16 @@ export class Chrome {
     this.applyFullscreenSize();
     this.renderViewport();
     this.drawMenu();
+  }
+
+  /** Paints the sub-agent fleet row, or clears it when nothing is running. */
+  private drawAgents(): void {
+    if (!this.enabled || this.suspended) return;
+    const { agentsRow } = this.layout;
+    if (agentsRow === 0) return;
+    const width = terminalDimension(this.out.columns);
+    const body = this.agentsText === undefined ? "" : fit(this.agentsText, width);
+    this.write(`${ESC}${agentsRow};1H${ESC}2K${body}`);
   }
 
   /** Paints the thinking row, or clears it when there is nothing to show. */
@@ -654,13 +700,17 @@ export class Chrome {
     if (!this.enabled) return;
     this.lastPrompt = { promptText, buffer, cursor, ...(placeholder !== undefined ? { placeholder } : {}) };
     const width = terminalDimension(this.out.columns);
+    // A visible caret sits exactly where the next character goes, so the operator
+    // can see the insertion point even when the terminal's own cursor is hidden
+    // or blinking out of step with the frame.
+    const caret = theme().paint(theme().colors.accent, "▏");
     if (!this.fullscreenMode) {
       const { promptRow } = this.layout;
       // An empty prompt shows what it accepts instead of a bare glyph; the cursor
       // still sits right after the prompt, so the placeholder never gets in the way.
       const ghost =
         buffer.length === 0 ? pc.gray(placeholder ?? "ask for a change, or / for commands") : "";
-      const line = fit(`${promptText}${buffer}${ghost}`, width);
+      const line = fit(`${promptText}${buffer}${caret}${ghost}`, width);
       this.promptFrame.render([line], { originRow: promptRow });
       const used = visibleWidth(promptText) + cursor;
       const column = Math.min(width - 1, used) + 1;
@@ -670,7 +720,7 @@ export class Chrome {
 
     const { composerTop, promptRow } = this.layout;
     if (width < 8) {
-      const line = fit(`${promptText}${buffer}`, width);
+      const line = fit(`${promptText}${buffer}${caret}`, width);
       this.promptFrame.render([line], { originRow: promptRow });
       this.write(`${ESC}${promptRow};${Math.min(width, visibleWidth(promptText) + cursor + 1)}H${SHOW_CURSOR}`);
       return;
@@ -681,7 +731,7 @@ export class Chrome {
     const innerWidth = Math.max(1, width - 4);
     const ghost =
       buffer.length === 0 ? pc.gray(placeholder ?? "ask for a change, or / for commands") : "";
-    const text = fit(`${promptText}${buffer}${ghost}`, innerWidth);
+    const text = fit(`${promptText}${buffer}${caret}${ghost}`, innerWidth);
     const top = `${border("╭─")}${border(label)}${border(topFill)}${border("╮")}`;
     const middle = `${border("│")} ${padAnsi(text, innerWidth)} ${border("│")}`;
     const bottom = border(`╰${"─".repeat(Math.max(0, width - 2))}╯`);
@@ -770,6 +820,8 @@ export class Chrome {
       this.drawMenu();
       this.drawStatus();
       this.drawPhase();
+      this.drawThought();
+      this.drawAgents();
       if (this.lastPrompt !== undefined) {
         this.redrawPrompt();
       }
@@ -803,7 +855,32 @@ export class Chrome {
     this.statusFrame.flush();
     this.menuFrame.flush();
     this.promptFrame.flush();
+    this.parkCaret();
     this.write(SHOW_CURSOR);
+  }
+
+  /**
+   * Leaves the physical cursor on the composer at the insertion point.
+   *
+   * The cursor is shown again at the end of a turn, so it must sit where the
+   * operator will type next. Parking it at the composer keeps it inside the
+   * scroll region's frame; parking it on the last conversation row would make the
+   * terminal scroll on the next newline and duplicate the footer.
+   */
+  parkCaret(): void {
+    if (!this.enabled) return;
+    const { promptRow } = this.layout;
+    const width = terminalDimension(this.out.columns);
+    if (!this.fullscreenMode) {
+      const column = this.lastPrompt !== undefined ? visibleWidth(this.lastPrompt.promptText) + this.lastPrompt.cursor + 1 : 1;
+      this.write(`${ESC}${promptRow};${Math.max(1, Math.min(width, column))}H`);
+      return;
+    }
+    const column =
+      this.lastPrompt !== undefined
+        ? Math.max(3, Math.min(width - 2, visibleWidth(this.lastPrompt.promptText) + this.lastPrompt.cursor + 3))
+        : 3;
+    this.write(`${ESC}${promptRow};${column}H`);
   }
 
   /** Scroll keys owned by the viewport rather than the prompt editor. */
@@ -836,17 +913,42 @@ export class Chrome {
     let handled = false;
     const pattern = /\u001b\[<(\d+);(\d+);(\d+)([Mm])/g;
     for (const match of sequence.matchAll(pattern)) {
-      const button = Number.parseInt(match[1] ?? "", 10);
-      if (button === 64) {
-        this.scrollport.scrollUp(3);
-        handled = true;
-      } else if (button === 65) {
-        this.scrollport.scrollDown(3);
+      if (this.handleMouseEvent(parseMouseEvent(match[1] ?? "0", match[2] ?? "1", match[3] ?? "1", match[4] ?? "M"))) {
         handled = true;
       }
     }
-    if (handled) this.renderViewport();
     return handled;
+  }
+
+  /**
+   * Applies one already-decoded report. Only the wheel scrolls; a click or a drag
+   * is a text-selection gesture the terminal owns, so it is dropped rather than
+   * moving the viewport.
+   */
+  handleMouseEvent(event: MouseEvent): boolean {
+    if (!this.enabled || !this.fullscreenMode || this.suspended || this.scrollport === undefined) return false;
+    if ((event.button & 0x40) !== 0x40) return false;
+    if (event.button === 64) this.scrollport.scrollUp(3);
+    else if (event.button === 65) this.scrollport.scrollDown(3);
+    else return false;
+    this.renderViewport();
+    return true;
+  }
+
+  /**
+   * Turns wheel tracking on or off. Drag tracking (`?1002h`) is never enabled:
+   * it is what stops the terminal from letting the operator select and copy text.
+   * With tracking off the wheel becomes plain arrow-key scrollback and the mouse
+   * is fully native; `Shift`+wheel keeps working either way.
+   */
+  setMouse(enabled: boolean): void {
+    this.mouseTracking = enabled;
+    if (!this.enabled || !this.fullscreenMode || this.suspended) return;
+    this.write(enabled ? ENABLE_MOUSE : DISABLE_MOUSE);
+  }
+
+  get mouseEnabled(): boolean {
+    return this.mouseTracking;
   }
 
   /** Restores every terminal mode, then leaves the alternate buffer. */
@@ -938,32 +1040,24 @@ export class Chrome {
   }
 
   private installMouse(): void {
-    const input = process.stdin as unknown as {
-      on?: (event: string, listener: (chunk: Buffer | string) => void) => void;
-    };
-    if (typeof input.on !== "function" || this.inputListener !== undefined) return;
-    this.inputListener = (chunk: Buffer | string): void => {
-      if (!this.fullscreenMode || this.suspended) return;
-      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-      this.mouseBuffer = `${this.mouseBuffer}${text}`;
-      this.handleMouse(this.mouseBuffer);
-      // Keep only a possible split SGR prefix; regular keys are ignored here.
-      const lastEscape = this.mouseBuffer.lastIndexOf("\u001b");
-      this.mouseBuffer = lastEscape >= 0 ? this.mouseBuffer.slice(lastEscape) : "";
-    };
-    input.on("data", this.inputListener);
+    if (this.releaseMouse !== undefined) return;
+    const input = process.stdin as unknown as NodeJS.ReadStream;
+    if (typeof input.on !== "function") return;
+    // The SGR filter lives in the shared input router, so readline never sees a
+    // raw report. Chrome only receives the decoded wheel notches.
+    this.releaseMouse = claimMouse(input, {
+      onWheel: (direction) => {
+        if (!this.fullscreenMode || this.suspended || this.scrollport === undefined) return;
+        if (direction === "up") this.scrollport.scrollUp(3);
+        else this.scrollport.scrollDown(3);
+        this.renderViewport();
+      },
+    });
   }
 
   private removeMouse(): void {
-    if (this.inputListener === undefined) return;
-    const input = process.stdin as unknown as {
-      off?: (event: string, listener: (chunk: Buffer | string) => void) => void;
-      removeListener?: (event: string, listener: (chunk: Buffer | string) => void) => void;
-    };
-    input.off?.("data", this.inputListener);
-    input.removeListener?.("data", this.inputListener);
-    this.inputListener = undefined;
-    this.mouseBuffer = "";
+    this.releaseMouse?.();
+    this.releaseMouse = undefined;
   }
 }
 

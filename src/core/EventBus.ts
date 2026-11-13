@@ -80,7 +80,9 @@ export interface SteerQueuedEvent {
 export interface SubAgentStatusEvent {
   role: string;
   goal: string;
-  phase: "start" | "done" | "failed";
+  phase: "start" | "progress" | "done" | "failed";
+  /** Last observed activity while `phase` is `progress`, e.g. `read_file`. */
+  detail?: string;
   ok?: boolean;
   at: number;
 }

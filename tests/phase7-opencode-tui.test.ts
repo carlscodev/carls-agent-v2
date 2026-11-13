@@ -58,7 +58,10 @@ describe("full-screen alternate buffer", () => {
     chrome.enable(["header"], { fullscreen: true, header: "carls v0.3.1 [AGENT: BUILD]" });
 
     expect(text(out)).toContain("\u001b[?1049h");
-    expect(text(out)).toContain("\u001b[?1000h\u001b[?1002h\u001b[?1006h");
+    // Wheel and click tracking only: `?1002h` (button-event drag tracking) is
+    // deliberately absent so the terminal keeps native text selection.
+    expect(text(out)).toContain("\u001b[?1000h\u001b[?1006h");
+    expect(text(out)).not.toContain("\u001b[?1002h");
     expect(text(out)).toContain("\u001b[?2004h");
     expect(text(out)).toContain("\u001b[?25l");
 

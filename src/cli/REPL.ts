@@ -29,7 +29,9 @@ import { FrameCoalescer } from "./FrameRenderer.js";
 import {
   AnimationTicker,
   SPINNER_FRAMES,
+  renderAgentFleet,
   renderPhaseTimeline,
+  type AgentFleetEntry,
   type PhaseCell,
   type PhaseStatus,
   type PhaseTimelineState,
@@ -187,6 +189,10 @@ export async function runRepl(options: SessionOptions): Promise<number> {
    * session does not reserve the row.
    */
   let phase: PhaseTimelineState | undefined;
+  /** Frame counter for the live sub-agent fleet row. */
+  let agentsTick = 0;
+  /** Sub-agents currently running, keyed by `role:goal`, painted as one live row. */
+  const agentFleet = new Map<string, AgentFleetEntry>();
   /** Floating notifications in the top-right corner. */
   const toasts = new ToastManager({
     onChange: () => {
@@ -450,10 +456,36 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   // Every tab has its own runtime and bus, so the subscription is rebound on a
   // tab switch rather than pointing at the first tab's bus forever.
   let detachToasts = attachToastBus(runtime.events, toasts);
+  /**
+   * Live sub-agent fleet: `start` adds a child, `progress` updates its detail and
+   * `done`/`failed` removes it. Painted on the same ticker as the phase line, so
+   * the row breathes while children run and disappears when the last one settles.
+   */
+  const applySubAgentStatus = (event: {
+    role: string;
+    goal: string;
+    phase: "start" | "progress" | "done" | "failed";
+    detail?: string | undefined;
+  }): void => {
+    const key = `${event.role}:${event.goal}`;
+    if (event.phase === "start") {
+      agentFleet.set(key, { role: event.role, goal: event.goal });
+    } else if (event.phase === "progress") {
+      const entry = agentFleet.get(key);
+      if (entry === undefined || event.detail === undefined) return;
+      agentFleet.set(key, { ...entry, detail: event.detail });
+    } else {
+      agentFleet.delete(key);
+    }
+    if (fullscreen) paintAgents();
+  };
+  let detachSubAgents = runtime.events.on("subagent.status", applySubAgentStatus);
   const bindToasts = (): void => {
     detachToasts();
+    detachSubAgents();
     toasts.dispose();
     detachToasts = attachToastBus(runtime.events, toasts);
+    detachSubAgents = runtime.events.on("subagent.status", applySubAgentStatus);
   };
 
   if (useChrome) chrome.setStatus(statusLine());
@@ -661,10 +693,13 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       ticker = new AnimationTicker(() => {
         showStatus();
         // One clock drives everything that must breathe: the footer segment, the
-        // phase line and the write cursor. When the turn ends the ticker stops,
-        // so all three freeze together instead of one timer per animation.
+        // phase line, the sub-agent fleet and the write cursor. When the turn ends
+        // the ticker stops, so all of them freeze together instead of one timer
+        // per animation.
         tickPhase();
         tickThought();
+        agentsTick += 1;
+        if (agentFleet.size > 0) paintAgents();
         cursorTick += 1;
         if (streamMarkdown !== undefined) streamMarkdown.setCursor(streamCursor(cursorTick, true) ?? "");
       }, 80);
@@ -732,6 +767,27 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   const clearPhase = (): void => {
     phase = undefined;
     if (useChrome) chrome.setPhase(undefined);
+  };
+
+  /**
+   * Repaints the live sub-agent fleet row. The row is rebuilt from the map on
+   * every frame so a child that finished frees its slot immediately, and the
+   * spinner glyph advances with `agentsTick` while any child is still running.
+   */
+  const paintAgents = (): void => {
+    if (!useChrome) return;
+    if (agentFleet.size === 0) {
+      chrome.setAgents(undefined);
+      return;
+    }
+    chrome.setAgents(
+      renderAgentFleet([...agentFleet.values()], agentsTick, terminalDimension(process.stderr.columns, 80)),
+    );
+  };
+
+  const clearAgents = (): void => {
+    agentFleet.clear();
+    if (useChrome) chrome.setAgents(undefined);
   };
 
   /**
@@ -1120,6 +1176,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       stopTicker();
       clearPhase();
       clearThought();
+      clearAgents();
       reasoningTail = "";
       streamTelemetry = undefined;
       if (useChrome) {
