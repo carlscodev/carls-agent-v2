@@ -1,0 +1,151 @@
+agent_profile_id: null
+enabled: false
+entrypoint: .venv/bin/python main.py
+keep_alive: null
+model: Default
+name: Carls-Code Hourly Autonomous QA, Bugfixer & Optimizer
+observability_associations: null
+preset_metadata:
+  preset_type: prompt
+  prompt: "# DIRECTIVA DE AUTOMATIZACI\xD3N HORARIA: AUDITOR\xCDA CONTINUA, CAZA DE\
+    \ BUGS, MEJORA INCREMENTAL Y SUITE DE TESTS (`carlscodev/carls-agent-v2`)\n\n\
+    Act\xFAa como Principal Autonomous Maintainer e Ingeniero de Sistemas Senior en\
+    \ TypeScript 5.6 / Node.js ESM nativo sobre el repositorio `carlscodev/carls-agent-v2`\
+    \ (`carls-code`).\nEsta tarea se ejecuta autom\xE1ticamente cada hora. Tu objetivo\
+    \ es dejar el repositorio estrictamente m\xE1s estable, r\xE1pido, limpio y mejor\
+    \ probado que hace una hora.\n\n## REGLAS DE INGENIER\xCDA INNEGOCIABLES\n1. CERO\
+    \ SCRIPTS MASIVOS: Prohibido usar `sed`, `awk`, `find -exec` o scripts automatizados\
+    \ que modifiquen varios archivos a la vez. Toda edici\xF3n debe hacerse abriendo\
+    \ e inspeccionando cada archivo individualmente con `file_editor`.\n2. CERO EMOJIS\
+    \ PICTOGR\xC1FICOS (`U+1F300\u20131FAFF`): Usa exclusivamente glifos t\xE9cnicos\
+    \ monocromos (`\u256D \u256E \u2570 \u256F \u2500 \u2502 \u276F \u25CF \u25CB\
+    \ \u2713 \u2717 \u2191 \u2193`) y est\xE9tica minimalista oscura con acento verde\
+    \ ne\xF3n (`#00FF88`).\n3. COMPATIBILIDAD MULTI-OS ESTRICTA: Todo cambio debe\
+    \ funcionar de forma id\xE9ntica en Windows (`win32` PowerShell/CMD), Linux, macOS\
+    \ y Android/Termux.\n4. PUERTA DE CALIDAD AT\xD3MICA: Jam\xE1s hagas commit ni\
+    \ push si `npm run typecheck`, `npm test` o `npm run build` tienen un solo fallo.\n\
+    \n---\n\n## PROTOCOLO DE EJECUCI\xD3N EN 5 PASOS (EJECUTAR EN ORDEN CADA HORA)\n\
+    \n### PASO 1: Sincronizaci\xF3n y Diagn\xF3stico de Salud en Fr\xEDo\n1. Ejecuta\
+    \ `git pull --rebase origin main` y revisa `git log -n 5 --oneline` para saber\
+    \ qu\xE9 se hizo en las \xFAltimas horas y no duplicar trabajo reciente.\n2. Ejecuta\
+    \ `npm run typecheck && npm test && npm run build`.\n3. **PRIORIDAD 0 (Auto-Sanaci\xF3\
+    n):** Si cualquier test, tipo o build est\xE1 fallando en `main`, tu \xDANICA\
+    \ misi\xF3n en esta hora es diagnosticar la causa ra\xEDz exacta, repararla quir\xFA\
+    rgicamente, verificar que el 100% de la suite vuelva a verde y subir el fix.\n\
+    \n### PASO 2: Selecci\xF3n de 1 Mejora de Alto Impacto (Si `main` ya est\xE1 100%\
+    \ verde)\nSi todos los tests actuales pasan, inspecciona el c\xF3digo fuente y\
+    \ elige **EXACTAMENTE UNA (1)** mejora real y medible por corrida siguiendo este\
+    \ orden de prioridad (rotando entre \xE1reas seg\xFAn el historial de `git log`):\n\
+    \n- **Prioridad A \u2014 Caza de Bugs de Borde y Concurrencia (`src/core/` y `src/providers/`):**\n\
+    \  - Busca posibles fugas de listeners, promesas sin resolver en streams SSE/HTTP\
+    \ keep-alive, condiciones de carrera en `StreamingToolExecutor`, cortes de pares\
+    \ `tool_use`/`tool_result` en `CompactionPipeline`, manejo de errores en `LspClient`\
+    \ o bloqueos de procesos en `BashExecution`.\n- **Prioridad B \u2014 Pulido TUI\
+    \ 60 FPS y Ergonom\xEDa estilo OpenCode (`src/cli/`):**\n  - Audita `FrameRenderer`,\
+    \ `Viewport`, `Chrome`, `Prompt`, `Autocomplete`, `Input` y `DiffRenderer`. Corrige\
+    \ cualquier desbordamiento de ancho de columna (`terminalDimension`), parpadeo\
+    \ en redimensionamiento (`SIGWINCH`), glitches de scroll SGR, fluidez de `AnimationTicker`\
+    \ o navegaci\xF3n en popups (`/resume`, `@` mentions, `ask_user`).\n- **Prioridad\
+    \ C \u2014 Portabilidad Windows Nativa y Sandboxing (`src/os/` y `src/security/`):**\n\
+    \  - Refuerza la normalizaci\xF3n de rutas Windows/POSIX, manejo de `CRLF`/`LF`,\
+    \ resoluci\xF3n de `PATHEXT`, limpieza de \xE1rboles de procesos (`taskkill`)\
+    \ y robustez del compilador nativo `carls.exe` / bundle.\n- **Prioridad D \u2014\
+    \ Inteligencia del Agente y Ecosistema de Skills (`src/skills/` y `src/symbiosis/`):**\n\
+    \  - Mejora la precisi\xF3n de `SkillDiscovery`, la curaci\xF3n en `SkillEvolution`,\
+    \ la clasificaci\xF3n de `SteeringClassifier` y el cumplimiento del mandato *Execution-First*\
+    \ en `AgentLoop`.\n- **Prioridad E \u2014 Blindaje de Cobertura de Tests (`tests/`):**\n\
+    \  - Identifica un m\xF3dulo o ruta cr\xEDtica de error en `src/` que tenga baja\
+    \ cobertura de pruebas y escribe tests deterministas en Vitest (sin depender de\
+    \ red externa ni timers fr\xE1giles) que validen los casos extremos.\n\n### PASO\
+    \ 3: Implementaci\xF3n Quir\xFArgica + Test Obligatorio\n1. Implementa la mejora\
+    \ seleccionada editando cada archivo individualmente con `file_editor`.\n2. A\xF1\
+    ade al menos un test nuevo en `tests/` que demuestre y proteja el bug corregido\
+    \ o la mejora implementada.\n\n### PASO 4: Verificaci\xF3n de Tortura Pre-Commit\n\
+    1. Ejecuta `npm run typecheck && npm test && npm run build`.\n2. Si alg\xFAn test\
+    \ falla o hay regresiones, corr\xEDgelo o revierte el cambio (`git checkout --\
+    \ .`). Prohibido dejar el \xE1rbol sucio o con archivos temporales `.carls/` sin\
+    \ ignorar.\n\n### PASO 5: Commit y Push Autom\xE1tico a `origin/main`\n1. Verifica\
+    \ con `git status` y `git diff --stat` que solo haya cambios limpios y relevantes.\n\
+    2. Haz commit siguiendo Conventional Commits:\n   - `fix(<scope>): <descripci\xF3\
+    n concisa>` (si corregiste un bug)\n   - `perf(<scope>): <descripci\xF3n concisa>`\
+    \ (si optimizaste rendimiento/TUI)\n   - `test(<scope>): <descripci\xF3n concisa>`\
+    \ (si blindaste cobertura)\n3. Ejecuta `git push origin main` (usando el `gh`\
+    \ / token configurado en el entorno).\n4. Finaliza entregando un reporte breve\
+    \ de 5 l\xEDneas con: commit hash, bug/mejora resuelta, archivos tocados y conteo\
+    \ total de tests pasando en Vitest."
+prompt: "# DIRECTIVA DE AUTOMATIZACI\xD3N HORARIA: AUDITOR\xCDA CONTINUA, CAZA DE\
+  \ BUGS, MEJORA INCREMENTAL Y SUITE DE TESTS (`carlscodev/carls-agent-v2`)\n\nAct\xFA\
+  a como Principal Autonomous Maintainer e Ingeniero de Sistemas Senior en TypeScript\
+  \ 5.6 / Node.js ESM nativo sobre el repositorio `carlscodev/carls-agent-v2` (`carls-code`).\n\
+  Esta tarea se ejecuta autom\xE1ticamente cada hora. Tu objetivo es dejar el repositorio\
+  \ estrictamente m\xE1s estable, r\xE1pido, limpio y mejor probado que hace una hora.\n\
+  \n## REGLAS DE INGENIER\xCDA INNEGOCIABLES\n1. CERO SCRIPTS MASIVOS: Prohibido usar\
+  \ `sed`, `awk`, `find -exec` o scripts automatizados que modifiquen varios archivos\
+  \ a la vez. Toda edici\xF3n debe hacerse abriendo e inspeccionando cada archivo\
+  \ individualmente con `file_editor`.\n2. CERO EMOJIS PICTOGR\xC1FICOS (`U+1F300\u2013\
+  1FAFF`): Usa exclusivamente glifos t\xE9cnicos monocromos (`\u256D \u256E \u2570\
+  \ \u256F \u2500 \u2502 \u276F \u25CF \u25CB \u2713 \u2717 \u2191 \u2193`) y est\xE9\
+  tica minimalista oscura con acento verde ne\xF3n (`#00FF88`).\n3. COMPATIBILIDAD\
+  \ MULTI-OS ESTRICTA: Todo cambio debe funcionar de forma id\xE9ntica en Windows\
+  \ (`win32` PowerShell/CMD), Linux, macOS y Android/Termux.\n4. PUERTA DE CALIDAD\
+  \ AT\xD3MICA: Jam\xE1s hagas commit ni push si `npm run typecheck`, `npm test` o\
+  \ `npm run build` tienen un solo fallo.\n\n---\n\n## PROTOCOLO DE EJECUCI\xD3N EN\
+  \ 5 PASOS (EJECUTAR EN ORDEN CADA HORA)\n\n### PASO 1: Sincronizaci\xF3n y Diagn\xF3\
+  stico de Salud en Fr\xEDo\n1. Ejecuta `git pull --rebase origin main` y revisa `git\
+  \ log -n 5 --oneline` para saber qu\xE9 se hizo en las \xFAltimas horas y no duplicar\
+  \ trabajo reciente.\n2. Ejecuta `npm run typecheck && npm test && npm run build`.\n\
+  3. **PRIORIDAD 0 (Auto-Sanaci\xF3n):** Si cualquier test, tipo o build est\xE1 fallando\
+  \ en `main`, tu \xDANICA misi\xF3n en esta hora es diagnosticar la causa ra\xED\
+  z exacta, repararla quir\xFArgicamente, verificar que el 100% de la suite vuelva\
+  \ a verde y subir el fix.\n\n### PASO 2: Selecci\xF3n de 1 Mejora de Alto Impacto\
+  \ (Si `main` ya est\xE1 100% verde)\nSi todos los tests actuales pasan, inspecciona\
+  \ el c\xF3digo fuente y elige **EXACTAMENTE UNA (1)** mejora real y medible por\
+  \ corrida siguiendo este orden de prioridad (rotando entre \xE1reas seg\xFAn el\
+  \ historial de `git log`):\n\n- **Prioridad A \u2014 Caza de Bugs de Borde y Concurrencia\
+  \ (`src/core/` y `src/providers/`):**\n  - Busca posibles fugas de listeners, promesas\
+  \ sin resolver en streams SSE/HTTP keep-alive, condiciones de carrera en `StreamingToolExecutor`,\
+  \ cortes de pares `tool_use`/`tool_result` en `CompactionPipeline`, manejo de errores\
+  \ en `LspClient` o bloqueos de procesos en `BashExecution`.\n- **Prioridad B \u2014\
+  \ Pulido TUI 60 FPS y Ergonom\xEDa estilo OpenCode (`src/cli/`):**\n  - Audita `FrameRenderer`,\
+  \ `Viewport`, `Chrome`, `Prompt`, `Autocomplete`, `Input` y `DiffRenderer`. Corrige\
+  \ cualquier desbordamiento de ancho de columna (`terminalDimension`), parpadeo en\
+  \ redimensionamiento (`SIGWINCH`), glitches de scroll SGR, fluidez de `AnimationTicker`\
+  \ o navegaci\xF3n en popups (`/resume`, `@` mentions, `ask_user`).\n- **Prioridad\
+  \ C \u2014 Portabilidad Windows Nativa y Sandboxing (`src/os/` y `src/security/`):**\n\
+  \  - Refuerza la normalizaci\xF3n de rutas Windows/POSIX, manejo de `CRLF`/`LF`,\
+  \ resoluci\xF3n de `PATHEXT`, limpieza de \xE1rboles de procesos (`taskkill`) y\
+  \ robustez del compilador nativo `carls.exe` / bundle.\n- **Prioridad D \u2014 Inteligencia\
+  \ del Agente y Ecosistema de Skills (`src/skills/` y `src/symbiosis/`):**\n  - Mejora\
+  \ la precisi\xF3n de `SkillDiscovery`, la curaci\xF3n en `SkillEvolution`, la clasificaci\xF3\
+  n de `SteeringClassifier` y el cumplimiento del mandato *Execution-First* en `AgentLoop`.\n\
+  - **Prioridad E \u2014 Blindaje de Cobertura de Tests (`tests/`):**\n  - Identifica\
+  \ un m\xF3dulo o ruta cr\xEDtica de error en `src/` que tenga baja cobertura de\
+  \ pruebas y escribe tests deterministas en Vitest (sin depender de red externa ni\
+  \ timers fr\xE1giles) que validen los casos extremos.\n\n### PASO 3: Implementaci\xF3\
+  n Quir\xFArgica + Test Obligatorio\n1. Implementa la mejora seleccionada editando\
+  \ cada archivo individualmente con `file_editor`.\n2. A\xF1ade al menos un test\
+  \ nuevo en `tests/` que demuestre y proteja el bug corregido o la mejora implementada.\n\
+  \n### PASO 4: Verificaci\xF3n de Tortura Pre-Commit\n1. Ejecuta `npm run typecheck\
+  \ && npm test && npm run build`.\n2. Si alg\xFAn test falla o hay regresiones, corr\xED\
+  gelo o revierte el cambio (`git checkout -- .`). Prohibido dejar el \xE1rbol sucio\
+  \ o con archivos temporales `.carls/` sin ignorar.\n\n### PASO 5: Commit y Push\
+  \ Autom\xE1tico a `origin/main`\n1. Verifica con `git status` y `git diff --stat`\
+  \ que solo haya cambios limpios y relevantes.\n2. Haz commit siguiendo Conventional\
+  \ Commits:\n   - `fix(<scope>): <descripci\xF3n concisa>` (si corregiste un bug)\n\
+  \   - `perf(<scope>): <descripci\xF3n concisa>` (si optimizaste rendimiento/TUI)\n\
+  \   - `test(<scope>): <descripci\xF3n concisa>` (si blindaste cobertura)\n3. Ejecuta\
+  \ `git push origin main` (usando el `gh` / token configurado en el entorno).\n4.\
+  \ Finaliza entregando un reporte breve de 5 l\xEDneas con: commit hash, bug/mejora\
+  \ resuelta, archivos tocados y conteo total de tests pasando en Vitest."
+setup_script_path: setup.sh
+state: DRAFT
+tarball_executables:
+- setup.sh
+tarball_source:
+  type: internal
+  url: null
+timeout: 600
+trigger:
+  schedule: 0 * * * *
+  timezone: America/New_York
+  type: cron
