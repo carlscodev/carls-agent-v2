@@ -331,6 +331,20 @@ export function nearest256(color: Rgb): number {
 /** Process-wide theme, so view modules do not thread it through every call. */
 let active = Theme.detect();
 
+/**
+ * Linear interpolation between two RGB triples, `t` clamped to `[0,1]`. Used by
+ * the animation modules to fade a glyph between two semantic tokens without
+ * hardcoding intermediate hex values at every call site.
+ */
+export function mixRgb(from: Rgb, to: Rgb, t: number): Rgb {
+  const ratio = Math.max(0, Math.min(1, t));
+  return {
+    r: Math.round(from.r + (to.r - from.r) * ratio),
+    g: Math.round(from.g + (to.g - from.g) * ratio),
+    b: Math.round(from.b + (to.b - from.b) * ratio),
+  };
+}
+
 export function theme(): Theme {
   return active;
 }

@@ -26,7 +26,18 @@ import { TabManager, shortTitle, type Tab } from "./Tabs.js";
 import { PromptWizardBox, wizardBoxHeight } from "./PromptWizardBox.js";
 import { autoResolveAskUser, type AskUserHandler, type AskUserPayload, type AskUserResult } from "../types/askUser.js";
 import { FrameCoalescer } from "./FrameRenderer.js";
-import { AnimationTicker } from "./AnimationTicker.js";
+import {
+  AnimationTicker,
+  SPINNER_FRAMES,
+  renderPhaseTimeline,
+  type PhaseCell,
+  type PhaseStatus,
+  type PhaseTimelineState,
+} from "./AnimationTicker.js";
+import { SmoothStreamRenderer, streamCursor } from "./SmoothStream.js";
+import { ToolBatch, isGroupable, toolDetail, toolSummary } from "./ToolCards.js";
+import { RateWindow, renderContextCell, renderRateCell } from "./StatusHud.js";
+import { ToastManager, attachToastBus } from "./Toast.js";
 import {
   headerBar,
   homeIndexHint,
@@ -36,7 +47,7 @@ import {
   toolResultCard,
   userBlock,
 } from "./MessageBlocks.js";
-import { formatDuration, truncate } from "./Text.js";
+import { formatDuration, terminalDimension, truncate } from "./Text.js";
 import { samePath } from "../utils/platform.js";
 import { restoreTerminal, writeSessionBanner } from "./SessionBanner.js";
 
@@ -161,6 +172,24 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   let activity: { label: string; startedAt: number; step?: number; maxSteps?: number } | undefined;
   /** Rough live generation rate for the footer while text streams. */
   let streamTelemetry: { chars: number; startedAt: number } | undefined;
+  /** Rolling token-rate samples feeding the footer sparkline. */
+  const rateWindow = new RateWindow(24);
+  /** The markdown sink of the turn in flight, so the ticker can drive its cursor. */
+  let streamMarkdown: MarkdownRenderer | undefined;
+  /** Frame counter for the breathing write cursor. */
+  let cursorTick = 0;
+  /**
+   * Gather -> Act -> Verify state for the phase line above the composer. Lives
+   * only for the duration of a turn; cleared in the finally block so an idle
+   * session does not reserve the row.
+   */
+  let phase: PhaseTimelineState | undefined;
+  /** Floating notifications in the top-right corner. */
+  const toasts = new ToastManager({
+    onChange: () => {
+      if (fullscreen) paintToasts();
+    },
+  });
   /** Set when the operator asked to leave; the finally block prints the resume banner. */
   let shutdownRequested = false;
 
@@ -288,9 +317,6 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   const statusLine = (): string => {
     const t = theme();
     const ratio = runtime.contextManager.usedRatio(runtime.history);
-    const used = Math.round(ratio * runtime.config.contextWindow);
-    const paint =
-      ratio > 0.85 ? t.colors.feedback.error : ratio > 0.7 ? t.colors.feedback.warning : t.colors.text.faint;
     const home = homedir();
     const cwd =
       home.length > 1 && runtime.config.cwd.startsWith(home)
@@ -325,8 +351,8 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       parts.push(t.paint(t.colors.text.muted, `DAG:${dag.completed}/${dag.nodes.length} ${state}`));
     }
 
-    const percent = Math.round(ratio * 100);
-    parts.push(t.paint(paint, `CTX:${percent}% ${tokenCount(used)}/${tokenCount(runtime.config.contextWindow)}`));
+    const used = Math.round(ratio * runtime.config.contextWindow);
+    parts.push(renderContextCell(ratio, 6, `${tokenCount(used)}/${tokenCount(runtime.config.contextWindow)}`));
 
     const cacheRead = runtime.cost.snapshot().cacheReadTokens;
     if (cacheRead > 0) {
@@ -355,7 +381,8 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       const seconds = (Date.now() - streamTelemetry.startedAt) / 1000;
       if (seconds >= 0.3) {
         const rate = Math.max(1, Math.round(streamTelemetry.chars / 4 / seconds));
-        parts.push(t.paint(t.colors.feedback.success, `${rate} tok/s`));
+        rateWindow.push(rate);
+        parts.push(renderRateCell(rateWindow.last(5)));
       }
     }
     if (runtime.steeringDepth > 0) {
@@ -384,6 +411,28 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       contextWindow: runtime.config.contextWindow,
       ...(runtime.config.effort !== undefined ? { effort: runtime.config.effort } : {}),
     });
+  };
+
+  /**
+   * Paints the toast overlay in the top-right corner. Only the full-screen layout
+   * has a fixed region to composite over; inline mode has no stable row, so it
+   * skips the overlay rather than corrupting the transcript.
+   */
+  const paintToasts = (): void => {
+    if (!useChrome || !fullscreen) return;
+    const width = terminalDimension(process.stderr.columns, 80);
+    chrome.setOverlay(toasts.render(width));
+  };
+
+  // The event bus is the only place the REPL learns that a skill, checkpoint or
+  // compaction happened, so the toasts are wired to it instead of to callbacks.
+  // Every tab has its own runtime and bus, so the subscription is rebound on a
+  // tab switch rather than pointing at the first tab's bus forever.
+  let detachToasts = attachToastBus(runtime.events, toasts);
+  const bindToasts = (): void => {
+    detachToasts();
+    toasts.dispose();
+    detachToasts = attachToastBus(runtime.events, toasts);
   };
 
   if (useChrome) chrome.setStatus(statusLine());
@@ -435,6 +484,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   const activateTab = (index: number): void => {
     tabs.select(index);
     runtime = tabs.current().payload;
+    bindToasts();
     showTabs();
     refreshHeader();
     chrome.setComposerMode(runtime.config.mode);
@@ -460,6 +510,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     const closing = tabs.current();
     tabs.close(index);
     runtime = tabs.current().payload;
+    bindToasts();
     showTabs();
     await closing.payload.close();
     if (useChrome) chrome.writeRegion(`${theme().paint(theme().colors.text.faint, `— closed tab ${index + 1} —`)}\n`);
@@ -586,7 +637,15 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   const beginActivity = (label: string): void => {
     activity = { label, startedAt: Date.now() };
     if (useChrome && ticker === undefined) {
-      ticker = new AnimationTicker(() => showStatus(), 80);
+      ticker = new AnimationTicker(() => {
+        showStatus();
+        // One clock drives everything that must breathe: the footer segment, the
+        // phase line and the write cursor. When the turn ends the ticker stops,
+        // so all three freeze together instead of one timer per animation.
+        tickPhase();
+        cursorTick += 1;
+        if (streamMarkdown !== undefined) streamMarkdown.setCursor(streamCursor(cursorTick, true) ?? "");
+      }, 80);
       ticker.start();
     }
     showStatus();
@@ -611,11 +670,55 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     ticker = undefined;
   };
 
+  /** A fresh Gather -> Act -> Verify state for the turn about to run. */
+  const resetPhase = (): void => {
+    phase = {
+      think: { status: "running", label: "THINKING" },
+      act: { status: "pending", label: "TOOLS" },
+      verify: { status: "pending", label: "VERIFY" },
+      tick: 0,
+    };
+  };
+
+  const setPhaseCell = (
+    key: "think" | "act" | "verify",
+    status: PhaseStatus,
+    label: string,
+    elapsed?: string,
+  ): void => {
+    if (phase === undefined) return;
+    const cell: PhaseCell = elapsed !== undefined ? { status, label, elapsed } : { status, label };
+    phase = { ...phase, [key]: cell };
+  };
+
+  /** Advances the frame counter and repaints the phase row. */
+  const tickPhase = (): void => {
+    if (phase === undefined) return;
+    phase = { ...phase, tick: phase.tick + 1 };
+    paintPhase();
+  };
+
+  const paintPhase = (): void => {
+    if (!useChrome) return;
+    if (phase === undefined) {
+      chrome.setPhase(undefined);
+      return;
+    }
+    chrome.setPhase(renderPhaseTimeline(phase, terminalDimension(process.stderr.columns, 80)));
+  };
+
+  const clearPhase = (): void => {
+    phase = undefined;
+    if (useChrome) chrome.setPhase(undefined);
+  };
+
   const runGoal = async (goal: string): Promise<void> => {
     busy = true;
     interruptCount = 0;
     activeAbort = new AbortController();
     streamTelemetry = undefined;
+    rateWindow.clear();
+    resetPhase();
     const turnStartedAt = Date.now();
     let turnSteps = 0;
     // The footer carries a live activity segment while a turn runs, so the
@@ -632,13 +735,58 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     // Full-screen owns a virtual viewport: complete lines only, no carriage-return
     // live tail that would append itself as history.
     markdown.setLiveTail(!fullscreen);
+    streamMarkdown = markdown;
+    // In an interactive terminal the coalesced deltas are handed to the smoother
+    // instead of straight to the markdown writer, so a bursty model types at a
+    // steady pace. A pipe (or `-p`) bypasses it entirely: `smooth:false` forwards
+    // every chunk untouched and never creates a timer.
+    const smoothStream = new SmoothStreamRenderer({
+      smooth: interactive,
+      onDrain: (text) => markdown.push(text),
+    });
     let streamed = false;
     let reasoningStarted = false;
     let reasoningStartedAt = 0;
     const activeToolDetails = new Map<string, string>();
+    // Read-only calls in one step are collected here and drawn as a single tree
+    // instead of one card each, so exploring a workspace does not bury the answer.
+    // A mutating tool is never grouped: it flushes the batch and gets its own card.
+    let batch: ToolBatch | undefined;
+    const batchRunning = new Set<string>();
+    const drawBatch = (): void => {
+      if (batch === undefined || !fullscreen) return;
+      const spinner = SPINNER_FRAMES[Math.floor(cursorTick / 2) % SPINNER_FRAMES.length] ?? "⠋";
+      chrome.writeBlock(batch.render({ width: chrome.current().contentWidth, spinner }));
+    };
+    const flushBatch = (): void => {
+      if (batch === undefined) return;
+      drawBatch();
+      batch = undefined;
+      batchRunning.clear();
+    };
+    const toolStart = (id: string, name: string, input: unknown): void => {
+      // A mutating tool is never grouped: it closes the current tree and gets its
+      // own card, because it changed the workspace and deserves the attention.
+      if (!isGroupable(name)) {
+        flushBatch();
+        return;
+      }
+      if (!fullscreen) return;
+      if (batch === undefined) batch = new ToolBatch();
+      batch.add({ id, name, detail: toolDetail(name, input), summary: "…", state: "running" });
+      batchRunning.add(id);
+      drawBatch();
+    };
+    const toolDone = (id: string, name: string, ok: boolean, durationMs: number): void => {
+      if (batch === undefined || !batchRunning.has(id)) return;
+      batchRunning.delete(id);
+      batch.complete(id, ok ? "ok" : "failed", durationMs, toolSummary(name, durationMs));
+      drawBatch();
+      if (batch.settled) flushBatch();
+    };
     // Streaming deltas arrive per token; both renderers are batched to one write
     // per 16 ms frame so a fast model cannot saturate the PTY.
-    const reasoningFrames = new FrameCoalescer((batch) => {
+    const reasoningFrames = new FrameCoalescer((chunk) => {
       // Thinking models stream their scratchpad before the answer. Show it dim
       // and clearly separated, so it never reads as the final response.
       if (!reasoningStarted) {
@@ -654,11 +802,11 @@ export async function runRepl(options: SessionOptions): Promise<number> {
         }
         reasoningStarted = true;
       }
-      const painted = theme().paint(theme().colors.text.faint, batch);
+      const painted = theme().paint(theme().colors.text.faint, chunk);
       if (useChrome) chrome.writeRegion(painted);
       else process.stderr.write(painted);
     });
-    const textFrames = new FrameCoalescer((batch) => {
+    const textFrames = new FrameCoalescer((chunk) => {
       if (!streamed) {
         spinner.stop();
         endActivity();
@@ -679,11 +827,14 @@ export async function runRepl(options: SessionOptions): Promise<number> {
         else printAssistantHeader();
         streamed = true;
       }
-      markdown.push(batch);
+      smoothStream.push(chunk);
     });
     const flushStreams = (): void => {
       textFrames.flush();
       reasoningFrames.flush();
+      // A tool boundary or the end of the turn is where a smooth tail would only
+      // delay the next thing the user needs to see, so the smoother empties now.
+      smoothStream.flushInstant();
     };
     if (useChrome) chrome.moveToRegionBottom();
     if (!fullscreen) spinner.start("thinking");
@@ -742,6 +893,14 @@ export async function runRepl(options: SessionOptions): Promise<number> {
         else chrome.resume();
       }
     });
+    // The grouped tree is built from the bus, which carries the tool id on every
+    // path (prefetched and inline), so a parallel batch is one tree instead of
+    // several cards that race each other onto the screen. Subscribed before the
+    // turn and detached in the finally, so a later turn cannot stack listeners.
+    const detachTools = runtime.events.on("tool.start", ({ id, name, input }) => toolStart(id, name, input));
+    const detachToolDone = runtime.events.on("tool.done", ({ id, name, ok, durationMs }) =>
+      toolDone(id, name, ok, durationMs),
+    );
     try {
       const result = await runtime.runTurn(goal, {
         signal: activeAbort.signal,
@@ -757,6 +916,10 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           turnSteps = step;
           if (activity === undefined) beginActivity("thinking");
           setActivity("thinking", step, max);
+          // A new step means the model is thinking again, and the previous step's
+          // tools have settled.
+          setPhaseCell("think", "running", "THINKING");
+          setPhaseCell("act", "pending", "TOOLS");
           if (!streamed && !useChrome) spinner.start(`thinking · step ${step}/${max}`);
         },
         onToolStart: (name, input) => {
@@ -764,7 +927,11 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           if (activity === undefined) beginActivity(detail);
           else setActivity(detail);
           activeToolDetails.set(name, detail);
-          if (fullscreen) chrome.writeBlock(toolCard({ name, detail, state: "running" }));
+          // The tree covers the groupable calls; a mutating tool still gets its own
+          // card, and its start line is what announces it.
+          if (fullscreen && !isGroupable(name)) chrome.writeBlock(toolCard({ name, detail, state: "running" }));
+          setPhaseCell("think", "done", "THINK");
+          setPhaseCell("act", "running", `ACT: ${detail}`);
         },
         onReasoning: (chunk) => {
           reasoningFrames.push(chunk);
@@ -792,19 +959,20 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           }
           if (fullscreen) {
             const detail = activeToolDetails.get(name);
-            const preview = toolResult.ok
-              ? toolResult.output
-                  .split("\n")
-                  .filter((line) => line.trim().length > 0)
-                  .slice(0, 4)
-                  .map((line) => truncate(line, 90))
-              : [truncate(toolResult.error ?? "failed", 90)];
-            chrome.writeBlock(
-              toolResultCard(name, detail, toolResult.ok, durationMs, preview),
-            );
+            if (!isGroupable(name)) {
+              const preview = toolResult.ok
+                ? toolResult.output
+                    .split("\n")
+                    .filter((line) => line.trim().length > 0)
+                    .slice(0, 4)
+                    .map((line) => truncate(line, 90))
+                : [truncate(toolResult.error ?? "failed", 90)];
+              chrome.writeBlock(toolResultCard(name, detail, toolResult.ok, durationMs, preview));
+            }
             activeToolDetails.delete(name);
             if (inspectorOpen) toggleInspector(true);
           }
+          setPhaseCell("act", "done", "ACT");
           if (!streamed) setActivity("thinking");
         },
       });
@@ -832,8 +1000,13 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       markdown.flush();
       printError((error as Error).message);
     } finally {
+      detachTools();
+      detachToolDone();
+      flushBatch();
+      streamMarkdown = undefined;
       textFrames.dispose();
       reasoningFrames.dispose();
+      smoothStream.dispose();
       runtime.gate.setPromptPause(undefined);
       composer?.stop();
       activeComposer = undefined;
@@ -845,6 +1018,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       // footer after the turn is over.
       endActivity();
       stopTicker();
+      clearPhase();
       streamTelemetry = undefined;
       if (useChrome) {
         chrome.writeRegion("\n");

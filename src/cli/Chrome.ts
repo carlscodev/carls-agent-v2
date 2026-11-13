@@ -39,6 +39,8 @@ export interface ChromeLayout {
   composerTop: number;
   /** Rows occupied by the composer box. */
   composerRows: number;
+  /** Row holding the animated phase timeline, or 0 when not drawn. */
+  phaseRow: number;
   /** Columns available to conversation lines, excluding the scrollbar. */
   contentWidth: number;
   /** 1-based divider column for the split inspector, or 0 when hidden. */
@@ -77,6 +79,10 @@ export class Chrome {
   private menuLines: string[] = [];
   private sidebarLines: string[] | undefined;
   private composerMode = "ask";
+  /** Animated Gather -> Act -> Verify line drawn above the composer. */
+  private phaseText: string | undefined;
+  /** Right-aligned overlay rows (toasts) composited over the top of the region. */
+  private overlayLines: string[] = [];
   private readonly out: NodeJS.WriteStream;
   /** Frame sink that bypasses the stderr capture in fullscreen mode. */
   private readonly frameOut: NodeJS.WriteStream;
@@ -181,6 +187,7 @@ export class Chrome {
     height: 24,
     composerTop: 1,
     composerRows: 1,
+    phaseRow: 0,
     contentWidth: 79,
     dividerColumn: 0,
     sidebarWidth: 0,
@@ -218,9 +225,14 @@ export class Chrome {
       const height = Math.max(12, rows);
       const composerRows = 3;
       const statusRow = height;
-      const composerTop = Math.max(3, height - composerRows);
+      // The phase timeline owns the row above the composer while a turn runs, so
+      // reserving it unconditionally would waste a row when idle. Reserve it only
+      // when there is something to draw.
+      const phaseRows = this.phaseText !== undefined ? 1 : 0;
+      const composerTop = Math.max(3, height - composerRows - phaseRows);
+      const phaseRow = phaseRows === 1 ? composerTop - 1 : 0;
       const promptRow = composerTop + 1;
-      const maxMenuRows = Math.max(0, composerTop - 3);
+      const maxMenuRows = Math.max(0, composerTop - 3 - phaseRows);
       const menuRows = Math.min(this.menuLines.length, maxMenuRows);
       const menuTop = menuRows > 0 ? composerTop - menuRows : 0;
       const regionTop = 2;
@@ -244,6 +256,7 @@ export class Chrome {
         height,
         composerTop,
         composerRows,
+        phaseRow,
         contentWidth,
         dividerColumn,
         sidebarWidth,
@@ -275,6 +288,7 @@ export class Chrome {
       height,
       composerTop: promptRow,
       composerRows: 1,
+      phaseRow: 0,
       contentWidth: width,
       dividerColumn: 0,
       sidebarWidth: 0,
@@ -436,7 +450,12 @@ export class Chrome {
     const width = terminalDimension(this.out.columns);
     for (let index = 0; index < rows; index++) {
       const row = this.layout.regionTop + index;
-      const line = fit(visible[index] ?? "", contentWidth);
+      const overlay = this.overlayLines[index];
+      // An overlay row (a toast) is composited over the right edge of the line,
+      // replacing those columns rather than pushing them, so the layout below it
+      // never shifts and the conversation keeps its position.
+      const base = fit(visible[index] ?? "", contentWidth);
+      const line = overlay === undefined ? base : composeOverlay(base, overlay, contentWidth);
       this.write(`${ESC}${row};1H${ESC}2K${line}`);
       this.write(`${ESC}${row};${Math.min(width, contentWidth + 1)}H${bar[index] ?? "│"}`);
       if (divider > 0) {
@@ -450,6 +469,16 @@ export class Chrome {
     if (pill !== undefined) {
       this.write(`${ESC}${this.layout.regionBottom};1H${ESC}2K${fit(pc.gray(pill), width)}`);
     }
+  }
+
+  /**
+   * Sets the toast overlay. Each line is drawn flush to the right edge of the
+   * conversation region, over whatever text is there, so notifications never
+   * displace the transcript.
+   */
+  setOverlay(lines: string[]): void {
+    this.overlayLines = lines;
+    if (this.enabled && this.fullscreenMode && !this.suspended) this.renderViewport();
   }
 
   /**
@@ -501,6 +530,46 @@ export class Chrome {
   setStatus(text: string): void {
     this.statusText = text;
     this.drawStatus();
+  }
+
+  /**
+   * Sets the animated phase timeline drawn just above the composer. Passing
+   * undefined removes the row and gives it back to the conversation region, so an
+   * idle session looks exactly as it did before the feature existed.
+   */
+  setPhase(text: string | undefined): void {
+    const had = this.phaseText !== undefined;
+    const has = text !== undefined;
+    this.phaseText = text;
+    if (!this.enabled) return;
+    if (this.fullscreenMode) {
+      if (had !== has) {
+        // The row is only reserved while a phase is live, so its appearance or
+        // disappearance moves the composer and must re-lay out the screen.
+        this.layout = this.computeLayout();
+        this.applyFullscreenSize();
+        this.renderViewport();
+        this.drawMenu();
+      }
+      this.drawPhase();
+      if (this.lastPrompt !== undefined) {
+        this.drawPrompt(this.lastPrompt.promptText, this.lastPrompt.buffer, this.lastPrompt.cursor);
+      }
+      return;
+    }
+    this.drawPhase();
+  }
+
+  /** Paints the phase row, or clears it when there is nothing to show. */
+  private drawPhase(): void {
+    if (!this.enabled || this.suspended) return;
+    const { phaseRow } = this.layout;
+    // Only the full-screen layout reserves a phase row; the inline layout keeps
+    // its single footer row and shows the phase inside the status line instead.
+    if (phaseRow === 0) return;
+    const width = terminalDimension(this.out.columns);
+    const body = this.phaseText === undefined ? "" : fit(this.phaseText, width);
+    this.write(`${ESC}${phaseRow};1H${ESC}2K${body}`);
   }
 
   drawStatus(): void {
@@ -638,6 +707,7 @@ export class Chrome {
       this.renderViewport();
       this.drawMenu();
       this.drawStatus();
+      this.drawPhase();
       if (this.lastPrompt !== undefined) {
         this.drawPrompt(this.lastPrompt.promptText, this.lastPrompt.buffer, this.lastPrompt.cursor);
       }
@@ -887,4 +957,20 @@ function fit(text: string, width: number): string {
     index += char.length;
   }
   return `${text.slice(0, index)}${pc.gray("…")}`;
+}
+
+/**
+ * Composites a right-aligned overlay row over a base row.
+ *
+ * The overlay keeps its full text and the base line keeps its left portion; the
+ * two are joined by spaces so the overlay never wraps. When the base line is
+ * short, the result is padded to `width` so the row is repainted cleanly.
+ */
+function composeOverlay(base: string, overlay: string, width: number): string {
+  const overlayWidth = visibleWidth(overlay);
+  if (overlayWidth >= width) return fit(overlay, width);
+  const baseBudget = Math.max(0, width - overlayWidth - 1);
+  const left = visibleWidth(base) > baseBudget ? fit(base, baseBudget) : base;
+  const gap = Math.max(0, baseBudget - visibleWidth(left));
+  return `${left}${" ".repeat(gap)} ${overlay}`;
 }
