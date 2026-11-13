@@ -82,7 +82,11 @@ export class SubAgent {
     return `${SUBAGENT_CONTRACT}\n\nRole: ${role}. ${spec.instruction}\n\nGoal: ${goal}`;
   }
 
-  async run(goal: string, role: SubAgentRole = "explorer"): Promise<string> {
+  async run(
+    goal: string,
+    role: SubAgentRole = "explorer",
+    onProgress?: (detail: string) => void,
+  ): Promise<string> {
     const spec = SUBAGENT_ROLES[role];
     const maxSteps = this.deps.maxSteps ?? spec.maxSteps;
     const registry = this.deps.registry.readOnlyOnly();
@@ -97,7 +101,15 @@ export class SubAgent {
 
     let result: AgentRunResult;
     try {
-      result = await loop.run(history, goal, { silent: true });
+      result = await loop.run(history, goal, {
+        silent: true,
+        ...(onProgress !== undefined
+          ? {
+              onStep: (step: number, max: number) => onProgress(`paso ${step}/${max}`),
+              onToolStart: (name: string) => onProgress(name),
+            }
+          : {}),
+      });
     } catch (error) {
       return JSON.stringify({
         summary: `Sub-agent failed: ${(error as Error).message}`,

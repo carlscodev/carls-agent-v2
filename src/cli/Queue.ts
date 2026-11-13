@@ -1,5 +1,5 @@
 import * as readline from "node:readline";
-import { claimKeypress } from "./Input.js";
+import { claimKeypress, isMouseFragment } from "./Input.js";
 
 /**
  * Prompts typed while the agent is working.
@@ -193,8 +193,11 @@ export function collectTypedLines(options: TypedLinesOptions): TypedLinesHandle 
     }
 
     if (seq.length === 0 || seq.startsWith("\u001b")) return;
+    // Mouse reports are not typing: a wheel turn or a click must never append
+    // `64;50;8M` to the steering draft.
+    if (isMouseFragment(seq)) return;
     const printable = seq.replace(/[\r\n]/g, " ").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
-    if (printable.length > 0) {
+    if (printable.length > 0 && !isMouseFragment(printable)) {
       buffer += printable;
       paint();
     }

@@ -1,7 +1,7 @@
 import * as readline from "node:readline";
 import pc from "picocolors";
 import type { Chrome } from "./Chrome.js";
-import { claimKeypress } from "./Input.js";
+import { claimKeypress, isMouseFragment } from "./Input.js";
 import { applyCompletion, complete, type Completion, type CompletionResult } from "./Autocomplete.js";
 import type { Runtime } from "../core/Runtime.js";
 import { theme } from "./Theme.js";
@@ -411,8 +411,12 @@ export class Prompt {
 
         if (seq.length === 0) return;
         if (seq.startsWith("\u001b")) return;
+        // A second barrier for the mouse: if a report ever reaches the prompt as
+        // text (a decoder that consumed the `\u001b[` prefix, a paste), it must
+        // never be inserted as literal digits.
+        if (isMouseFragment(seq)) return;
         const printable = seq.replace(/[\r\n]/g, " ").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
-        if (printable.length > 0) {
+        if (printable.length > 0 && !isMouseFragment(printable)) {
           this.insert(printable);
           render();
         }

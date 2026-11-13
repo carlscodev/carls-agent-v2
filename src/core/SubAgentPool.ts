@@ -87,7 +87,15 @@ export class SubAgentPool {
         at: Date.now(),
       });
       try {
-        const raw = await this.agent.run(task.goal, task.role);
+        const raw = await this.agent.run(task.goal, task.role, (detail) => {
+          this.events?.emit("subagent.status", {
+            role: task.role,
+            goal: task.goal,
+            phase: "progress",
+            detail,
+            at: Date.now(),
+          });
+        });
         const report = parseReport(raw);
         this.events?.emit("subagent.status", {
           role: task.role,
