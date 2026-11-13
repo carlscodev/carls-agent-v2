@@ -123,6 +123,17 @@ from the flags it was given, which would drop a provider key it cannot
 rediscover. Afterwards check `carls --version` and a one-shot run
 (`carls -p "reply OK" --yolo`).
 
+Two notes from a real run of that block:
+
+- The cleanup must be `sudo shred -u /tmp/carlsrc.snapshot.json`. `sudo cp -a`
+  preserves the original root ownership, so a plain `shred` as the login user
+  fails with `Permission denied`, and under `set -e` that aborts the deploy
+  *after* the install has already succeeded — verify the dist tree before
+  assuming the run failed.
+- The provider key survives because of the snapshot, not because the installer
+  is idempotent. Confirm `hasKey` is still true afterwards:
+  `python3 -c 'import json;d=json.load(open("/opt/carls/.carlsrc.json"));print(bool(d.get("apiKey")))'`
+
 ## Definition of done
 
 - `npm run typecheck` clean, `npm test` green, `npm run build` if `dist/` matters.
