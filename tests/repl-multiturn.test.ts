@@ -326,7 +326,9 @@ describe("REPL multi-turn", () => {
       await withTimeout(harness.waitPrompt(), 3000, "prompt 2");
       expect(harness.input.isPaused()).toBe(false);
       expect(harness.text()).toContain("answer one");
-      expect(harness.text()).toContain("reading note.txt");
+      // Read-only calls in a step are grouped into one tree; the row still names
+      // the tool and the file, which is what the operator needs to see.
+      expect(harness.text()).toContain("read_file note.txt");
       harness.input.write("second\r");
 
       await withTimeout(harness.waitPrompt(), 3000, "prompt 3");
