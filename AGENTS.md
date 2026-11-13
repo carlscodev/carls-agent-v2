@@ -134,6 +134,19 @@ Two notes from a real run of that block:
   is idempotent. Confirm `hasKey` is still true afterwards:
   `python3 -c 'import json;d=json.load(open("/opt/carls/.carlsrc.json"));print(bool(d.get("apiKey")))'`
 
+Afterwards, check `carls --version`, `carls --doctor` and a one-shot run. Two
+things that look like failures but are not:
+
+- `carls -p "hola" --yolo` may print `fetch failed` on the first attempt even
+  though the endpoint is up: a direct `curl` POST to
+  `<baseUrl>/chat/completions` with the config key returns 200. Retry once
+  before investigating. A successful conversational turn shows
+  `1 step · ↑10k ↓10` and no tool calls, which is the `CONVERSATIONAL_FAST_PATH`
+  in `IntentRouter` (greeting, no MCP schemas advertised).
+- `curl <baseUrl>/models` returns 403 without the `Authorization` header. That
+  is normal; `--doctor` is what reports the real endpoint health (it prints the
+  model count).
+
 ## Definition of done
 
 - `npm run typecheck` clean, `npm test` green, `npm run build` if `dist/` matters.
