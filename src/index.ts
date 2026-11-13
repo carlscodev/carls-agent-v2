@@ -172,6 +172,7 @@ async function main(): Promise<number> {
   const code = await runRepl({
     config,
     overrides: {},
+    noAltScreen: args.noAltScreen,
     ...(sessionId !== undefined ? { sessionId } : {}),
     resumeMessages,
   });

@@ -345,8 +345,9 @@ export function utf8PreludeForShell(shellFile: string): string {
   return "";
 }
 
-/** Cursor visible and DEC mode 2026 off: the two states a crash can strand. */
-export const CONSOLE_RESTORE_SEQUENCE = "\u001b[r\u001b[?25h\u001b[?2026l";
+/** Cursor visible, mouse/paste/alternate-screen off, sync mode closed. */
+export const CONSOLE_RESTORE_SEQUENCE =
+  "\u001b[?1006l\u001b[?1002l\u001b[?1000l\u001b[?2004l\u001b[?2026l\u001b[?1049l\u001b[?25h\u001b[r";
 
 export interface ConsoleTarget {
   isTTY?: boolean;

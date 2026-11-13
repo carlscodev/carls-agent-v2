@@ -32,6 +32,8 @@ export interface ParsedArgs {
   installWin: boolean;
   /** Remove the per-user Windows installation, then exit. */
   uninstallWin: boolean;
+  /** Use the legacy inline layout instead of the alternate-screen TUI. */
+  noAltScreen: boolean;
 }
 
 export class ArgError extends Error {}
@@ -49,6 +51,7 @@ function emptyParsed(): ParsedArgs {
     updateCheck: false,
     installWin: false,
     uninstallWin: false,
+    noAltScreen: false,
   };
 }
 
@@ -179,6 +182,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--uninstall-win":
         parsed.uninstallWin = true;
         break;
+      case "--no-alt-screen":
+        parsed.noAltScreen = true;
+        break;
       case "--update":
         parsed.update = true;
         break;
@@ -288,6 +294,7 @@ OPTIONS
       --update-check          Report whether a newer release exists
       --ref <tag>             With --update: install a specific release tag
       --debug                 Verbose diagnostics on stderr
+      --no-alt-screen         Use the inline layout instead of the alternate-screen TUI
 
 MODES
   plan    read-only; every write or shell call is refused

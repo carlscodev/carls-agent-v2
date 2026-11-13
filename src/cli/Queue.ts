@@ -120,11 +120,11 @@ export function collectTypedLines(options: TypedLinesOptions): TypedLinesHandle 
         const text = buffer.trim();
         buffer = "";
         if (text.length === 0) {
-          output.write("\r\u001b[K");
+          if (echo) output.write("\r\u001b[K");
           return;
         }
         if (options.onSubmit !== undefined) {
-          output.write("\r\u001b[K");
+          if (echo) output.write("\r\u001b[K");
           options.onSubmit(text);
           return;
         }
@@ -138,7 +138,7 @@ export function collectTypedLines(options: TypedLinesOptions): TypedLinesHandle 
       }
       case "escape":
         buffer = "";
-        output.write("\r\u001b[K");
+        if (echo) output.write("\r\u001b[K");
         return;
       case "backspace":
         buffer = buffer.slice(0, -1);
@@ -166,7 +166,7 @@ export function collectTypedLines(options: TypedLinesOptions): TypedLinesHandle 
       // The next prompt inherits the stream; pausing here was what could leave
       // a ConPTY reader deaf after the first turn.
       input.resume();
-      output.write("\r\u001b[K");
+      if (echo) output.write("\r\u001b[K");
     },
     pause() {
       paused = true;

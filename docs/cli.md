@@ -19,6 +19,7 @@
 | `--doctor` | config, credentials, endpoint, MCP and update status |
 | `--install-win` | copy `carls.exe` to `%LOCALAPPDATA%\carls\bin`, add it to the user `Path`, then exit (Windows only) |
 | `--uninstall-win` | remove the per-user Windows files and the exact `Path` entry, then exit |
+| `--no-alt-screen` | keep the legacy inline layout instead of the alternate-screen TUI |
 | `update [--check] [--ref <tag>] [--dry-run]` | install, or only report, the latest release |
 | `-v, --version`, `-h, --help` | version and help |
 
@@ -35,6 +36,10 @@ Print mode writes the answer to stdout and everything else to stderr, so
 | `#<note>` | append a note to the session context, no model call |
 | `@` | pick a file and attach its contents to the message (also works in `-p`) |
 | `Shift+Tab` | cycle the permission mode |
+| `Tab` (empty composer) | cycle the permission mode in the full-screen TUI |
+| `PgUp` / `PgDn`, `Shift+Up/Down`, mouse wheel | scroll the virtual conversation viewport |
+| `End` (empty composer) | jump back to the live edge |
+| `Ctrl+B` | toggle the split inspector (plan, files, skills, rules) |
 | `Ctrl+C` | interrupt the running turn; twice to exit |
 
 While a turn is running the spinner shows the current step and elapsed seconds.
@@ -86,6 +91,27 @@ composer steps aside, so answering `y` cannot also steer the turn.
 | `/install-win`, `/uninstall-win` | per-user native install and cleanup (Windows) |
 | `/retry` | re-run the last task |
 | `/exit` | leave |
+
+## Full-screen TUI
+
+Interactive runs (`stderr` is a TTY) use the alternate screen by default:
+
+- a one-row header with version, agent mode, provider/model, short cwd and session id;
+- a virtual scrollback viewport (`Viewport`) that keeps the header, composer and
+  footer at fixed rows while the mouse wheel, `PgUp`/`PgDn`, `Shift+Up/Down`
+  move through history;
+- a floating dock above the composer for completion menus, `/resume`, approvals
+  and `ask_user`;
+- a three-row mode-colored composer (green build/auto/yolo, cyan plan, amber ask)
+  and a one-row tactical footer with the live spinner, step, tool timer and
+  token rate;
+- a one-column scrollbar and a "new messages" pill when the view is detached
+  from the live edge.
+
+`AnimationTicker` refreshes the footer every 80 ms only while a turn is busy and
+stops with zero timers when it ends. Use `--no-alt-screen` (or a non-TTY
+`stderr`) for the legacy inline layout; `-p` never enters the alternate screen
+and stdout stays the model's answer only.
 
 ## Autocomplete
 

@@ -695,7 +695,7 @@ export const COMMANDS: CommandSpec[] = [
       printInfo("Running isolated sub-agent…");
       try {
         const report = await ctx.runtime.subAgent.run(goal);
-        process.stdout.write(`${report}\n`);
+        process.stderr.write(`${report}\n`);
       } catch (error) {
         printError((error as Error).message);
       }
@@ -742,9 +742,9 @@ export const COMMANDS: CommandSpec[] = [
         printInfo("Working tree clean.");
         return false;
       }
-      process.stdout.write(stat);
-      if ((staged ?? "").trim().length > 0) process.stdout.write(pc.gray(`staged:\n${staged}`));
-      if (full !== undefined && full.length > 0) process.stdout.write(full);
+      process.stderr.write(stat);
+      if ((staged ?? "").trim().length > 0) process.stderr.write(pc.gray(`staged:\n${staged}`));
+      if (full !== undefined && full.length > 0) process.stderr.write(full);
       return false;
     },
   },
@@ -894,7 +894,7 @@ export const COMMANDS: CommandSpec[] = [
     usage: "/providers",
     summary: "List every bundled provider and its credential variable",
     run: (_args, _ctx) => {
-      process.stdout.write(formatProviderTable());
+      process.stderr.write(formatProviderTable());
       return false;
     },
   },
@@ -1084,7 +1084,7 @@ export const COMMANDS: CommandSpec[] = [
     summary: "Install carls.exe for this user and add it to the user Path (Windows)",
     run: () => {
       try {
-        installWindows();
+        installWindows({ log: (line) => process.stderr.write(`${line}\n`) });
       } catch (error) {
         printError((error as Error).message);
       }
@@ -1096,7 +1096,7 @@ export const COMMANDS: CommandSpec[] = [
     summary: "Remove the per-user Windows installation and its Path entry",
     run: () => {
       try {
-        uninstallWindows();
+        uninstallWindows({ log: (line) => process.stderr.write(`${line}\n`) });
       } catch (error) {
         printError((error as Error).message);
       }

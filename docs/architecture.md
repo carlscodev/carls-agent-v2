@@ -224,6 +224,15 @@ These are the rules that keep the terminal layout from corrupting itself:
 - `bannerLines` must return lines that fit; tests assert this across widths.
 - `Chrome` owns the fixed header, the scrolling region (DECSTBM) and the footer
   rows. Nothing else may write raw newlines in that area.
+- **Full-screen mode is coordinate-owned.** `Chrome` enters the alternate buffer
+  (`?1049h`), enables SGR mouse and bracketed paste, and paints a header, a
+  `Viewport` window, a dock/composer and a footer. Direct stderr writes are
+  captured into the viewport; only suspended selectors/wizards may write raw.
+  Scrolling changes `Viewport.scrollOffset`, never the fixed rows.
+- `FrameRenderer` opens and closes DEC mode 2026 in the same `write`, so a
+  detached timer can never leave the terminal in a synchronized-update freeze.
+- `AnimationTicker` is the only busy clock: one 80 ms interval drives spinner,
+  elapsed and tool timers, and stops with zero timers at `turn.end`.
 - Colour comes from `Theme.ts` (`theme().paint(token, text)`), never raw
   `picocolors` in view modules. `paint` degrades truecolor → 256 → plain, and
   `NO_COLOR`/non-TTY drop colour.
@@ -257,7 +266,7 @@ tested without executing an installer.
 | `src/tools/` | one file per tool, schema derived from zod |
 | `src/providers/` | registry, dispatch, retry, model discovery |
 | `src/mcp/` | protocol client and transports |
-| `src/cli/` | REPL, Chrome layout, prompt, palette, renderers, commands |
+| `src/cli/` | REPL, Chrome layout, alternate-screen `Viewport`, `AnimationTicker`, `MessageBlocks`, prompt, palette, renderers, commands |
 | `src/security/PermissionGate.ts` | the six permission modes |
 | `src/skills/` | discovery and usage ledger |
 | `src/os/` | OS profile, win32 path/PATHEXT/UTF-8 compatibility, native Windows build (bundle + SEA) and per-user install |

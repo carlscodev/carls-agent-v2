@@ -11,7 +11,8 @@ import { theme } from "./Theme.js";
  * cursor and a scrolling region.
  */
 
-export const TERMINAL_RESTORE = "\u001b[?2026h\u001b[?2026l\u001b[?2004l\u001b[?25h\u001b[r";
+export const TERMINAL_RESTORE =
+  "\u001b[?2026h\u001b[?2026l\u001b[?1006l\u001b[?1002l\u001b[?1000l\u001b[?2004l\u001b[?1049l\u001b[?25h\u001b[r";
 
 export function restoreTerminal(output: NodeJS.WriteStream = process.stderr): void {
   output.write(TERMINAL_RESTORE);

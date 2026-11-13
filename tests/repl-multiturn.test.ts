@@ -326,7 +326,7 @@ describe("REPL multi-turn", () => {
       await withTimeout(harness.waitPrompt(), 3000, "prompt 2");
       expect(harness.input.isPaused()).toBe(false);
       expect(harness.text()).toContain("answer one");
-      expect(harness.text()).toContain("Read note.txt");
+      expect(harness.text()).toContain("reading note.txt");
       harness.input.write("second\r");
 
       await withTimeout(harness.waitPrompt(), 3000, "prompt 3");
@@ -342,8 +342,29 @@ describe("REPL multi-turn", () => {
       await expect(withTimeout(repl, 5000, "repl exit")).resolves.toBe(0);
       expect(requests).toBe(4);
       assertSynchronizedWrites(harness.output.writes);
+      const screen = harness.text();
+      expect(screen).toContain("\u001b[?1049h");
+      expect(screen).toContain("\u001b[?1049l");
+      expect(screen.indexOf("\u001b[?1049l")).toBeLessThan(screen.indexOf("carls --resume"));
     },
     20_000,
+  );
+
+  it(
+    "honors --no-alt-screen and keeps the legacy inline layout",
+    async () => {
+      const config = loadConfig(
+        { provider: "anthropic", model: "test-model", baseUrl: "http://127.0.0.1:1", yolo: true },
+        dir,
+      );
+      const repl = runRepl({ config, overrides: {}, noAltScreen: true });
+      await withTimeout(harness.waitPrompt(), 3000, "prompt");
+      expect(harness.text()).not.toContain("\u001b[?1049h");
+      expect(harness.text()).not.toContain("\u001b[?1006h");
+      harness.input.write("\u0004");
+      await expect(withTimeout(repl, 5000, "repl exit")).resolves.toBe(0);
+    },
+    15_000,
   );
 
   it(

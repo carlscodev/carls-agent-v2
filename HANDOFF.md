@@ -128,6 +128,11 @@ push a branch, not a tag; the `gh` token has no write there.
 - Terminal width is correctness — measure with `src/cli/Text.ts`.
 - A model stream ends at `[DONE]` / `message_stop` / the final `message_delta`,
   never at socket close; cancel the reader and return.
+- The full-screen TUI owns the alternate buffer; restore mouse/paste/2026/alt
+  and the cursor before printing the resume banner. Scrolling moves only the
+  virtual viewport, never the fixed header/composer/footer.
+- One animation clock (`AnimationTicker`) runs while busy and stops at zero
+  timers when the turn ends.
 - Raw stdin has one keypress route. Resume it between turns; never pause it on
   Windows, and close mode 2026 in the same write that opened it.
 - No secrets in the repo, ever.

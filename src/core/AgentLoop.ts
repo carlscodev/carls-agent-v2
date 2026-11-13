@@ -143,6 +143,11 @@ export interface RunOptions {
   onStep?: (step: number, maxSteps: number) => void;
   /** External abort, e.g. Ctrl+C in the REPL. */
   signal?: AbortSignal;
+  /**
+   * Suppress the raw tool call/result lines on stderr. The full-screen REPL
+   * renders those as viewport cards; streaming callbacks stay enabled.
+   */
+  quietStderr?: boolean;
 }
 
 export class AgentLoop {
@@ -222,7 +227,9 @@ export class AgentLoop {
     prefetched?: PrefetchedToolResult,
   ): Promise<ContentBlock> {
     if (prefetched === undefined) {
-      if (!options.silent) process.stderr.write(`\n${toolCallLine(toolUse.name, toolUse.input)}\n`);
+      if (!options.silent && options.quietStderr !== true) {
+        process.stderr.write(`\n${toolCallLine(toolUse.name, toolUse.input)}\n`);
+      }
       options.onToolStart?.(toolUse.name, toolUse.input);
       this.deps.events?.emit("tool.start", {
         id: toolUse.id,
@@ -247,7 +254,9 @@ export class AgentLoop {
       durationMs = Date.now() - startedAt;
     }
 
-    if (!options.silent) process.stderr.write(`${toolResultLine(toolUse.name, result, durationMs)}\n`);
+    if (!options.silent && options.quietStderr !== true) {
+      process.stderr.write(`${toolResultLine(toolUse.name, result, durationMs)}\n`);
+    }
     options.onToolResult?.(toolUse.name, result, durationMs);
     // The prefetcher already published `tool.done` when the run finished; a call
     // executed inline publishes it here so every path looks the same to a view.
@@ -561,7 +570,9 @@ export class AgentLoop {
         signal: ctx.signal,
         maxParallel: MAX_PARALLEL_TOOLS,
         onStart: (call) => {
-          if (!options.silent) process.stderr.write(`\n${toolCallLine(call.name, call.input)}\n`);
+          if (!options.silent && options.quietStderr !== true) {
+            process.stderr.write(`\n${toolCallLine(call.name, call.input)}\n`);
+          }
           options.onToolStart?.(call.name, call.input);
           this.deps.events?.emit("tool.start", {
             id: call.id,

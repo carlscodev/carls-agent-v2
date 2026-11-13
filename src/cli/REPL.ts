@@ -1,4 +1,5 @@
 import pc from "picocolors";
+import { homedir } from "node:os";
 import type { ResolvedConfig, ConfigOverrides } from "../config/Config.js";
 import { loadConfig } from "../config/Config.js";
 import { Logger } from "../utils/Logger.js";
@@ -25,7 +26,18 @@ import { TabManager, shortTitle, type Tab } from "./Tabs.js";
 import { PromptWizardBox, wizardBoxHeight } from "./PromptWizardBox.js";
 import { autoResolveAskUser, type AskUserHandler, type AskUserPayload, type AskUserResult } from "../types/askUser.js";
 import { FrameCoalescer } from "./FrameRenderer.js";
-import { formatDuration } from "./Text.js";
+import { AnimationTicker } from "./AnimationTicker.js";
+import {
+  headerBar,
+  homeIndexHint,
+  reasoningFooter,
+  reasoningHeader,
+  toolCard,
+  toolResultCard,
+  userBlock,
+} from "./MessageBlocks.js";
+import { formatDuration, truncate } from "./Text.js";
+import { samePath } from "../utils/platform.js";
 import { restoreTerminal, writeSessionBanner } from "./SessionBanner.js";
 
 export interface SessionOptions {
@@ -33,6 +45,8 @@ export interface SessionOptions {
   config: ResolvedConfig;
   sessionId?: string;
   resumeMessages?: import("../types/llm.js").Message[];
+  /** Keep the legacy inline layout instead of the alternate-screen TUI. */
+  noAltScreen?: boolean;
 }
 
 export async function runRepl(options: SessionOptions): Promise<number> {
@@ -93,12 +107,38 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   const interactive = Prompt.supports(process.stdin);
   const chrome = new Chrome(process.stderr);
   const useChrome = interactive && Chrome.supported(process.stderr);
+  const fullscreen = useChrome && options.noAltScreen !== true;
+  let headerCache = "";
+  const refreshHeader = (): void => {
+    if (!useChrome) return;
+    const text = headerBar({
+      version: packageVersion(),
+      mode: runtime.config.mode,
+      model: runtime.config.model,
+      provider: runtime.config.provider,
+      cwd: runtime.config.cwd,
+      sessionId: tabs.current().id,
+    });
+    if (text === headerCache) return;
+    headerCache = text;
+    chrome.setHeader(text);
+  };
+  const initialHeader = headerBar({
+    version: packageVersion(),
+    mode: options.config.mode,
+    model: options.config.model,
+    provider: options.config.provider,
+    cwd: options.config.cwd,
+    sessionId: tabs.current().id,
+  });
   if (useChrome) {
-    chrome.enable(banner);
+    headerCache = initialHeader;
+    chrome.enable(banner, { fullscreen, header: initialHeader });
+    chrome.setComposerMode(options.config.mode);
   } else {
     process.stderr.write(`${banner.join("\n")}\n\n`);
   }
-  const spinner = new Spinner();
+  const spinner = new Spinner(interactive && !fullscreen);
   /** Messages typed while a turn was running, drained in order afterwards. */
   const queue = new PromptQueue();
   let busy = false;
@@ -109,13 +149,18 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   let interruptCount = 0;
   let lastGoal: string | undefined;
   let activeAbort: AbortController | undefined;
+  /** Full-screen continuous animation clock (zero timers while idle). */
+  let ticker: AnimationTicker | undefined;
+  /** Sidebar inspector state in the full-screen layout. */
+  let inspectorOpen = false;
   /**
    * Live activity, shown in the footer while a turn runs. A silent model looks
    * identical to a hung process, so the footer carries what the agent is doing
    * right now, how long it has been doing it, and which step it is on.
    */
   let activity: { label: string; startedAt: number; step?: number; maxSteps?: number } | undefined;
-  let activityTimer: NodeJS.Timeout | undefined;
+  /** Rough live generation rate for the footer while text streams. */
+  let streamTelemetry: { chars: number; startedAt: number } | undefined;
   /** Set when the operator asked to leave; the finally block prints the resume banner. */
   let shutdownRequested = false;
 
@@ -196,6 +241,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     const index = MODE_CYCLE.indexOf(current);
     const next = MODE_CYCLE[(index + 1) % MODE_CYCLE.length] ?? "ask";
     runtime.setMode(next);
+    if (useChrome) chrome.setComposerMode(next);
     // Repaint the footer here: the status line is only redrawn after a turn, so
     // without this the mode changes silently and the footer keeps showing the
     // old mode until the next prompt completes.
@@ -205,6 +251,17 @@ export async function runRepl(options: SessionOptions): Promise<number> {
 
   /** `❯` marks the input everywhere, so the transcript and the prompt agree. */
   const promptGlyph = (): string => `${theme().paint(theme().colors.accent, "❯")} `;
+
+  /** Renders a submitted line: a rich card in fullscreen, the old echo inline. */
+  const echoUser = (text: string): void => {
+    if (fullscreen) {
+      chrome.writeBlock(userBlock(text, runtime.config.mode));
+    } else if (useChrome) {
+      chrome.writeRegion(`${promptGlyph()}${text}\n`);
+    } else {
+      process.stderr.write(`${promptGlyph()}${text}\n`);
+    }
+  };
 
   /**
    * File picker behind `@`. It lists what git tracks and lets the user filter by
@@ -234,10 +291,10 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     const used = Math.round(ratio * runtime.config.contextWindow);
     const paint =
       ratio > 0.85 ? t.colors.feedback.error : ratio > 0.7 ? t.colors.feedback.warning : t.colors.text.faint;
-    const home = process.env.HOME;
+    const home = homedir();
     const cwd =
-      home !== undefined && home.length > 1 && runtime.config.cwd.startsWith(home)
-        ? `~${runtime.config.cwd.slice(home.length)}`
+      home.length > 1 && runtime.config.cwd.startsWith(home)
+        ? `~${runtime.config.cwd.slice(home.length).replace(/^[\\/]/, "").replace(/\\/g, "/")}`
         : runtime.config.cwd;
     const parts = [
       modeTag(runtime.config.mode),
@@ -294,12 +351,20 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     // even before the first token arrives.
     const live = activityFrame(activity);
     if (live !== undefined) parts.push(live);
+    if (streamTelemetry !== undefined) {
+      const seconds = (Date.now() - streamTelemetry.startedAt) / 1000;
+      if (seconds >= 0.3) {
+        const rate = Math.max(1, Math.round(streamTelemetry.chars / 4 / seconds));
+        parts.push(t.paint(t.colors.feedback.success, `${rate} tok/s`));
+      }
+    }
     if (runtime.steeringDepth > 0) {
       parts.push(t.paint(t.colors.feedback.warning, `↑${runtime.steeringDepth}`));
     }
     if (queue.length > 0) parts.push(t.paint(t.colors.feedback.warning, `Q:${queue.length}`));
     const spend = runtime.cost.compact();
     if (spend.length > 0) parts.push(t.paint(t.colors.text.faint, spend));
+    if (fullscreen && samePath(runtime.config.cwd, homedir())) parts.push(homeIndexHint());
     parts.push(t.paint(t.colors.text.faint, cwd));
     return parts.join(t.paint(t.colors.text.faint, " │ "));
   };
@@ -307,6 +372,8 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   const showStatus = (): void => {
     if (!interactive) return;
     if (useChrome) {
+      refreshHeader();
+      chrome.setComposerMode(runtime.config.mode);
       chrome.setStatus(statusLine());
       return;
     }
@@ -369,6 +436,9 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     tabs.select(index);
     runtime = tabs.current().payload;
     showTabs();
+    refreshHeader();
+    chrome.setComposerMode(runtime.config.mode);
+    showStatus();
   };
 
   /** Opens a fresh tab with an empty conversation and switches to it. */
@@ -475,11 +545,49 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     for (const line of choice.preview ?? []) printInfo(line);
   };
 
+  /** Split inspector content: plan, files, skills and learned rules. */
+  const buildInspector = (): string[] => {
+    const t = theme();
+    const lines: string[] = [t.paint(t.colors.accent, "INSPECTOR")];
+    const dag = runtime.dag.snapshot();
+    lines.push(`${t.paint(t.colors.text.faint, "PLAN")} ${dag.completed}/${dag.nodes.length}${dag.done ? " ✓" : ""}`);
+    for (const node of runtime.dag.all().slice(0, 8)) {
+      const glyph =
+        node.status === "completed"
+          ? "✓"
+          : node.status === "running" || node.status === "verifying"
+            ? "⠋"
+            : node.status === "failed"
+              ? "✗"
+              : "○";
+      lines.push(`${glyph} ${node.id} ${truncate(node.title, 22)}`);
+    }
+    lines.push("", `${t.paint(t.colors.text.faint, "FILES")} ${runtime.backups.list().length}`);
+    for (const entry of runtime.backups.list().slice(-5)) {
+      lines.push(`▪ ${truncate(entry.path, 24)}`);
+    }
+    const skills = runtime.lastSkillsCreated;
+    lines.push("", `${t.paint(t.colors.text.faint, "SKILLS")} ${skills.length}`);
+    for (const skill of skills.slice(0, 4)) lines.push(`◆ ${truncate(skill, 24)}`);
+    const rules = runtime.operatorMemory.all();
+    lines.push("", `${t.paint(t.colors.text.faint, "RULES")} ${rules.length}`);
+    for (const rule of rules.slice(0, 4)) lines.push(`▪ ${truncate(rule.text, 24)}`);
+    return lines;
+  };
+
+  /** Toggles the split inspector; force redraws it without changing visibility. */
+  const toggleInspector = (refreshOnly = false): void => {
+    if (!fullscreen) return;
+    if (!refreshOnly) inspectorOpen = !inspectorOpen;
+    chrome.setSidebar(inspectorOpen ? buildInspector() : undefined);
+  };
+
   /** Starts the animated footer segment and keeps it ticking. */
   const beginActivity = (label: string): void => {
     activity = { label, startedAt: Date.now() };
-    if (activityTimer === undefined && useChrome) {
-      activityTimer = setInterval(() => chrome.setStatus(statusLine()), 90);
+    if (useChrome && ticker === undefined) {
+      ticker = new AnimationTicker(() => showStatus(), 80);
+      ticker.start();
     }
     showStatus();
   };
@@ -496,16 +604,18 @@ export async function runRepl(options: SessionOptions): Promise<number> {
 
   const endActivity = (): void => {
     activity = undefined;
-    if (activityTimer !== undefined) {
-      clearInterval(activityTimer);
-      activityTimer = undefined;
-    }
+  };
+
+  const stopTicker = (): void => {
+    ticker?.stop();
+    ticker = undefined;
   };
 
   const runGoal = async (goal: string): Promise<void> => {
     busy = true;
     interruptCount = 0;
     activeAbort = new AbortController();
+    streamTelemetry = undefined;
     const turnStartedAt = Date.now();
     let turnSteps = 0;
     // The footer carries a live activity segment while a turn runs, so the
@@ -519,11 +629,13 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       showTabs();
     }
     const markdown = new MarkdownRenderer(useChrome ? process.stderr : process.stdout);
-    // Redraw the line being received so code and prose are visible as they
-    // stream, instead of appearing only once a newline arrives.
-    markdown.setLiveTail(true);
+    // Full-screen owns a virtual viewport: complete lines only, no carriage-return
+    // live tail that would append itself as history.
+    markdown.setLiveTail(!fullscreen);
     let streamed = false;
     let reasoningStarted = false;
+    let reasoningStartedAt = 0;
+    const activeToolDetails = new Map<string, string>();
     // Streaming deltas arrive per token; both renderers are batched to one write
     // per 16 ms frame so a fast model cannot saturate the PTY.
     const reasoningFrames = new FrameCoalescer((batch) => {
@@ -532,9 +644,11 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       if (!reasoningStarted) {
         spinner.stop();
         endActivity();
+        reasoningStartedAt = Date.now();
         if (useChrome) {
           chrome.moveToRegionBottom();
-          chrome.writeRegion(`\n${theme().paint(theme().colors.text.faint, "✻ pensando")}\n`);
+          if (fullscreen) chrome.writeBlock([reasoningHeader("Razonando", "0.0s")]);
+          else chrome.writeRegion(`\n${theme().paint(theme().colors.text.faint, "✻ pensando")}\n`);
         } else {
           process.stderr.write(`\n${pc.gray("✻ pensando")}\n`);
         }
@@ -551,8 +665,15 @@ export async function runRepl(options: SessionOptions): Promise<number> {
         // Close the reasoning block before the answer starts, or the first word
         // of the answer lands on the last line of the scratchpad.
         if (reasoningStarted) {
-          if (useChrome) chrome.writeRegion("\n");
-          else process.stderr.write("\n");
+          if (useChrome) {
+            if (fullscreen) {
+              chrome.writeBlock([reasoningFooter(formatDuration(Date.now() - reasoningStartedAt))]);
+            } else {
+              chrome.writeRegion("\n");
+            }
+          } else {
+            process.stderr.write("\n");
+          }
         }
         if (useChrome) chrome.writeRegion(`\n${theme().paint(theme().colors.accent, "◆")} ${theme().bold("carls")}\n`);
         else printAssistantHeader();
@@ -565,7 +686,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       reasoningFrames.flush();
     };
     if (useChrome) chrome.moveToRegionBottom();
-    spinner.start("thinking");
+    if (!fullscreen) spinner.start("thinking");
     // Typing during a turn queues the message instead of dropping it. The
     // composer owns stdin while it runs, so it must stop before the prompt.
     const composer = interactive
@@ -614,10 +735,19 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     runtime.gate.setPromptPause((paused) => {
       if (paused) composer?.pause();
       else composer?.resume();
+      // A readline approval would otherwise write into the captured viewport and
+      // be invisible. Hand the screen over raw for the duration of the question.
+      if (fullscreen) {
+        if (paused) chrome.suspend();
+        else chrome.resume();
+      }
     });
     try {
       const result = await runtime.runTurn(goal, {
         signal: activeAbort.signal,
+        // The full-screen stream renders tool cards itself; raw stderr lines
+        // would bypass the viewport and corrupt the fixed layout.
+        quietStderr: fullscreen,
         onSteer: (messages) => {
           const line = `${pc.yellow("↳")} ${pc.gray(`steering applied: ${messages.join(" · ")}`)}`;
           if (useChrome) chrome.writeRegion(`\n${line}\n`);
@@ -625,29 +755,55 @@ export async function runRepl(options: SessionOptions): Promise<number> {
         },
         onStep: (step, max) => {
           turnSteps = step;
+          if (activity === undefined) beginActivity("thinking");
           setActivity("thinking", step, max);
           if (!streamed && !useChrome) spinner.start(`thinking · step ${step}/${max}`);
         },
         onToolStart: (name, input) => {
-          setActivity(toolLabel(name, input));
+          const detail = toolLabel(name, input);
+          if (activity === undefined) beginActivity(detail);
+          else setActivity(detail);
+          activeToolDetails.set(name, detail);
+          if (fullscreen) chrome.writeBlock(toolCard({ name, detail, state: "running" }));
         },
         onReasoning: (chunk) => {
           reasoningFrames.push(chunk);
         },
         onText: (chunk) => {
+          if (streamTelemetry === undefined) streamTelemetry = { chars: 0, startedAt: Date.now() };
+          streamTelemetry.chars += chunk.length;
           textFrames.push(chunk);
         },
-        onToolResult: () => {
+        onToolResult: (name, toolResult, durationMs) => {
           // The model may narrate and then call a tool in the same turn. Flush
           // the coalescer first so the narration reaches the markdown buffer
           // before the next tool block is appended.
           flushStreams();
           if (streamed) markdown.flush();
           if (reasoningStarted && !streamed) {
-            if (useChrome) chrome.writeRegion("\n");
-            else process.stderr.write("\n");
+            if (useChrome) {
+              if (fullscreen) chrome.writeBlock([reasoningFooter(formatDuration(Date.now() - reasoningStartedAt))]);
+              else chrome.writeRegion("\n");
+            } else {
+              process.stderr.write("\n");
+            }
             // The next step is a fresh model call, so it gets its own header.
             reasoningStarted = false;
+          }
+          if (fullscreen) {
+            const detail = activeToolDetails.get(name);
+            const preview = toolResult.ok
+              ? toolResult.output
+                  .split("\n")
+                  .filter((line) => line.trim().length > 0)
+                  .slice(0, 4)
+                  .map((line) => truncate(line, 90))
+              : [truncate(toolResult.error ?? "failed", 90)];
+            chrome.writeBlock(
+              toolResultCard(name, detail, toolResult.ok, durationMs, preview),
+            );
+            activeToolDetails.delete(name);
+            if (inspectorOpen) toggleInspector(true);
           }
           if (!streamed) setActivity("thinking");
         },
@@ -688,6 +844,8 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       // The timer must stop even on the error path, or it keeps repainting the
       // footer after the turn is over.
       endActivity();
+      stopTicker();
+      streamTelemetry = undefined;
       if (useChrome) {
         chrome.writeRegion("\n");
         chrome.moveToRegionBottom();
@@ -707,9 +865,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   const drainQueued = async (): Promise<void> => {
     await drainQueue(queue, async (queued) => {
       lastGoal = queued;
-      const echo = `${promptGlyph()}${queued}`;
-      if (useChrome) chrome.writeRegion(`${echo}\n`);
-      else process.stderr.write(`${echo}\n`);
+      echoUser(queued);
       const queuedExpanded = expandMentions(queued, runtime.config.cwd);
       if (queuedExpanded.attached.length > 0) {
         printInfo(`attached ${queuedExpanded.attached.join(", ")}`);
@@ -719,6 +875,29 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       }
       await runGoal(queuedExpanded.text);
     });
+  };
+
+  /** Commands that temporarily own the screen (selectors, wizard, editors). */
+  const needsScreen = (line: string): boolean => {
+    const [name, ...args] = line.trim().split(/\s+/);
+    switch (name) {
+      case "/resume":
+      case "/sessions":
+        return args.length === 0;
+      case "/models":
+      case "/setup":
+      case "/configure":
+      case "/editor":
+      case "/update":
+        return true;
+      case "/agents":
+        return args.length === 0;
+      case "/tab":
+      case "/tabs":
+        return args.length > 0 && args[0] !== "list";
+      default:
+        return false;
+    }
   };
 
   try {
@@ -735,6 +914,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           onPalette: () => true,
           runtime,
           onExpand: expandLast,
+          onScrollKey: (key, empty) => chrome.handleScrollKey(key, empty),
           ...(useChrome ? { chrome } : {}),
         });
         resume = undefined;
@@ -755,6 +935,10 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           continue;
         }
         if (result.type === "sidebar") {
+          if (fullscreen) {
+            toggleInspector();
+            continue;
+          }
           if (useChrome) chrome.suspend();
           try {
             await openSidebar();
@@ -806,11 +990,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
         }
           if (result.type !== "line") continue;
           input = result.text.trim();
-          if (useChrome) {
-            chrome.writeRegion(`${promptGlyph()}${input}\n`);
-          } else {
-            process.stderr.write(`${promptGlyph()}${input}\n`);
-          }
+          echoUser(input);
         }
       } else {
         const line = await reader.next(pc.cyan("❯ "));
@@ -825,9 +1005,10 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       if (input.length === 0) continue;
 
       if (input.startsWith("/")) {
-        // Selectors take over the terminal; give them a clean screen and restore
-        // the scrolling region afterwards, otherwise the frame lands inside it.
-        if (useChrome) chrome.suspend();
+        // Selectors and spawned editors own the screen; text commands stream
+        // their output into the virtual viewport instead of vanishing on resume.
+        const suspendCommand = useChrome && (!fullscreen || needsScreen(input));
+        if (suspendCommand) chrome.suspend();
         let shouldExit = false;
         try {
           shouldExit = await runCommand(input, {
@@ -855,7 +1036,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
             },
           });
         } finally {
-          if (useChrome) chrome.resume();
+          if (suspendCommand) chrome.resume();
         }
         if (shouldExit) {
           shutdownRequested = true;
@@ -869,7 +1050,14 @@ export async function runRepl(options: SessionOptions): Promise<number> {
 
       if (input.startsWith("!")) {
         const command = input.slice(1).trim();
-        if (command.length > 0) runShellPassthrough(command, runtime.config.cwd);
+        if (command.length > 0) {
+          if (fullscreen) chrome.suspend();
+          try {
+            runShellPassthrough(command, runtime.config.cwd);
+          } finally {
+            if (fullscreen) chrome.resume();
+          }
+        }
         continue;
       }
 

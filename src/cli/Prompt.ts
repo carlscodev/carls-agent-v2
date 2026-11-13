@@ -42,6 +42,8 @@ interface PromptOptions {
   runtime?: Runtime;
   /** Called on Ctrl+O to expand the last collapsed tool output. */
   onExpand?: () => void;
+  /** Full-screen viewport scroll keys. Return true when consumed. */
+  onScrollKey?: (key: readline.Key, emptyBuffer: boolean) => boolean;
 }
 
 /** Colour per completion kind, so commands and paths read as different things. */
@@ -215,6 +217,10 @@ export class Prompt {
         const name = key.name ?? "";
         const seq = sequence ?? key.sequence ?? "";
 
+        // PageUp/PageDown/Shift+arrows/End belong to the virtual viewport in the
+        // full-screen layout, not to the line editor.
+        if (options.onScrollKey?.(key, this.buffer.length === 0) === true) return;
+
         if (key.ctrl === true) {
           switch (name) {
             case "c":
@@ -317,6 +323,20 @@ export class Prompt {
             }
             closeMenu();
           }
+        }
+
+        // Tab on an empty composer cycles the agent mode in the full-screen
+        // layout; the legacy inline layout keeps inserting spaces, as its tests
+        // and muscle memory expect. The completion menu consumes Tab first.
+        if (
+          name === "tab" &&
+          this.buffer.length === 0 &&
+          options.onModeCycle !== undefined &&
+          options.chrome?.fullscreen === true
+        ) {
+          options.onModeCycle();
+          render();
+          return;
         }
 
         switch (name) {
