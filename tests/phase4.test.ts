@@ -549,4 +549,50 @@ describe("AgentLoop event wiring", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("does not attach a listener to the caller's signal, so a reused signal cannot leak one per run", async () => {
+    // A driver may hold one signal for a whole session and pass it to every run.
+    // Mirroring it through a private controller would attach an abort listener
+    // that never leaves, piling up one closure per run on that shared signal.
+    const dir = await mkdtemp(join(tmpdir(), "carls-loop-signal-"));
+    try {
+      const logger = new Logger("error");
+      const config = loadConfig({ yolo: true, maxSteps: 5 }, dir);
+      const session = new SessionStore(dir, config.model, undefined, join(dir, "sessions"));
+      const registry = new ToolRegistry();
+      const provider: import("../src/types/llm.js").Provider = {
+        name: "scripted",
+        async complete() {
+          return {
+            content: [{ type: "text", text: "done" }],
+            stopReason: "end_turn",
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        },
+      };
+      const loop = new AgentLoop({
+        provider,
+        registry,
+        gate: new PermissionGate(config, logger, async () => "y"),
+        contextManager: new ContextManager({ contextWindow: 200000, compactThreshold: 0.75, truncateLimit: 8000 }),
+        session,
+        costTracker: new CostTracker(config.model),
+        hooks: new Hooks(config.hooks, logger, dir),
+        config,
+        logger,
+        systemPrompt: "test",
+        toolContext: { cwd: dir, config, session, logger },
+      });
+
+      const turn = new AbortController();
+      const baseline = getEventListeners(turn.signal, "abort").length;
+      for (let run = 0; run < 5; run++) {
+        const history: Message[] = [{ role: "user", content: [{ type: "text", text: "go" }] }];
+        await loop.run(history, "go", { signal: turn.signal });
+      }
+      expect(getEventListeners(turn.signal, "abort").length).toBe(baseline);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

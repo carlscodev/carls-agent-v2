@@ -479,13 +479,12 @@ export class AgentLoop {
     options: RunOptions = {},
   ): Promise<AgentRunResult> {
     const maxSteps = this.deps.config.maxSteps;
-    const abortController = new AbortController();
-    const external = options.signal;
-    if (external) {
-      if (external.aborted) abortController.abort();
-      else external.addEventListener("abort", () => abortController.abort(), { once: true });
-    }
-    const ctx: ToolContext = { ...this.deps.toolContext, signal: abortController.signal };
+    // The caller's signal already means "abort this run". Mirroring it through a
+    // private controller only bought an `abort` listener that never left a reused
+    // signal, so a driver that runs many turns on one signal leaked one closure
+    // per turn. Use it directly and mint a never-aborting signal when absent.
+    const signal = options.signal ?? new AbortController().signal;
+    const ctx: ToolContext = { ...this.deps.toolContext, signal };
     const filesTouched = new Set<string>();
     // Compute the turn prompt once: the skill catalog is static for the run, and
     // rebuilding it on every step would only duplicate tokens.
