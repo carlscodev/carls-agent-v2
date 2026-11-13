@@ -308,17 +308,29 @@ export class SleepWait implements Tool<{seconds: number; reason?: string  | unde
 
   async run(input: {seconds: number; reason?: string | undefined}, ctx: ToolContext): Promise<ToolResult> {
     const ms = Math.min(120, input.seconds) * 1000;
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(resolve, ms);
-      ctx.signal.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(timer);
-          reject(new Error("aborted"));
-        },
-        { once: true },
-      );
-    }).catch(() => undefined);
+    await new Promise<void>((resolve) => {
+      // The listener must come off on both paths. `ctx.signal` is the turn's
+      // signal, which lives for the whole run, so a listener left behind by a
+      // completed wait piles one closure (and its timer) onto it per call, and
+      // every later abort then fires waits that are already over.
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        ctx.signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      // A signal aborted before the wait began must not park the tool for the
+      // full duration; short-circuit instead of waiting for an event that will
+      // never fire again.
+      if (ctx.signal.aborted) {
+        clearTimeout(timer);
+        resolve();
+        return;
+      }
+      ctx.signal.addEventListener("abort", onAbort, { once: true });
+    });
     return { ok: true, output: `Waited ${input.seconds}s${input.reason !== undefined ? ` (${input.reason})` : ""}.` };
   }
 }

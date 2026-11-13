@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { getEventListeners } from "node:events";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -39,7 +40,7 @@ import { toolCallLine, toolResultLine } from "../src/cli/ToolView.js";
 import { formatDuration, turnSummaryLine } from "../src/cli/TerminalUI.js";
 import { CostTracker } from "../src/core/CostTracker.js";
 import { ApplyPatch, FileDelete, HashFile, ListDir, MultiRead, WriteMany } from "../src/tools/FileOps.js";
-import { ComputerUse, EnvGet } from "../src/tools/SystemOps.js";
+import { ComputerUse, EnvGet, SleepWait } from "../src/tools/SystemOps.js";
 import { BrowserOpen } from "../src/tools/BrowserOps.js";
 import { Runtime } from "../src/core/Runtime.js";
 import { PROVIDERS, providerById, reasoningHintsFor } from "../src/providers/registry.js";
@@ -1452,6 +1453,40 @@ describe("new tools", () => {
     expect(result.output).not.toContain("supersecretvalue");
     expect(result.output).toContain("<set:");
     delete process.env.CARLS_TEST_TOKEN;
+  });
+
+  it("detaches its abort listener once a sleep_wait completes", async () => {
+    // `ctx.signal` is the turn's signal and lives for the whole run. A wait that
+    // leaves its closure attached piles one listener (and its pending timer) onto
+    // that signal per call, so a long turn that snoozes repeatedly leaks, and
+    // every later abort re-enters a wait that is already over.
+    const turn = new AbortController();
+    const baseline = getEventListeners(turn.signal, "abort").length;
+    const tool = new SleepWait();
+    const ctx: ToolContext = { ...makeContext(), signal: turn.signal };
+
+    for (let call = 0; call < 5; call++) {
+      const result = await tool.run(tool.parse({ seconds: 0.01 }), ctx);
+      expect(result.ok).toBe(true);
+    }
+
+    expect(getEventListeners(turn.signal, "abort").length).toBe(baseline);
+  });
+
+  it("returns promptly when the turn is already aborted", async () => {
+    // An abort that fired before the wait began must not park the tool for the
+    // full duration: there is no future event to wake it, so it would block the
+    // step until the timeout.
+    const turn = new AbortController();
+    turn.abort();
+    const tool = new SleepWait();
+    const ctx: ToolContext = { ...makeContext(), signal: turn.signal };
+
+    const startedAt = Date.now();
+    const result = await tool.run(tool.parse({ seconds: 5 }), ctx);
+
+    expect(result.ok).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(1000);
   });
 
   it("lists a directory with sizes", async () => {
