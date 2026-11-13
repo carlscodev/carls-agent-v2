@@ -1,7 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { assertInsideWorkspace, assertNoSymlinkEscape } from "../utils/paths.js";
+import { samePath } from "../utils/platform.js";
+import { isIgnoredDirName } from "../utils/ignoredDirs.js";
 
 /**
  * `@path` mentions.
@@ -35,27 +38,18 @@ export const DEFAULT_MENTION_LIMITS: MentionLimits = {
   maxFileBytes: 512 * 1024,
 };
 
-/** Directories that never belong in a file picker. */
-const IGNORED_DIRS = new Set([
-  "node_modules",
-  ".git",
-  "dist",
-  "build",
-  "out",
-  "target",
-  ".next",
-  "coverage",
-  ".turbo",
-  ".venv",
-  "venv",
-  "__pycache__",
-]);
-
 /**
  * Files the picker offers: what git tracks, which is the project's own idea of
  * its source. A directory that is not a repository falls back to a bounded walk.
+ *
+ * A home directory is never treated as a project: even the on-demand `@` picker
+ * gets a shallow, capped walk so it cannot enumerate AppData, Windows or the
+ * user's whole profile.
  */
 export function listWorkspaceFiles(root: string, limit = 3000): string[] {
+  if (samePath(root, homedir())) {
+    return walkFiles(root, Math.min(limit, 200), 2);
+  }
   const tracked = gitTrackedFiles(root);
   const files = tracked ?? walkFiles(root, limit);
   return files.slice(0, limit);
@@ -76,17 +70,17 @@ function gitTrackedFiles(root: string): string[] | undefined {
       .split("\u0000")
       .filter((entry) => entry.length > 0)
       .map((entry) => entry.split(sep).join("/"))
-      .filter((entry) => !entry.split("/").some((part) => IGNORED_DIRS.has(part)));
+      .filter((entry) => !entry.split("/").some((part) => isIgnoredDirName(part)));
     return files.length > 0 ? files : undefined;
   } catch {
     return undefined;
   }
 }
 
-function walkFiles(root: string, limit: number): string[] {
+function walkFiles(root: string, limit: number, maxDepth = 8): string[] {
   const found: string[] = [];
   const walk = (dir: string, depth: number): void => {
-    if (found.length >= limit || depth > 8) return;
+    if (found.length >= limit || depth > maxDepth) return;
     let entries: import("node:fs").Dirent[];
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -96,7 +90,7 @@ function walkFiles(root: string, limit: number): string[] {
     for (const entry of entries) {
       if (found.length >= limit) return;
       if (entry.name.startsWith(".") && entry.name !== ".github") continue;
-      if (IGNORED_DIRS.has(entry.name)) continue;
+      if (isIgnoredDirName(entry.name)) continue;
       const full = join(dir, entry.name);
       if (entry.isDirectory()) walk(full, depth + 1);
       else if (entry.isFile()) found.push(relative(root, full).split(sep).join("/"));

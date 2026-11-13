@@ -79,13 +79,28 @@ composer steps aside, so answering `y` cannot also steer the turn.
 | `/tools` | every tool, its category, parallel-safe and advertised flags |
 | `/mcp` | connected MCP servers, transport and tool counts |
 | `/skills [list\|search\|show\|review\|new]` | browse and review reusable procedures |
-| `/sessions`, `/resume <id>` | session picker and direct resume |
+| `/sessions`, `/resume [id]` | session selector; `/resume` with no id opens the list (or loads the only session), and an id resumes it directly |
 | `/config`, `/permissions`, `/theme`, `/init` | configuration, policy, colours, `AGENTS.md` setup |
 | `/providers`, `/setup`, `/doctor` | provider list, wizard, diagnostics |
 | `/update [--check]` | install or check for a newer release |
 | `/install-win`, `/uninstall-win` | per-user native install and cleanup (Windows) |
 | `/retry` | re-run the last task |
 | `/exit` | leave |
+
+## Autocomplete
+
+The menu is scoped to what the token under the cursor can accept. The first
+token lists slash commands; `/resume ` lists saved sessions from `SessionStore`
+as `id · age · cwd · "opening" (N msgs)`, and accepting a row inserts the id.
+`/resume` with no argument opens the interactive selector (or loads the only
+session). Workspace files are only offered by the explicit `@` picker, never as
+a slash-command argument.
+
+When the current directory is the user's home, the `@` picker and `glob_files`
+ignore `AppData`, `Windows`, `Program Files`, `NTUSER*`, `.cache`, `Library` and
+the other system/profile directories, and cap the walk at 200 paths and two
+levels. Nothing is scanned at REPL startup; the listing is built on demand when
+`@` is typed.
 
 ## Native Windows build
 

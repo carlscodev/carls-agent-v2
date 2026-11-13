@@ -1,7 +1,8 @@
 import { COMMANDS } from "./Commands.js";
 import { EFFORTS, PERMISSION_MODES } from "../config/Config.js";
 import type { Runtime } from "../core/Runtime.js";
-import { listWorkspaceFiles } from "./Mentions.js";
+import { SessionStore } from "../core/SessionStore.js";
+import { sessionDetail } from "./SessionFormat.js";
 import { SkillLoader } from "../skills/SkillLoader.js";
 import { knownModelsFor } from "../models/Catalog.js";
 import { discoverAgents } from "../agents/Presets.js";
@@ -80,14 +81,11 @@ export function complete(request: CompletionRequest): CompletionResult | undefin
     return items.length > 0 ? { items, start, end } : undefined;
   }
 
-  // No curated argument set: offer workspace paths, the same list `@` uses.
-  const files = listWorkspaceFiles(runtime.config.cwd).map<Completion>((path) => ({
-    value: path,
-    label: path,
-    kind: "file",
-  }));
-  const items = rank(files, token);
-  return items.length > 0 ? { items, start, end } : undefined;
+  // A slash command with no curated argument set gets no menu. Workspace files
+  // belong to the explicit `@` picker, never to `/command` completion: a slash
+  // argument that falls through to the file walk is how `/resume` used to list
+  // three thousand AppData files instead of saved sessions.
+  return undefined;
 }
 
 /** Every command as a completion row, aliases included. */
@@ -135,6 +133,9 @@ function argumentsFor(command: string, argIndex: number, runtime: Runtime): Comp
       if (argIndex === 0) return subcommands(["list", "search", "show", "review", "new"]);
       // `show`, `new` and `search` all take a skill name or a query.
       return skillItems(runtime.config.cwd);
+    case "/resume":
+      // The picker is the only argument: session ids, never workspace paths.
+      return argIndex === 0 ? sessionItems() : undefined;
     case "/agents":
     case "/agent":
       if (argIndex === 0) return subcommands(["list", "use"]);
@@ -169,6 +170,19 @@ export function modelItems(runtime: Runtime): Completion[] {
     label: model.id,
     kind: "model",
     ...(model.reasoning === true ? { detail: "reasoning" } : {}),
+  }));
+}
+
+/**
+ * Saved sessions as completion rows: `id · age · cwd · "opening" (N msgs)`.
+ * Session ids are the only values the menu ever inserts for `/resume`.
+ */
+export function sessionItems(): Completion[] {
+  return SessionStore.list().map((entry) => ({
+    value: entry.id,
+    label: entry.id,
+    detail: sessionDetail(entry),
+    kind: "arg" as const,
   }));
 }
 

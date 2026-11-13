@@ -13,6 +13,10 @@ export interface SessionMeta {
 
 export interface SessionIndexEntry extends SessionMeta {
   path: string;
+  /** Number of user turns recorded in the log. */
+  turns?: number;
+  /** First user prompt, whitespace-collapsed and clipped. */
+  opening?: string;
 }
 
 interface SessionRecord {
@@ -62,14 +66,43 @@ export class SessionStore {
       try {
         // The log is append-only, so a session that kept going has several meta
         // records; the last one carries the freshest `updatedAt`, which is what
-        // the "most recent first" ordering needs.
+        // the "most recent first" ordering needs. The same pass counts turns and
+        // keeps the opening prompt, so `--resume` does not re-read every log.
         let meta: SessionMeta | undefined;
+        let turns = 0;
+        let opening: string | undefined;
         for (const line of readFileSync(full, "utf8").split("\n")) {
           if (line.trim().length === 0) continue;
           const record = JSON.parse(line) as SessionRecord;
-          if (record.type === "meta") meta = record.payload as SessionMeta;
+          if (record.type === "meta") {
+            meta = record.payload as SessionMeta;
+            continue;
+          }
+          if (record.type !== "message") continue;
+          const message = record.payload as Message;
+          if (message.role !== "user") continue;
+          const text = message.content
+            .filter((block): block is Extract<Message["content"][number], { type: "text" }> => block.type === "text")
+            .map((block) => block.text)
+            .join(" ")
+            .replace(/\s+/g, " ")
+            .trim();
+          // Tool results are also stored as user-role messages. Only a real
+          // prompt counts as a turn and can name the session.
+          if (text.length === 0) continue;
+          turns += 1;
+          if (opening === undefined) {
+            opening = text.length > 120 ? `${text.slice(0, 119)}…` : text;
+          }
         }
-        if (meta !== undefined) entries.push({ ...meta, path: full });
+        if (meta !== undefined) {
+          entries.push({
+            ...meta,
+            path: full,
+            turns,
+            ...(opening !== undefined ? { opening } : {}),
+          });
+        }
       } catch {
         continue;
       }

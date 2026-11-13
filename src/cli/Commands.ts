@@ -23,6 +23,7 @@ import { writeTranscript } from "./Export.js";
 import { composeInEditor, editorSpec } from "./Editor.js";
 import { ExecutionReceipt } from "../symbiosis/ExecutionReceipt.js";
 import { fileStateCache } from "../core/FileStateCache.js";
+import { sessionDetail } from "./SessionFormat.js";
 import { installWindows, uninstallWindows } from "../os/WindowsInstall.js";
 
 export interface CommandContext {
@@ -124,38 +125,34 @@ async function browseSessions(ctx: CommandContext, id: string | undefined): Prom
     printInfo("No sessions recorded yet.");
     return;
   }
+  // A single resumable session needs no picker; loading it is the fastest path.
+  if (entries.length === 1 && (entries[0]?.turns ?? 0) > 0) {
+    loadSession(ctx, entries[0]?.id ?? "");
+    return;
+  }
   const here = ctx.runtime.config.cwd;
-  const home = process.env.HOME;
-  const shortCwd = (cwd: string): string =>
-    home !== undefined && home.length > 1 && cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
-  const described = entries.map((entry) => {
-    const messages = SessionStore.loadMessages(entry.id);
-    const firstUser = messages.find((message) => message.role === "user");
-    const opening = (firstUser?.content ?? [])
-      .map((block) => (block.type === "text" ? block.text : ""))
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim();
-    return { entry, messages, opening, turns: messages.filter((m) => m.role === "user").length };
-  });
+  // `SessionStore.list()` already counted turns and kept the opening prompt in
+  // its single pass; re-reading every log here would double the picker's I/O.
+  const described = entries.map((entry) => ({
+    entry,
+    opening: entry.opening ?? "",
+    turns: entry.turns ?? 0,
+  }));
   // Sessions with no messages cannot be resumed; only show them when there is
   // nothing else, so the list is not padded with rows that do nothing.
-  const resumable = described.filter((row) => row.messages.length > 0);
+  const resumable = described.filter((row) => row.turns > 0);
   const shown = resumable.length > 0 ? resumable : described;
-  const preferred = shown.find((row) => row.messages.length > 0)?.entry.id;
+  const preferred = shown.find((row) => row.turns > 0)?.entry.id;
   const choice = await selectList({
     title: "Sessions",
     ...(preferred !== undefined ? { current: preferred } : {}),
-    items: shown.map(({ entry, opening, turns }) => ({
+    items: shown.map(({ entry, opening }) => ({
       id: entry.id,
       label: entry.id,
-      // The workspace lives on the row rather than in a group heading: a flat
-      // list needs no scrolling to a heading to tell two sessions apart.
-      detail: `${entry.cwd === here ? pc.cyan("●") : pc.gray("○")} ${shortCwd(entry.cwd)} · ${entry.updatedAt.slice(5, 16).replace("T", " ")}`,
-      preview: [
-        `${turns} turn${turns === 1 ? "" : "s"} · ${entry.model}`,
-        opening.length > 0 ? opening : "(no messages yet)",
-      ],
+      // One line with age, workspace, opening prompt and message count; the
+      // selected row gets the selector's own marker.
+      detail: `${entry.cwd === here ? pc.cyan("●") : pc.gray("○")} ${sessionDetail(entry)}`,
+      preview: [entry.model, opening.length > 0 ? opening : "(no messages yet)"],
     })),
   });
   if (choice === undefined) {

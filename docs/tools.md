@@ -25,7 +25,7 @@ and in order. `⇉` marks the parallel-safe ones in `/tools`.
 
 | Tool | What it does |
 | --- | --- |
-| `glob_files` ⇉ | glob with `.gitignore` respected |
+| `glob_files` ⇉ | glob with `.gitignore` respected; ignores node_modules, build output and Windows/macOS system/profile directories, and caps a home-directory cwd to two levels |
 | `repo_map` ⇉ | symbol and signature index for the workspace: `find` a name to see where it is declared and what depends on it, `budget_tokens` caps the rendered size. Cheaper than reading whole files before a change |
 | `grep_search` ⇉ | JS regex over file contents: `pattern`, `glob`, `max_results`, `context` (0-5 surrounding lines), `case_sensitive` |
 | `lsp` ⇉ | talks to the configured language server: `action: diagnostics` for errors, `hover` for the type/docs at a position, `definition` for where a symbol lives, `codeActions` for the quick fixes offered there |

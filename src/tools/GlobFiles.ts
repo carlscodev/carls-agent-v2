@@ -1,8 +1,11 @@
 import { globby } from "globby";
+import { homedir } from "node:os";
 import { z } from "zod";
 import type { Tool, ToolContext, ToolResult } from "../types/tools.js";
 import type { ToolSchema } from "../types/llm.js";
 import { zodToJsonSchema } from "../utils/schema.js";
+import { IGNORED_GLOB_PATTERNS } from "../utils/ignoredDirs.js";
+import { samePath } from "../utils/platform.js";
 
 const inputSchema = z.object({
   pattern: z.string().describe("Glob pattern, e.g. 'src/**/*.ts' or '**/*.json'."),
@@ -11,12 +14,10 @@ const inputSchema = z.object({
 
 type Input = z.infer<typeof inputSchema>;
 
-const IGNORED = ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/build/**", "**/coverage/**"];
-
 export class GlobFiles implements Tool<Input> {
   readonly name = "glob_files";
   readonly description =
-    "Find files by glob pattern. Ignores node_modules, .git, dist, build and coverage directories.";
+    "Find files by glob pattern. Ignores node_modules, .git, dist, build, coverage and Windows/macOS home and system directories; a home-directory cwd is walked at most two levels deep.";
   readonly readOnly = true;
   readonly category = "read" as const;
 
@@ -33,15 +34,19 @@ export class GlobFiles implements Tool<Input> {
   }
 
   async run(input: Input, ctx: ToolContext): Promise<ToolResult> {
-    const limit = input.limit ?? 200;
+    const atHome = samePath(ctx.cwd, homedir());
+    const limit = atHome ? Math.min(input.limit ?? 200, 200) : (input.limit ?? 200);
     try {
       const matches = await globby(input.pattern, {
         cwd: ctx.cwd,
-        ignore: IGNORED,
+        ignore: [...IGNORED_GLOB_PATTERNS],
         dot: false,
         onlyFiles: true,
         gitignore: true,
         absolute: false,
+        // The home profile is not a project. Keep an explicit glob from
+        // enumerating AppData, Windows or Program Files recursively.
+        ...(atHome ? { deep: 2 } : {}),
       });
       matches.sort();
       const shown = matches.slice(0, limit);
