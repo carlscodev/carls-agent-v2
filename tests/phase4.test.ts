@@ -1,4 +1,5 @@
 import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { getEventListeners } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -258,6 +259,54 @@ describe("StreamingToolExecutor", () => {
     expect(executor.submit(call("s", "bash"))).toBe(false);
     expect(executor.submit(call("r", "read_file"))).toBe(true);
     expect(executor.submit(call("r", "read_file"))).toBe(false);
+  });
+
+  it("detaches its turn-signal listener on abort, so a long turn cannot leak one per step", async () => {
+    // The executor is rebuilt every step, but the turn signal lives for the whole
+    // run. Without detaching, each step adds a listener that never leaves, so a
+    // 30-step turn piles up 30 closures on one signal.
+    const turn = new AbortController();
+    const baseline = getEventListeners(turn.signal, "abort").length;
+    for (let step = 0; step < 30; step++) {
+      const executor = new StreamingToolExecutor({
+        execute: async () => ({ ok: true, output: "" }),
+        signal: turn.signal,
+      });
+      executor.abort();
+    }
+    expect(getEventListeners(turn.signal, "abort").length).toBe(baseline);
+  });
+
+  it("still aborts in-flight work when the turn signal fires", async () => {
+    const turn = new AbortController();
+    const started: string[] = [];
+    const executor = new StreamingToolExecutor({
+      signal: turn.signal,
+      execute: async (toolCall, signal) => {
+        started.push(toolCall.id);
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, 50);
+          signal.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              reject(new Error("aborted"));
+            },
+            { once: true },
+          );
+        });
+        return { ok: true, output: toolCall.id };
+      },
+    });
+
+    executor.submit(call("a"));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    turn.abort();
+
+    const outcome = await executor.take(call("a"));
+    expect(started).toEqual(["a"]);
+    expect(outcome.result.ok).toBe(false);
+    expect(outcome.result.error).toContain("aborted");
   });
 });
 

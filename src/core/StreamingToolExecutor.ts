@@ -70,6 +70,9 @@ export class StreamingToolExecutor {
   private readonly pending = new Map<string, Promise<PrefetchedToolResult>>();
   private readonly ready = new Map<string, PrefetchedToolResult>();
   private readonly waiters: (() => void)[] = [];
+  /** The turn's signal, retained so `abort` can detach the listener it added. */
+  private readonly externalSignal: AbortSignal | undefined;
+  private readonly onExternalAbort = (): void => this.abort();
   private active = 0;
   private queued = 0;
 
@@ -79,9 +82,10 @@ export class StreamingToolExecutor {
     this.prefetchable = options.prefetchable ?? ((name) => PREFETCHABLE_TOOLS.has(name));
 
     const external = options.signal;
+    this.externalSignal = external;
     if (external !== undefined) {
       if (external.aborted) this.controller.abort();
-      else external.addEventListener("abort", () => this.abort(), { once: true });
+      else external.addEventListener("abort", this.onExternalAbort, { once: true });
     }
   }
 
@@ -136,8 +140,13 @@ export class StreamingToolExecutor {
     return await this.runInline(call);
   }
 
-  /** Cancels every in-flight and queued call, and links the turn's abort. */
+  /** Cancels every in-flight and queued call, and unlinks the turn's abort. */
   abort(): void {
+    // Detach first: the executor is scoped to one step, but it listens on the
+    // turn's signal, which lives for the whole run. Leaving the listener attached
+    // leaks one closure per step onto that signal, so a long turn accumulates
+    // them and every later abort fires a cohort that is already over.
+    this.externalSignal?.removeEventListener("abort", this.onExternalAbort);
     if (this.controller.signal.aborted) {
       this.releaseAll();
       return;
