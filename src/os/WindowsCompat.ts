@@ -1,5 +1,5 @@
 import { existsSync, statSync } from "node:fs";
-import { basename, isAbsolute, win32 } from "node:path";
+import { win32 } from "node:path";
 
 /**
  * Native Windows behaviour that the rest of the harness can rely on without
@@ -117,7 +117,7 @@ export function normalizeWindowsLongPath(
   threshold: number = WINDOWS_MAX_PATH,
 ): string {
   const value = normalizeWindowsPath(input);
-  return value.length >= threshold && isAbsolute(value) ? toExtendedLengthPath(value) : value;
+  return value.length >= threshold && win32.isAbsolute(value) ? toExtendedLengthPath(value) : value;
 }
 
 /** PATHEXT entries in lookup order, de-duplicated and upper-cased. */
@@ -209,7 +209,7 @@ export function resolveWindowsExecutable(
   const hasSeparator = /[\\/]/.test(name) || /^[A-Za-z]:/.test(name);
   if (hasSeparator) {
     const cwd = options.cwd ?? process.cwd();
-    const target = isAbsolute(name) ? normalizeWindowsPath(name) : win32.resolve(cwd, name);
+    const target = win32.isAbsolute(name) ? normalizeWindowsPath(name) : win32.resolve(cwd, name);
     const directory = win32.dirname(target);
     return matchInDirectory(directory, win32.basename(target), extensions, isFile);
   }
@@ -298,7 +298,7 @@ export function planDirectWindowsCommand(
   // A shell started directly would lose the UTF-8 prologue the platform-shell
   // path prepends, turning `powershell -Command "Write-Output ñ"` into mojibake.
   // Send these through `shellForPlatform()` instead.
-  const name = basename(resolved.file).toLowerCase();
+  const name = win32.basename(resolved.file).toLowerCase();
   if (name === "powershell" || name === "powershell.exe" || name === "pwsh" || name === "pwsh.exe" || name === "cmd" || name === "cmd.exe") {
     return undefined;
   }
@@ -337,7 +337,7 @@ export function windowsUtf8Overrides(): Record<string, string> {
  * disagree on every flag name; this text is valid in both.
  */
 export function utf8PreludeForShell(shellFile: string): string {
-  const name = basename(shellFile).toLowerCase();
+  const name = win32.basename(shellFile).toLowerCase();
   if (name === "cmd" || name === "cmd.exe") return "chcp 65001>nul&";
   if (name.includes("powershell") || name === "pwsh" || name === "pwsh.exe") {
     return "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$OutputEncoding=[Console]::OutputEncoding;";
