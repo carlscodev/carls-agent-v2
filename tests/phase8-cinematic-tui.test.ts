@@ -329,6 +329,24 @@ describe("toast manager", () => {
     detach();
     manager.dispose();
   });
+
+  it("announces an injected skill, a checkpoint and an operator rule", () => {
+    const bus = new EventBus();
+    const manager = new ToastManager({ setTimer: () => ({ unref: () => undefined }), clearTimer: () => undefined });
+    const detach = attachToastBus(bus, manager);
+    bus.emit("skill.active", { name: "modern-web-glassmorphism", at: 0 });
+    bus.emit("checkpoint.created", { id: "a8f2", files: 12, label: "manual", at: 0 });
+    bus.emit("operator.rule", { id: "r1", kind: "correction", at: 0 });
+    const texts = manager.active.map((toast) => toast.text);
+    expect(texts.some((text) => text.includes("modern-web-glassmorphism"))).toBe(true);
+    expect(texts.some((text) => text.includes("a8f2"))).toBe(true);
+    expect(texts.some((text) => text.includes("Regla de operador"))).toBe(true);
+    detach();
+    manager.dispose();
+    // Detaching must not leave the subscriptions behind on the bus.
+    bus.emit("skill.active", { name: "late", at: 0 });
+    expect(manager.active).toHaveLength(0);
+  });
 });
 
 describe("shimmer and phase timeline", () => {
