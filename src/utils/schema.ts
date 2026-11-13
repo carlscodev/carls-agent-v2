@@ -34,6 +34,16 @@ export function zodToJsonSchema(schema: z.ZodTypeAny): JsonSchema {
     return inner;
   }
 
+  // `.superRefine`/`.refine` wrap the object in a ZodEffects; the JSON schema
+  // must describe the inner shape, not an empty object.
+  if (schema instanceof z.ZodEffects) {
+    return zodToJsonSchema((def.schema as z.ZodTypeAny) ?? z.any());
+  }
+
+  if (schema instanceof z.ZodUnion) {
+    return { anyOf: ((def.options as z.ZodTypeAny[]) ?? []).map((option) => zodToJsonSchema(option)) };
+  }
+
   if (schema instanceof z.ZodString) return { type: "string" };
   if (schema instanceof z.ZodNumber) return { type: "number" };
   if (schema instanceof z.ZodBoolean) return { type: "boolean" };

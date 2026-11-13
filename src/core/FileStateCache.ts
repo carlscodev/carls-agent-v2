@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { resolve, sep } from "node:path";
+import { windowsPathKey } from "../os/WindowsCompat.js";
 import type { SymbolEntry } from "./RepoMap.js";
 
 /**
@@ -40,8 +41,9 @@ export function contentHash(text: string): string {
 function normalize(path: string): string {
   const absolute = resolve(path);
   // Windows paths are case-insensitive, and tools can produce either casing for
-  // the same file. Normalising the key prevents a duplicate parse of one file.
-  return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+  // the same file (including `c:\` vs `C:\` or an MSYS `/c/` path). The shared
+  // key canonicalises the drive before lower-casing, so one file is one entry.
+  return process.platform === "win32" ? windowsPathKey(absolute) : absolute;
 }
 
 /**

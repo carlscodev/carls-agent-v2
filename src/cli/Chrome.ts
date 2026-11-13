@@ -97,6 +97,14 @@ export class Chrome {
     return this.layout;
   }
 
+  /**
+   * Top row for a bottom dock panel of `height` rows. The wizard uses it to sit
+   * just above the footer without touching the fixed header.
+   */
+  wizardOrigin(height: number): number {
+    return Math.max(1, this.layout.height - Math.max(1, height) - 1);
+  }
+
   private computeLayout(): ChromeLayout {
     const rows = this.out.rows ?? 0;
     const height = Math.max(12, rows > 0 ? rows : 24);

@@ -28,6 +28,10 @@ export interface ParsedArgs {
   apiKey?: string;
   /** Agent preset from .agents/agents/<name>.md to start with. */
   agent?: string;
+  /** Copy the native executable into %LOCALAPPDATA%\carls\bin, then exit. */
+  installWin: boolean;
+  /** Remove the per-user Windows installation, then exit. */
+  uninstallWin: boolean;
 }
 
 export class ArgError extends Error {}
@@ -43,6 +47,8 @@ function emptyParsed(): ParsedArgs {
     doctor: false,
     update: false,
     updateCheck: false,
+    installWin: false,
+    uninstallWin: false,
   };
 }
 
@@ -167,6 +173,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--doctor":
         parsed.doctor = true;
         break;
+      case "--install-win":
+        parsed.installWin = true;
+        break;
+      case "--uninstall-win":
+        parsed.uninstallWin = true;
+        break;
       case "--update":
         parsed.update = true;
         break;
@@ -217,6 +229,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
   }
 
+  if (parsed.installWin && parsed.uninstallWin) {
+    throw new ArgError("Use either --install-win or --uninstall-win, not both.");
+  }
+  if ((parsed.installWin || parsed.uninstallWin) && positionals.length > 0) {
+    throw new ArgError("--install-win and --uninstall-win do not take a query.");
+  }
   if (positionals.length > 0) {
     parsed.query = positionals.join(" ");
   }
@@ -261,6 +279,10 @@ OPTIONS
       --api-key <key>         Key for the setup wizard (prefer the env var)
       --providers             List every bundled provider and exit
       --doctor                Check config, credentials and connectivity, then exit
+      --install-win           Copy carls.exe to %LOCALAPPDATA%\\carls\\bin and add
+                              it to the user Path (Windows only), then exit
+      --uninstall-win         Remove the per-user Windows install and its Path
+                              entry, then exit
       --update                Install the latest published release, then exit
       --update-check          Report whether a newer release exists
       --ref <tag>             With --update: install a specific release tag

@@ -1,7 +1,6 @@
 import { platform, release } from "node:os";
-import { readFileSync, existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { Message, Provider } from "../types/llm.js";
 import type { ToolContext } from "../types/tools.js";
@@ -26,6 +25,7 @@ import { DelegateTask } from "../tools/DelegateTask.js";
 import { RepoMap } from "./RepoMap.js";
 import { RepoMapTool } from "../tools/RepoMapTool.js";
 import { TodoWrite } from "../tools/TodoWrite.js";
+import { AskUserTool } from "../tools/AskUserTool.js";
 import { UseSkill } from "../tools/UseSkill.js";
 import { SaveSkill } from "../tools/SaveSkill.js";
 import {
@@ -93,6 +93,7 @@ import { Hooks } from "./Hooks.js";
 import { MemoryLoader } from "./MemoryLoader.js";
 import { SkillLoader } from "../skills/SkillLoader.js";
 import { ContextManager, contextReport } from "./ContextManager.js";
+import { findRuntimeAsset } from "../os/RuntimePaths.js";
 import { SubAgent } from "./SubAgent.js";
 import type { SubAgentRole } from "./SubAgent.js";
 import { SubAgentPool } from "./SubAgentPool.js";
@@ -100,6 +101,7 @@ import { AgentLoop, type RunOptions } from "./AgentLoop.js";
 import { McpClient } from "../mcp/McpClient.js";
 import { EventBus } from "./EventBus.js";
 import type { Checkpoint as ShadowCheckpoint } from "../security/ShadowGit.js";
+import { autoResolveAskUser, type AskUserHandler, type AskUserPayload, type AskUserResult } from "../types/askUser.js";
 
 export interface RuntimeDeps {
   config: ResolvedConfig;
@@ -152,6 +154,8 @@ export class Runtime {
   private readonly steeringClassifier = new AutoReviewSteeringClassifier();
   /** Tools running right now, keyed by tool_use id, for the live inspector. */
   private readonly activeTools = new Map<string, { id: string; name: string; startedAt: number }>();
+  /** Keyboard widget injected by the REPL; absent in headless runs. */
+  private askUserHandler?: AskUserHandler;
 
   constructor(deps: RuntimeDeps, history: Message[] = []) {
     this.config = deps.config;
@@ -205,6 +209,7 @@ export class Runtime {
       new BashExecution(),
       new DelegateTask(),
       new TodoWrite(),
+      new AskUserTool(),
       new UseSkill(),
       new SaveSkill(),
       new MultiRead(),
@@ -328,6 +333,7 @@ export class Runtime {
       spawnSubAgent: (goal: string, role?: SubAgentRole) => this.subAgent.run(goal, role),
       spawnSubAgentPool: (tasks) => this.subAgentPool.run(tasks),
       subAgentPoolLimit: this.subAgentPool.limit,
+      askUser: (payload: AskUserPayload) => this.askUser(payload),
     };
   }
 
@@ -588,6 +594,28 @@ export class Runtime {
     this.lastCheckpoint = checkpoint;
   }
 
+  /** The REPL installs the keyboard widget here; tests may install a script. */
+  setAskUserHandler(handler?: AskUserHandler): void {
+    if (handler === undefined) delete this.askUserHandler;
+    else this.askUserHandler = handler;
+  }
+
+  /**
+   * Elicitation entry point for `ask_user`.
+   *
+   * A human is only present when both ends are a TTY and the permission mode
+   * has not opted out of interaction. `-p`, CI, `yolo` and `auto` take the
+   * default answers, so no pipeline can hang waiting for a key nobody can press.
+   */
+  async askUser(payload: AskUserPayload): Promise<AskUserResult> {
+    const interactive = process.stdin.isTTY === true && process.stderr.isTTY === true;
+    const unattended = this.config.mode === "yolo" || this.config.mode === "auto";
+    if (!interactive || unattended || this.askUserHandler === undefined) {
+      return autoResolveAskUser(payload);
+    }
+    return await this.askUserHandler(payload);
+  }
+
   /** Drains steering messages; the loop calls this at every step boundary. */
   takeSteering(): string[] {
     return this.steering.splice(0, this.steering.length);
@@ -709,6 +737,16 @@ export function buildSystemPrompt(config: ResolvedConfig): string {
     ].join("\n"),
   );
 
+  sections.push(
+    [
+      "Elicitation rule:",
+      "- A direct or technical request (fix the bug in X, run the tests, rename a symbol) needs ZERO questions: act immediately.",
+      "- A new project or an open design with several plausible paths (build me a game, make me an app, design a system) MUST start with ask_user:",
+      "  group 2-4 high-impact questions (stack/engine, visual style, core mechanics, scope) in ONE call, then use plan_task.",
+      "- ask_user returns a JSON answer map; treat those answers as requirements. In a headless run the defaults are selected automatically.",
+    ].join("\n"),
+  );
+
   sections.push(`Environment: ${platform()} ${release()} · node ${process.version} · cwd ${config.cwd}`);
 
   const git = gitSnapshot(config.cwd);
@@ -773,13 +811,16 @@ function gitSnapshot(cwd: string): string | undefined {
 }
 
 export function packageVersion(): string {
+  // The single-file bundle is built with a define for this expression, so the
+  // version survives without a package.json next to the executable. In a
+  // checkout it is unset and the file below is authoritative.
+  const embedded = process.env.CARLS_EMBEDDED_VERSION;
+  if (typeof embedded === "string" && embedded.length > 0) return embedded;
   try {
-    const here = dirname(fileURLToPath(import.meta.url));
-    for (const candidate of [join(here, "../../package.json"), join(here, "../../../package.json")]) {
-      if (existsSync(candidate)) {
-        const parsed = JSON.parse(readFileSync(candidate, "utf8")) as { version?: string };
-        if (parsed.version) return parsed.version;
-      }
+    const candidate = findRuntimeAsset("package.json");
+    if (candidate !== undefined) {
+      const parsed = JSON.parse(readFileSync(candidate, "utf8")) as { version?: string };
+      if (parsed.version) return parsed.version;
     }
   } catch {
     // fall through

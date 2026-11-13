@@ -170,6 +170,10 @@ export function collectTypedLines(options: TypedLinesOptions): TypedLinesHandle 
     },
     resume() {
       paused = false;
+      // A widget that took stdin (the ask_user box, an approval prompt) pauses
+      // the stream on its way out; the composer must resume it or every later
+      // keystroke would sit in the kernel buffer.
+      input.resume();
     },
   };
 }

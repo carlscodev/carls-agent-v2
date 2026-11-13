@@ -80,4 +80,6 @@ export const CORE_TOOLS: string[] = [
   "grep_search",
   "bash",
   "todo_write",
+  // A local model still needs the one sanctioned way to ask before guessing.
+  "ask_user",
 ];

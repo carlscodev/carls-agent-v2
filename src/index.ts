@@ -11,6 +11,8 @@ import { resolveApiKey } from "./providers/ProviderBase.js";
 import { needsOnboarding, runOnboarding } from "./setup/Onboarding.js";
 import { formatProviderTable } from "./cli/ProviderList.js";
 import { enableWindowsVirtualTerminal } from "./utils/platform.js";
+import { installConsoleRestoreHooks } from "./os/WindowsCompat.js";
+import { installWindows, uninstallWindows } from "./os/WindowsInstall.js";
 import { collectDoctorRows } from "./cli/Doctor.js";
 import { announceUpdate, runUpdate } from "./update/Updater.js";
 import { applyPreset, discoverAgents, findAgent } from "./agents/Presets.js";
@@ -19,6 +21,9 @@ import { join } from "node:path";
 async function main(): Promise<number> {
   // Windows consoles need this before any ANSI colour or cursor control works.
   enableWindowsVirtualTerminal();
+  // A crash or a killed console must still hand back a visible cursor and an
+  // unsynchronised output stream, or PowerShell/CMD look frozen afterwards.
+  installConsoleRestoreHooks();
 
   let args;
   try {
@@ -38,6 +43,18 @@ async function main(): Promise<number> {
   if (args.version) {
     process.stdout.write(`${packageVersion()}\n`);
     return 0;
+  }
+  if (args.installWin || args.uninstallWin) {
+    // Installation must work before onboarding and without a provider key: it is
+    // the first command a fresh Windows user runs.
+    try {
+      if (args.installWin) installWindows();
+      else uninstallWindows();
+      return 0;
+    } catch (error) {
+      process.stderr.write(`${pc.red("error:")} ${(error as Error).message}\n`);
+      return 2;
+    }
   }
   if (args.listProviders) {
     process.stdout.write(formatProviderTable());

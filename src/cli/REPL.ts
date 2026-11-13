@@ -19,9 +19,11 @@ import { MarkdownRenderer } from "./Markdown.js";
 import { theme } from "./Theme.js";
 import { openCommandPalette } from "./CommandPalette.js";
 import { expandMentions, listWorkspaceFiles } from "./Mentions.js";
-import { PromptQueue, collectTypedLines, drainQueue } from "./Queue.js";
+import { PromptQueue, collectTypedLines, drainQueue, type TypedLinesHandle } from "./Queue.js";
 import { selectList } from "./SelectList.js";
 import { TabManager, shortTitle, type Tab } from "./Tabs.js";
+import { PromptWizardBox, wizardBoxHeight } from "./PromptWizardBox.js";
+import { autoResolveAskUser, type AskUserHandler, type AskUserPayload, type AskUserResult } from "../types/askUser.js";
 import { FrameCoalescer } from "./FrameRenderer.js";
 import { formatDuration } from "./Text.js";
 
@@ -52,6 +54,9 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     );
     await runtime.connectMcpServers();
     await runtime.start();
+    // The handler is a lazy closure: the wizard needs `chrome`, which exists
+    // only after the first tab is built. By the time ask_user runs, it is set.
+    runtime.setAskUserHandler((payload) => askUserHandler(payload));
     return { id: session.id, title, payload: runtime };
   };
 
@@ -96,6 +101,10 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   /** Messages typed while a turn was running, drained in order afterwards. */
   const queue = new PromptQueue();
   let busy = false;
+  /** Keyboard widget selected by ask_user; defaults to the headless resolver. */
+  let askUserHandler: AskUserHandler = async (payload) => autoResolveAskUser(payload);
+  /** The composer that owns stdin during a turn, paused while the box is open. */
+  let activeComposer: TypedLinesHandle | undefined;
   let interruptCount = 0;
   let lastGoal: string | undefined;
   let activeAbort: AbortController | undefined;
@@ -299,6 +308,38 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     chrome.setTabs(tabStripLine(tabs.all(), tabs.activeIndex));
     showStatus();
   };
+
+  /**
+   * Opens the bottom question box and pauses the steering composer while it
+   * owns the keyboard. The box itself clears its rows; Chrome only has to give
+   * the terminal back with its footer repainted.
+   */
+  const askUserWithWizard = async (payload: AskUserPayload): Promise<AskUserResult> => {
+    if (!interactive) return autoResolveAskUser(payload);
+    const composer = activeComposer;
+    composer?.pause();
+    if (useChrome) chrome.suspend();
+    const height = wizardBoxHeight(payload);
+    const rows = process.stderr.rows !== undefined && process.stderr.rows > 0 ? process.stderr.rows : 24;
+    const originRow = useChrome ? chrome.wizardOrigin(height) : Math.max(1, rows - height - 1);
+    try {
+      return await PromptWizardBox.run({
+        payload,
+        input: process.stdin,
+        output: process.stderr,
+        originRow,
+        boxHeight: height,
+      });
+    } finally {
+      if (useChrome) {
+        chrome.resume();
+        chrome.moveToRegionBottom();
+      }
+      composer?.resume();
+      showStatus();
+    }
+  };
+  askUserHandler = askUserWithWizard;
 
   /** Points `runtime` at the tab in `index` and repaints. */
   const activateTab = (index: number): void => {
@@ -534,6 +575,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           onInterrupt: () => process.kill(process.pid, "SIGINT"),
         })
       : undefined;
+    activeComposer = composer;
     // Approvals read stdin line by line; the composer steps aside while one is
     // on screen so a "y" cannot also become a steering message.
     runtime.gate.setPromptPause((paused) => {
@@ -605,6 +647,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       reasoningFrames.dispose();
       runtime.gate.setPromptPause(undefined);
       composer?.stop();
+      activeComposer = undefined;
       // A steer that arrived too late to reach a step boundary still runs.
       for (const leftover of runtime.takeSteering()) queue.push(leftover);
       busy = false;

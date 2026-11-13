@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { shellForPlatform } from "../utils/platform.js";
+import { isWindows, shellForPlatform } from "../utils/platform.js";
 import {
   detectOsProfile,
   killProcessTree,
@@ -7,6 +7,10 @@ import {
   utf8Env,
   verifyCwdIntegrity,
 } from "../os/OsRuntimeAdapter.js";
+import {
+  planDirectWindowsCommand,
+  utf8PreludeForShell,
+} from "../os/WindowsCompat.js";
 import { sandboxCommand } from "../os/Sandbox.js";
 import { z } from "zod";
 import type { Tool, ToolContext, ToolResult } from "../types/tools.js";
@@ -119,17 +123,30 @@ export class BashExecution implements Tool<Input> {
     return new Promise<SpawnOutcome>((resolve) => {
       // Windows has no /bin/bash: the platform shell is cmd.exe or PowerShell.
       const shell = shellForPlatform();
-      // PowerShell loses a native command's exit code unless the command ends
-      // with `exit $LASTEXITCODE`; the shell spec carries that suffix.
-      const commandText = `${command}${shell.commandSuffix ?? ""}`;
-      const wrapped = sandboxed ? sandboxCommand(shell.file, shell.args, commandText, cwd) : undefined;
-      const file = wrapped?.file ?? shell.file;
-      const args = wrapped?.args ?? [...shell.args, commandText];
+      const commandText = `${utf8PreludeForShell(shell.file)}${command}${shell.commandSuffix ?? ""}`;
+
+      // A simple invocation of a real executable does not need an intermediate
+      // shell on Windows. Bypassing PowerShell removes a process launch, a
+      // quoting layer and its exit-code quirks from every `git status`.
+      const direct =
+        isWindows() && !sandboxed
+          ? planDirectWindowsCommand(command, { cwd, env: process.env })
+          : undefined;
+      const useDirect = direct?.launcher === "direct";
+
+      const wrapped =
+        !useDirect && sandboxed ? sandboxCommand(shell.file, shell.args, commandText, cwd) : undefined;
+      const file = useDirect && direct !== undefined ? direct.file : (wrapped?.file ?? shell.file);
+      const args =
+        useDirect && direct !== undefined ? direct.args : (wrapped?.args ?? [...shell.args, commandText]);
+      // UTF-8 is forced so a non-English locale cannot corrupt the observation.
+      // The shell prologue above covers the inherited console; the environment
+      // covers Python and anything else that only reads its own variables.
+      const childEnv = isWindows() ? { ...process.env, ...utf8Env() } : { ...process.env, ...detectOsProfile().env };
 
       const child = spawn(file, args, {
         cwd,
-        // UTF-8 is forced so a non-English locale cannot corrupt the observation.
-        env: { ...process.env, ...detectOsProfile().env },
+        env: childEnv,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
         // A detached POSIX child leads its own process group, which is what

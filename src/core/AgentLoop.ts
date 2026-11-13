@@ -119,7 +119,9 @@ export class AgentLoop {
    */
   private parallelSafe(name: string): boolean {
     const tool: Tool | undefined = this.deps.registry.get(name);
-    return tool !== undefined && tool.readOnly;
+    // An exclusive tool (the interactive question box) owns the keyboard, so it
+    // must never share a batch with a read that could steal focus.
+    return tool !== undefined && tool.readOnly && tool.exclusive !== true;
   }
 
   /**

@@ -23,6 +23,7 @@ import { writeTranscript } from "./Export.js";
 import { composeInEditor, editorSpec } from "./Editor.js";
 import { ExecutionReceipt } from "../symbiosis/ExecutionReceipt.js";
 import { fileStateCache } from "../core/FileStateCache.js";
+import { installWindows, uninstallWindows } from "../os/WindowsInstall.js";
 
 export interface CommandContext {
   runtime: Runtime;
@@ -1078,6 +1079,30 @@ export const COMMANDS: CommandSpec[] = [
         return false;
       }
       printPanel("Execution receipt", ExecutionReceipt.format(receipt).split("\n"));
+      return false;
+    },
+  },
+  {
+    name: "/install-win",
+    summary: "Install carls.exe for this user and add it to the user Path (Windows)",
+    run: () => {
+      try {
+        installWindows();
+      } catch (error) {
+        printError((error as Error).message);
+      }
+      return false;
+    },
+  },
+  {
+    name: "/uninstall-win",
+    summary: "Remove the per-user Windows installation and its Path entry",
+    run: () => {
+      try {
+        uninstallWindows();
+      } catch (error) {
+        printError((error as Error).message);
+      }
       return false;
     },
   },

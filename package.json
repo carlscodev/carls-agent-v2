@@ -18,6 +18,8 @@
   ],
   "scripts": {
     "build": "tsc",
+    "build:bundle": "node scripts/build-win-exe.mjs --bundle-only",
+    "build:exe": "npm run build && node scripts/build-win-exe.mjs --exe",
     "start": "node ./bin/carls.mjs",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
@@ -33,6 +35,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.9.0",
+    "esbuild": "^0.28.2",
     "husky": "^9.1.7",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",

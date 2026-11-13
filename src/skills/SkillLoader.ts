@@ -1,7 +1,19 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { findRuntimeDirectory, runtimeRoots } from "../os/RuntimePaths.js";
+
+/**
+ * Build-time snapshot of `skills/`. The bundle defines this identifier with an
+ * object of `relative/path.md -> contents`, which is what makes `carls.exe`
+ * self-contained: no skills directory has to travel with the executable. In a
+ * checkout the identifier is absent and the loader reads the directory.
+ */
+declare const __CARLS_EMBEDDED_SKILLS__: Record<string, string> | undefined;
+
+function embeddedSkillSources(): Record<string, string> | undefined {
+  return typeof __CARLS_EMBEDDED_SKILLS__ !== "undefined" ? __CARLS_EMBEDDED_SKILLS__ : undefined;
+}
 
 export interface Skill {
   name: string;
@@ -79,20 +91,32 @@ function asString(value: unknown): string | undefined {
 
 /** Root directory holding the bundled skills that ship with the package. */
 export function builtinSkillsDir(): string {
-  const here = dirname(fileURLToPath(import.meta.url));
-  for (const candidate of [
-    resolve(here, "..", "..", "..", "skills"),
-    resolve(here, "..", "..", "skills"),
-    resolve(here, "..", "..", "..", "..", "skills"),
-  ]) {
-    if (existsSync(candidate)) return candidate;
+  // `runtimeRoots()` also contains compiled module folders; `dist/src/skills`
+  // exists but holds only `.js`. A candidate is the catalog only when it has a
+  // real skill file, otherwise the loader would silently discover zero builtins.
+  for (const root of runtimeRoots()) {
+    const candidate = join(root, "skills");
+    if (!existsSync(candidate)) continue;
+    try {
+      const entries = readdirSync(candidate);
+      const hasSkill = entries.some(
+        (entry) => entry.endsWith(".md") || existsSync(join(candidate, entry, "SKILL.md")),
+      );
+      if (hasSkill) return candidate;
+    } catch {
+      // An unreadable candidate is not the catalog; try the next root.
+    }
   }
-  return resolve(here, "..", "..", "..", "skills");
+  return findRuntimeDirectory("skills") ?? join(runtimeRoots()[0] ?? process.cwd(), "skills");
 }
 
-function readSkillFile(path: string, source: Skill["source"], fallbackName: string): Skill | undefined {
+function readSkillContent(
+  raw: string,
+  path: string,
+  source: Skill["source"],
+  fallbackName: string,
+): Skill | undefined {
   try {
-    const raw = readFileSync(path, "utf8");
     const { data, body } = parseFrontmatter(raw);
     const name = asString(data.name) ?? fallbackName;
     const description =
@@ -113,6 +137,14 @@ function readSkillFile(path: string, source: Skill["source"], fallbackName: stri
   }
 }
 
+function readSkillFile(path: string, source: Skill["source"], fallbackName: string): Skill | undefined {
+  try {
+    return readSkillContent(readFileSync(path, "utf8"), path, source, fallbackName);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Discovers skills from the bundled catalog, the user's home directory and the
  * current project. Later sources win, so a project can override a builtin.
@@ -121,7 +153,12 @@ export class SkillLoader {
   static discover(cwd: string): Skill[] {
     const byName = new Map<string, Skill>();
 
-    for (const skill of SkillLoader.loadDir(builtinSkillsDir(), "builtin")) byName.set(skill.name, skill);
+    const embedded = embeddedSkillSources();
+    const builtins =
+      embedded !== undefined
+        ? SkillLoader.loadEmbedded(embedded)
+        : SkillLoader.loadDir(builtinSkillsDir(), "builtin");
+    for (const skill of builtins) byName.set(skill.name, skill);
     for (const skill of SkillLoader.loadDir(join(homedir(), ".carls", "skills"), "user")) {
       byName.set(skill.name, skill);
     }
@@ -130,6 +167,22 @@ export class SkillLoader {
     }
 
     return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /** Parses the build-time snapshot; keys are sorted for a stable listing. */
+  private static loadEmbedded(sources: Record<string, string>): Skill[] {
+    const skills: Skill[] = [];
+    for (const key of Object.keys(sources).sort()) {
+      const raw = sources[key];
+      if (raw === undefined) continue;
+      const normalized = key.replace(/\\/g, "/");
+      const stem = normalized.endsWith("/SKILL.md")
+        ? (normalized.slice(0, -"/SKILL.md".length).split("/").pop() ?? normalized)
+        : (normalized.replace(/\.md$/i, "").split("/").pop() ?? normalized);
+      const skill = readSkillContent(raw, `builtin:${normalized}`, "builtin", stem);
+      if (skill !== undefined) skills.push(skill);
+    }
+    return skills;
   }
 
   /** Reads either `<dir>/<name>/SKILL.md` or `<dir>/<name>.md`. */

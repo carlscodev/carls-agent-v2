@@ -7,6 +7,7 @@ import type { SkillRegistry } from "../skills/SkillRegistry.js";
 import type { SubAgentRole } from "../core/SubAgent.js";
 import type { SubAgentOutcome, SubAgentTask } from "../core/SubAgentPool.js";
 import type { PersistentTaskDAG } from "../core/PersistentTaskDAG.js";
+import type { AskUserHandler } from "./askUser.js";
 
 export interface ToolContext {
   cwd: string;
@@ -28,6 +29,12 @@ export interface ToolContext {
   dag?: PersistentTaskDAG;
   /** Live-state renderer used by the compaction pipeline and the receipt. */
   buildLiveState?: () => Promise<string>;
+  /**
+   * Interactive elicitation. A runtime wires this to the keyboard widget when a
+   * human is present and to the default resolver in headless modes; a tool that
+   * runs without it resolves the defaults itself.
+   */
+  askUser?: AskUserHandler;
 }
 
 export interface ToolResult {
@@ -51,6 +58,12 @@ export interface Tool<I = unknown> {
   readonly readOnly: boolean;
   /** Defaults to "read" for read-only tools and "write" otherwise. */
   readonly category?: ToolCategory;
+  /**
+   * True for tools that must run alone: an interactive question owns the
+   * keyboard while the model is still streaming, so it cannot share a batch
+   * with a parallel read nor be prefetched before the turn ends.
+   */
+  readonly exclusive?: boolean;
   /** JSON schema derived from the zod schema, sent to the model. */
   schema(): ToolSchema;
   /** Validates raw model input and returns a typed, safe object. */

@@ -16,6 +16,13 @@ export const PREFETCHABLE_TOOLS: ReadonlySet<string> = new Set([
   "read_task_graph",
 ]);
 
+/**
+ * Tools that own the terminal while they run. They are read-only, but starting
+ * one before the model's turn ends would put a question box on screen over a
+ * stream that is still being written, so they are never prefetched.
+ */
+export const EXCLUSIVE_TOOLS: ReadonlySet<string> = new Set(["ask_user"]);
+
 /** Matches `MAX_PARALLEL_TOOLS` in AgentLoop; kept local to avoid a cycle. */
 export const STREAM_MAX_PARALLEL = 6;
 
@@ -97,7 +104,7 @@ export class StreamingToolExecutor {
    * eligible or the call was already submitted.
    */
   submit(call: StreamingToolCall): boolean {
-    if (!this.prefetchable(call.name)) return false;
+    if (EXCLUSIVE_TOOLS.has(call.name) || !this.prefetchable(call.name)) return false;
     if (this.pending.has(call.id) || this.ready.has(call.id)) return false;
     const promise = this.run(call);
     this.pending.set(call.id, promise);

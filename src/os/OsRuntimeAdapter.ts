@@ -10,6 +10,11 @@ import {
   type Platform,
   type ShellSpec,
 } from "../utils/platform.js";
+import {
+  msysToWindowsPath,
+  normalizeWindowsPath,
+  windowsUtf8Overrides,
+} from "./WindowsCompat.js";
 
 /**
  * One place that answers "which machine am I on, and what does that change".
@@ -44,10 +49,9 @@ export interface OsProfile {
  */
 export function utf8Env(): Record<string, string> {
   if (isWindows()) {
-    return {
-      PYTHONIOENCODING: "utf-8",
-      PYTHONUTF8: "1",
-    };
+    // PowerShell and cmd.exe both default to the legacy OEM code page; the
+    // overrides cover Python children and any tool that reads LANG as well.
+    return { ...windowsUtf8Overrides() };
   }
   return {
     LANG: process.env.LANG ?? "C.UTF-8",
@@ -91,12 +95,18 @@ export function normalizeWorkspacePath(
   const path = platform === "win32" ? win32 : posix;
   const home = options.home ?? homedir();
   let expanded = input;
-  if (input === "~") {
+  // `/c/project` is how Git Bash spells `C:\project`; resolve it before the
+  // path flavour decides that it is a rooted-but-drive-less path.
+  if (platform === "win32") expanded = msysToWindowsPath(expanded);
+  if (expanded === "~") {
     expanded = home;
-  } else if (input.startsWith("~/") || input.startsWith("~\\")) {
-    expanded = path.join(home, input.slice(2));
+  } else if (expanded.startsWith("~/") || expanded.startsWith("~\\")) {
+    expanded = path.join(home, expanded.slice(2));
   }
-  return path.normalize(path.isAbsolute(expanded) ? expanded : path.resolve(base, expanded));
+  const normalized = path.normalize(path.isAbsolute(expanded) ? expanded : path.resolve(base, expanded));
+  // A drive letter has one spelling. Without this, `c:\a.ts` and `C:\a.ts`
+  // become two keys in the file-state cache and two entries in a diff.
+  return platform === "win32" ? normalizeWindowsPath(normalized) : normalized;
 }
 
 export interface CwdIntegrity {
