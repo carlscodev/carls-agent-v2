@@ -858,20 +858,33 @@ function padAnsi(text: string, width: number): string {
   return visible >= width ? fit(text, width) : `${text}${" ".repeat(width - visible)}`;
 }
 
-/** Truncates to the terminal width, keeping colour escapes intact. */
+/**
+ * Truncates to the terminal width, keeping colour escapes intact.
+ *
+ * Width is measured in columns, not UTF-16 units: a CJK or emoji glyph occupies
+ * two columns, so counting it as one lets a "fitted" line overflow the terminal
+ * and wrap into a row the fixed layout never reserved, shifting the header,
+ * composer and footer. A wide glyph that would straddle the cut is dropped whole
+ * and surrogate pairs are never split.
+ */
 function fit(text: string, width: number): string {
+  if (width <= 0) return "";
   if (visibleWidth(text) <= width) return text;
-  let visible = 0;
+  const budget = Math.max(0, width - 1);
+  let used = 0;
   let index = 0;
-  while (index < text.length && visible < width - 1) {
+  while (index < text.length) {
     if (text[index] === "\u001b") {
       const end = text.indexOf("m", index);
       if (end === -1) break;
       index = end + 1;
       continue;
     }
-    visible += 1;
-    index += 1;
+    const char = String.fromCodePoint(text.codePointAt(index) ?? 0);
+    const size = visibleWidth(char);
+    if (used + size > budget) break;
+    used += size;
+    index += char.length;
   }
   return `${text.slice(0, index)}${pc.gray("…")}`;
 }

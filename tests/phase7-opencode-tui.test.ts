@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AnimationTicker, formatElapsed } from "../src/cli/AnimationTicker.js";
 import { Chrome } from "../src/cli/Chrome.js";
+import { visibleWidth } from "../src/cli/Text.js";
 import { Viewport } from "../src/cli/Viewport.js";
 import { Prompt } from "../src/cli/Prompt.js";
 import { complete } from "../src/cli/Autocomplete.js";
@@ -146,6 +147,29 @@ describe("virtual viewport and SGR mouse", () => {
     expect(viewport.pill()).toContain("End");
     viewport.toBottom();
     expect(viewport.scrollOffset).toBe(0);
+  });
+
+  it("fits the header, composer and status to the terminal without wide-glyph overflow", () => {
+    // A CJK string renders two columns per glyph. Counting UTF-16 units lets a
+    // "fitted" line run past the terminal width, wrap into a row the fixed
+    // layout never reserved, and shift the whole frame.
+    const wide = "計".repeat(60);
+    const out = fakeOutput(40, 24);
+    const chrome = new Chrome(out);
+    chrome.enable([wide], { fullscreen: true, header: wide });
+    chrome.setStatus(wide);
+    chrome.drawPrompt("❯ ", wide, wide.length);
+    chrome.finishTurn();
+    chrome.disable();
+
+    // Split on absolute cursor moves, then drop every escape sequence so only
+    // printable glyphs remain, and assert no painted row exceeds the terminal.
+    const ansi = /\u001b\[[0-9;?]*[A-Za-z]/g;
+    const lines = text(out)
+      .split(/\u001b\[\d+;\d+H/)
+      .flatMap((segment) => segment.split("\n"));
+    const overflowing = lines.filter((line) => visibleWidth(line.replace(ansi, "")) > 40);
+    expect(overflowing).toEqual([]);
   });
 });
 
