@@ -80,6 +80,8 @@ export interface McpServerConfig {
   url?: string;
   /** Wire to speak with a remote endpoint. Defaults to "http". */
   transport?: "stdio" | "sse" | "http";
+  /** Per-call timeout in ms; defaults to 60s. */
+  timeoutMs?: number;
 }
 
 export interface ConfigFileShape {
@@ -212,6 +214,63 @@ function readJsonIfExists(path: string): ConfigFileShape {
 }
 
 /**
+ * Expands `${ENV_VAR}` in one string from the environment. An unset variable is
+ * left as the literal `${ENV_VAR}` rather than becoming an empty string, so a
+ * missing token shows up as an obvious placeholder instead of a silent blank.
+ */
+export function expandEnv(value: string, env: NodeJS.ProcessEnv = process.env): string {
+  return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (whole, key: string) => env[key] ?? whole);
+}
+
+/**
+ * Expands `${ENV_VAR}` across an MCP server's `command`, `args`, `url` and `env`
+ * values. This is what lets a token live in the environment (or a `.carls/mcp.json`
+ * that references it) instead of the committed config file.
+ */
+export function expandMcpServer(
+  config: McpServerConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): McpServerConfig {
+  const out: McpServerConfig = {};
+  if (config.command !== undefined) out.command = expandEnv(config.command, env);
+  if (config.args !== undefined) out.args = config.args.map((arg) => expandEnv(arg, env));
+  if (config.url !== undefined) out.url = expandEnv(config.url, env);
+  if (config.transport !== undefined) out.transport = config.transport;
+  if (config.env !== undefined) {
+    const expanded: Record<string, string> = {};
+    for (const [key, value] of Object.entries(config.env)) expanded[key] = expandEnv(value, env);
+    out.env = expanded;
+  }
+  return out;
+}
+
+/** Expands `${ENV_VAR}` in every MCP server of a map. */
+export function expandMcpServers(
+  servers: Record<string, McpServerConfig> | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, McpServerConfig> {
+  const out: Record<string, McpServerConfig> = {};
+  for (const [name, config] of Object.entries(servers ?? {})) out[name] = expandMcpServer(config, env);
+  return out;
+}
+
+/**
+ * Reads `.carls/mcp.json`. Accepts either `{ "mcpServers": {...} }` or the bare
+ * `{ "name": {...} }` map, because both spellings are common in the wild.
+ */
+function readMcpJsonIfExists(path: string): Record<string, McpServerConfig> {
+  const parsed = readJsonIfExists(path) as ConfigFileShape & Record<string, unknown>;
+  const nested = parsed.mcpServers;
+  if (nested !== undefined && typeof nested === "object") return nested;
+  const bare: Record<string, McpServerConfig> = {};
+  for (const [name, value] of Object.entries(parsed)) {
+    if (name === "mcpServers") continue;
+    if (value !== null && typeof value === "object") bare[name] = value as McpServerConfig;
+  }
+  return bare;
+}
+
+/**
  * Precedence: CLI flags > ./.carlsrc.json > ~/.carlsrc.json >
  * /etc/carls/.carlsrc.json (or $CARLS_SYSTEM_CONFIG) > built-in defaults.
  */
@@ -259,7 +318,10 @@ export function loadConfig(overrides: ConfigOverrides = {}, cwd = process.cwd())
       toolExecuteAfter: file.hooks?.toolExecuteAfter ?? file.hooks?.["tool.execute.after"] ?? [],
       sessionIdle: file.hooks?.sessionIdle ?? file.hooks?.["session.idle"] ?? [],
     },
-    mcpServers: file.mcpServers ?? {},
+    mcpServers: expandMcpServers({
+      ...readMcpJsonIfExists(join(cwd, ".carls", "mcp.json")),
+      ...(file.mcpServers ?? {}),
+    }),
     ...(file.lspServers !== undefined ? { lspServers: file.lspServers } : {}),
     allowOutsideWorkspace: file.allowOutsideWorkspace ?? process.env.CARLS_ALLOW_OUTSIDE === "1",
     // Anything that is not one of the two conservative modes keeps the default:

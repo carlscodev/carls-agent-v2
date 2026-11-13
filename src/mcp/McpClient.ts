@@ -43,8 +43,10 @@ const INIT_TIMEOUT_MS = 20000;
 export class McpClient {
   readonly serverName: string;
   readonly transportKind: "stdio" | "sse" | "http";
-  private readonly transport: McpTransport;
+  private transport: McpTransport;
   private readonly logger: Logger;
+  private readonly config: McpServerConfig;
+  private readonly cwd: string;
   private nextId = 1;
   private readonly pending = new Map<
     number,
@@ -53,17 +55,93 @@ export class McpClient {
   private readonly tools: McpToolDescriptor[] = [];
   private closed = false;
   private info: McpServerInfo | undefined;
+  /** True after the transport died on its own; the next call reconnects. */
+  private dead = false;
+  private reconnecting: Promise<void> | undefined;
+  /** Set by the runtime so a reconnect can re-register the new tool wrappers. */
+  onReconnect: (() => void | Promise<void>) | undefined;
 
   constructor(serverName: string, config: McpServerConfig, logger: Logger, cwd: string) {
     this.serverName = serverName;
     this.logger = logger;
+    this.config = config;
+    this.cwd = cwd;
     this.transport = buildTransport(serverName, config, logger, cwd);
     this.transportKind = this.transport.kind;
+    this.transport.onClose?.((error) => this.handleDeath(error));
+  }
+
+  /** Per-call timeout, overridable from the server config. */
+  private callTimeoutMs(): number {
+    return this.config.timeoutMs ?? CALL_TIMEOUT_MS;
+  }
+
+  private handleDeath(error?: Error): void {
+    if (this.closed) return;
+    this.dead = true;
+    this.failAll(new Error(`MCP server "${this.serverName}" transport closed.`));
+    this.logger.warn(
+      `MCP "${this.serverName}" transport closed${error !== undefined ? `: ${error.message}` : ""}; reconnecting on next call.`,
+    );
+  }
+
+  /**
+   * Reconnects a transport that died on its own. Concurrent callers share one
+   * attempt so a burst of tool calls after a crash does not spawn N children.
+   */
+  private async ensureAlive(): Promise<void> {
+    if (!this.dead || this.closed) return;
+    if (this.reconnecting === undefined) {
+      this.reconnecting = this.doReconnect().finally(() => {
+        this.reconnecting = undefined;
+      });
+    }
+    await this.reconnecting;
+  }
+
+  private async doReconnect(): Promise<void> {
+    this.logger.info(`MCP "${this.serverName}": reconnecting…`);
+    await Promise.resolve(this.transport.close()).catch(() => undefined);
+    this.transport = buildTransport(this.serverName, this.config, this.logger, this.cwd);
+    this.transport.onClose?.((error) => this.handleDeath(error));
+    await this.transport.start((message) => this.handleMessage(message));
+    const result = (await this.rawRequest(
+      "initialize",
+      {
+        protocolVersion: "2025-03-26",
+        capabilities: { tools: {} },
+        clientInfo: { name: "carls-code", version: "0.1.0" },
+      },
+      INIT_TIMEOUT_MS,
+    )) as { serverInfo?: { name?: string; version?: string }; protocolVersion?: string } | undefined;
+    const info: McpServerInfo = { name: this.serverName };
+    if (result?.serverInfo?.version !== undefined) info.version = result.serverInfo.version;
+    if (result?.protocolVersion !== undefined) info.protocolVersion = result.protocolVersion;
+    this.info = info;
+    this.notify("notifications/initialized");
+    // Clear `dead` before listing tools: `listTools` goes through `request`,
+    // which would otherwise await this very reconnect and deadlock.
+    this.dead = false;
+    await this.listTools();
+    await this.onReconnect?.();
+    this.logger.info(`MCP "${this.serverName}": reconnected (${this.tools.length} tool(s)).`);
   }
 
   /** Server name and version as reported during the handshake, for /mcp. */
   serverInfo(): McpServerInfo | undefined {
     return this.info;
+  }
+
+  /** Round-trips a `ping` and returns the latency in ms, for `/mcp status|test`. */
+  async ping(timeoutMs = 5000): Promise<number> {
+    const started = Date.now();
+    await this.request("ping", {}, timeoutMs);
+    return Date.now() - started;
+  }
+
+  /** The tools discovered at the last handshake, for `/mcp test`. */
+  toolNames(): string[] {
+    return this.tools.map((descriptor) => descriptor.name);
   }
 
   private failAll(error: Error): void {
@@ -89,8 +167,17 @@ export class McpClient {
     }
   }
 
-  request(method: string, params: unknown, timeoutMs = CALL_TIMEOUT_MS): Promise<unknown> {
+  request(method: string, params: unknown, timeoutMs = this.callTimeoutMs()): Promise<unknown> {
     if (this.closed) return Promise.reject(new Error(`MCP server "${this.serverName}" is closed.`));
+    if (this.dead) {
+      // Reconnect once, then run the call against the fresh transport. A second
+      // death between the check and the send still surfaces as a normal error.
+      return this.ensureAlive().then(() => this.rawRequest(method, params, timeoutMs));
+    }
+    return this.rawRequest(method, params, timeoutMs);
+  }
+
+  private rawRequest(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
     const id = this.nextId++;
     const message: Record<string, unknown> = { jsonrpc: "2.0", id, method };
     if (params !== undefined) message.params = params;
@@ -126,7 +213,7 @@ export class McpClient {
 
   async initialize(): Promise<void> {
     await this.transport.start((message) => this.handleMessage(message));
-    const result = (await this.request(
+    const result = (await this.rawRequest(
       "initialize",
       {
         protocolVersion: "2025-03-26",

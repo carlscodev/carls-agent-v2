@@ -65,6 +65,20 @@ export class ToolRegistry {
     }
     return registry;
   }
+
+  /**
+   * Drops every MCP tool. A conversational turn ("hola") does not need the
+   * schemas of six MCP servers, and advertising them costs tokens and latency
+   * for a reply that will not call one. The tools stay registered, so a call the
+   * model makes anyway still resolves.
+   */
+  withoutMcp(): ToolRegistry {
+    const registry = new ToolRegistry();
+    for (const tool of this.list()) {
+      if (!tool.name.startsWith("mcp__")) registry.register(tool);
+    }
+    return registry;
+  }
 }
 
 /**

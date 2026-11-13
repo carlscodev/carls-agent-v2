@@ -20,6 +20,12 @@ export interface McpTransport {
   readonly kind: "stdio" | "sse" | "http";
   start(sink: MessageSink): Promise<void>;
   send(message: unknown, timeoutMs: number): Promise<void>;
+  /**
+   * Registers a callback fired when the transport dies on its own (a stdio child
+   * exits, an SSE stream ends). The client uses it to reconnect instead of
+   * leaving every later call to fail against a dead pipe.
+   */
+  onClose?(handler: (error?: Error) => void): void;
   /** Async when a child process must be reaped before the caller can remove files. */
   close(): void | Promise<void>;
 }
@@ -131,6 +137,7 @@ export class StdioTransport implements McpTransport {
   private buffer = "";
   private sink: MessageSink = () => {};
   private closed = false;
+  private closeHandler: ((error?: Error) => void) | undefined;
 
   constructor(options: StdioOptions) {
     this.logger = options.logger;
@@ -146,6 +153,16 @@ export class StdioTransport implements McpTransport {
     this.child.stderr.on("data", (chunk: string) =>
       this.logger.debug(`[mcp:${this.serverName}] ${chunk.trim()}`),
     );
+    // An unexpected exit is what a reconnect is for; a `close()`-driven exit is
+    // already flagged by `closed`, so it must not look like a crash.
+    this.child.once("exit", (code, signal) => {
+      if (this.closed) return;
+      this.closeHandler?.(new Error(`stdio server exited (code ${code ?? "null"}, signal ${signal ?? "none"})`));
+    });
+  }
+
+  onClose(handler: (error?: Error) => void): void {
+    this.closeHandler = handler;
   }
 
   async start(sink: MessageSink): Promise<void> {
@@ -223,12 +240,17 @@ export class SseTransport implements McpTransport {
   private endpoint: string | undefined;
   private sink: MessageSink = () => {};
   private closed = false;
+  private closeHandler: ((error?: Error) => void) | undefined;
 
   constructor(options: { url: string; headers: Record<string, string>; logger: Logger; serverName: string }) {
     this.url = options.url;
     this.headers = options.headers;
     this.logger = options.logger;
     this.serverName = options.serverName;
+  }
+
+  onClose(handler: (error?: Error) => void): void {
+    this.closeHandler = handler;
   }
 
   async start(sink: MessageSink): Promise<void> {
@@ -256,7 +278,11 @@ export class SseTransport implements McpTransport {
         announce(new URL(event.data.trim(), this.url).toString());
       }
     }).catch((error: unknown) => {
-      if (!this.closed) fail(new Error(`MCP SSE stream from "${this.serverName}" ended: ${(error as Error).message}`));
+      if (!this.closed) {
+        const wrapped = new Error(`MCP SSE stream from "${this.serverName}" ended: ${(error as Error).message}`);
+        fail(wrapped);
+        this.closeHandler?.(wrapped);
+      }
     });
 
     this.endpoint = await withTimeout(ready, 15000, `MCP SSE endpoint for "${this.serverName}"`);

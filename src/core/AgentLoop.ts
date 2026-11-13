@@ -1,4 +1,4 @@
-import type { ContentBlock, LLMResponse, Message, Provider, ToolSchema } from "../types/llm.js";
+import type { ContentBlock, LLMResponse, Message, Provider, ReasoningSource, ToolSchema } from "../types/llm.js";
 import type { AgentRunResult } from "../types/agent.js";
 import type { Checkpoint } from "../types/agent.js";
 import type { Tool, ToolContext, ToolResult } from "../types/tools.js";
@@ -150,7 +150,7 @@ export interface RunOptions {
   /** Called for every assistant text delta. */
   onText?: (chunk: string) => void;
   /** Called for every reasoning/thinking delta, kept separate from the answer. */
-  onReasoning?: (chunk: string) => void;
+  onReasoning?: (chunk: string, source?: ReasoningSource) => void;
   /** Called after each tool finishes, for UI rendering. */
   onToolResult?: (name: string, result: ToolResult, durationMs: number) => void;
   /** Called right before a tool starts, so the UI can name what is running. */
@@ -552,6 +552,10 @@ export class AgentLoop {
     if (powerMode) {
       turnSystem = `${turnSystem}\n\n${POWER_MODE_MANDATE(decision.role ?? "Systems Architect")}`;
     }
+    // A greeting does not need the schemas of every MCP server in the prompt:
+    // dropping them keeps the fast path fast and the token bill small. The tools
+    // stay registered, so a call the model makes anyway still runs.
+    const turnTools = fastPath ? this.advertised().withoutMcp() : this.advertised();
     const creationRequest = powerMode || isCreationRequest(goal);
     let madeChanges = false;
     let lazyCorrections = 0;
@@ -666,10 +670,14 @@ export class AgentLoop {
           : undefined;
       const onReasoning =
         forwardReasoning !== undefined && options.silent !== true
-          ? (chunk: string): void => {
+          ? (chunk: string, source?: ReasoningSource): void => {
               this.deps.events?.emit("stream.delta", { kind: "reasoning", text: chunk, at: Date.now() });
-              this.deps.events?.emit("reasoning.delta", { text: chunk, source: "reasoning_content", at: Date.now() });
-              forwardReasoning(chunk);
+              this.deps.events?.emit("reasoning.delta", {
+                text: chunk,
+                source: source ?? "reasoning_content",
+                at: Date.now(),
+              });
+              forwardReasoning(chunk, source);
             }
           : undefined;
 
@@ -678,7 +686,7 @@ export class AgentLoop {
         response = await this.deps.provider.complete({
           system: turnSystem,
           messages: history,
-          tools: this.advertised().schemas() as ToolSchema[],
+          tools: turnTools.schemas() as ToolSchema[],
           model: this.deps.config.model,
           maxTokens: this.deps.config.maxTokens,
           ...(this.deps.config.effort !== undefined ? { effort: this.deps.config.effort } : {}),
