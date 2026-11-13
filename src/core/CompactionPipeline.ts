@@ -86,7 +86,10 @@ export interface SupersededObservation {
  */
 export function findSupersededReads(messages: readonly Message[]): SupersededObservation[] {
   const reads = new Map<string, { path: string; index: number }>();
-  const edited = new Set<string>();
+  // Latest edit index per path. A read is only stale when an edit to the same
+  // path happened *after* it; a read that follows the last edit is the current
+  // content, and dropping it would strip the model of the only fresh view.
+  const lastEditIndex = new Map<string, number>();
 
   messages.forEach((message, index) => {
     for (const block of message.content) {
@@ -97,7 +100,8 @@ export function findSupersededReads(messages: readonly Message[]): SupersededObs
         if (block.name === "read_file" || block.name === "multi_read") {
           reads.set(block.id, { path, index });
         } else if (block.name === "write_file" || block.name === "edit_file" || block.name === "apply_patch") {
-          edited.add(path);
+          const previous = lastEditIndex.get(path);
+          if (previous === undefined || index > previous) lastEditIndex.set(path, index);
         }
       }
     }
@@ -105,7 +109,8 @@ export function findSupersededReads(messages: readonly Message[]): SupersededObs
 
   const superseded: SupersededObservation[] = [];
   for (const [toolUseId, entry] of reads) {
-    if (edited.has(entry.path)) {
+    const editedAt = lastEditIndex.get(entry.path);
+    if (editedAt !== undefined && editedAt > entry.index) {
       superseded.push({ toolUseId, path: entry.path, editedAfter: true });
     }
   }

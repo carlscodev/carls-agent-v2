@@ -4807,6 +4807,26 @@ describe("compaction pipeline", () => {
     expect((messages[4]?.content[0] as { content: string }).content).toBe("contents of b.ts");
   });
 
+  it("keeps a read that came after the last edit, and drops only the stale one", () => {
+    // read(a) -> edit(a) -> read(a): the first read is stale, the second is the
+    // current content. A set-based check with no ordering would drop both.
+    const messages: Message[] = [
+      { role: "user", content: [{ type: "tool_use", id: "t1", name: "read_file", input: { path: "src/a.ts" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "old a.ts ".repeat(30), is_error: false }] },
+      { role: "user", content: [{ type: "tool_use", id: "t2", name: "edit_file", input: { path: "src/a.ts" } }] },
+      { role: "user", content: [{ type: "tool_use", id: "t3", name: "read_file", input: { path: "src/a.ts" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t3", content: "new a.ts", is_error: false }] },
+    ];
+
+    expect(findSupersededReads(messages)).toEqual([{ toolUseId: "t1", path: "src/a.ts", editedAfter: true }]);
+
+    pipeline(contextManager()).applyCheapLayers(messages, 1_000_000);
+    // The stale read is replaced with the pointer...
+    expect((messages[1]?.content[0] as { content: string }).content).toContain("the file was edited afterwards");
+    // ...and the fresh read that followed the edit survives untouched.
+    expect((messages[4]?.content[0] as { content: string }).content).toBe("new a.ts");
+  });
+
   it("projects a shorter view without mutating the history", () => {
     const messages: Message[] = Array.from({ length: 40 }, (_, index) => ({
       role: index % 2 === 1 ? ("assistant" as const) : ("user" as const),
