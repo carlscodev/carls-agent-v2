@@ -63,6 +63,8 @@ export interface RunOptions {
   silent?: boolean;
   /** Called for every assistant text delta. */
   onText?: (chunk: string) => void;
+  /** Called for every reasoning/thinking delta, kept separate from the answer. */
+  onReasoning?: (chunk: string) => void;
   /** Called after each tool finishes, for UI rendering. */
   onToolResult?: (name: string, result: ToolResult, durationMs: number) => void;
   /** Called right before a tool starts, so the UI can name what is running. */
@@ -395,6 +397,7 @@ export class AgentLoop {
         ...(this.deps.config.effort !== undefined ? { effort: this.deps.config.effort } : {}),
         signal: ctx.signal,
         ...(options.onText && !options.silent ? { onText: options.onText } : {}),
+        ...(options.onReasoning && !options.silent ? { onReasoning: options.onReasoning } : {}),
       });
       this.deps.costTracker.add(response.usage);
 

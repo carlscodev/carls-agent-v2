@@ -159,10 +159,19 @@ interface StreamState {
   finish: string | null;
   usage?: { prompt_tokens?: number; completion_tokens?: number };
   sawUsage: boolean;
+  /** Set when the `[DONE]` sentinel arrives; the reader must stop there. */
+  done: boolean;
 }
 
 function newStreamState(): StreamState {
-  return { text: "", reasoning: "", tools: new ToolCallAccumulator(), finish: null, sawUsage: false };
+  return {
+    text: "",
+    reasoning: "",
+    tools: new ToolCallAccumulator(),
+    finish: null,
+    sawUsage: false,
+    done: false,
+  };
 }
 
 /**
@@ -199,7 +208,10 @@ function applyFrame(frame: string, state: StreamState, args: CompletionArgs): vo
   const trimmed = payload.trim();
   if (trimmed.length === 0) return;
   // The sentinel closes the stream; there is nothing to accumulate from it.
-  if (trimmed === "[DONE]") return;
+  if (trimmed === "[DONE]") {
+    state.done = true;
+    return;
+  }
 
   let chunk: OpenAIStreamChunk;
   try {
@@ -398,10 +410,15 @@ export class OpenAICompatProvider implements Provider {
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         buffer = drainFrames(buffer, state, args);
+        // `[DONE]` is the protocol's end marker. Some gateways keep the socket
+        // open after it, so waiting for the transport to close would hang the
+        // turn forever; stop as soon as the sentinel is seen.
+        if (state.done) break;
       }
       buffer += decoder.decode();
       drainFrames(`${buffer}\n`, state, args);
     } finally {
+      if (state.done) await reader.cancel().catch(() => undefined);
       reader.releaseLock();
     }
     return finishStream(state, args);

@@ -115,6 +115,32 @@ describe("OpenAI-compatible SSE streaming", () => {
     expect(response.stopReason).toBe("max_tokens");
   });
 
+  it("stops at [DONE] even when the server keeps the connection open", async () => {
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode('data: {"choices":[{"delta":{"content":"done"}}]}\n\n'),
+        );
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        // Deliberately never close: a gateway may keep the socket alive after
+        // the sentinel, and waiting for the transport would hang the turn.
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+
+    const response = await new OpenAICompatProvider("test-key", BASE_URL).complete(args());
+    expect(response.content).toEqual([{ type: "text", text: "done" }]);
+    expect(response.stopReason).toBe("end_turn");
+  });
+
   it("ignores a malformed frame instead of losing the tokens already read", async () => {
     const frames = [
       'data: {"choices":[{"delta":{"content":"kept"}}]}\n\n',

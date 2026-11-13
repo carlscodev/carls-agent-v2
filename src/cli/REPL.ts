@@ -366,6 +366,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     // stream, instead of appearing only once a newline arrives.
     markdown.setLiveTail(true);
     let streamed = false;
+    let reasoningStarted = false;
     if (useChrome) chrome.moveToRegionBottom();
     spinner.start("thinking");
     // Typing during a turn queues the message instead of dropping it. The
@@ -412,10 +413,34 @@ export async function runRepl(options: SessionOptions): Promise<number> {
         onToolStart: (name, input) => {
           setActivity(toolLabel(name, input));
         },
+        onReasoning: (chunk) => {
+          // Thinking models stream their scratchpad before the answer. Show it
+          // dim and clearly separated, so it never reads as the final response.
+          if (!reasoningStarted) {
+            spinner.stop();
+            endActivity();
+            if (useChrome) {
+              chrome.moveToRegionBottom();
+              chrome.writeRegion(`\n${theme().paint(theme().colors.text.faint, "✻ pensando")}\n`);
+            } else {
+              process.stderr.write(`\n${pc.gray("✻ pensando")}\n`);
+            }
+            reasoningStarted = true;
+          }
+          const painted = theme().paint(theme().colors.text.faint, chunk);
+          if (useChrome) chrome.writeRegion(painted);
+          else process.stderr.write(painted);
+        },
         onText: (chunk) => {
           if (!streamed) {
             spinner.stop();
             endActivity();
+            // Close the reasoning block before the answer starts, or the first
+            // word of the answer lands on the last line of the scratchpad.
+            if (reasoningStarted) {
+              if (useChrome) chrome.writeRegion("\n");
+              else process.stderr.write("\n");
+            }
             if (useChrome) chrome.writeRegion(`\n${theme().paint(theme().colors.accent, "◆")} ${theme().bold("carls")}\n`);
             else printAssistantHeader();
             streamed = true;
@@ -427,6 +452,12 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           // narration has no trailing newline, so without this the next tool
           // block is appended to the last word of the sentence.
           if (streamed) markdown.flush();
+          if (reasoningStarted && !streamed) {
+            if (useChrome) chrome.writeRegion("\n");
+            else process.stderr.write("\n");
+            // The next step is a fresh model call, so it gets its own header.
+            reasoningStarted = false;
+          }
           if (!streamed) setActivity("thinking");
         },
       });
