@@ -193,16 +193,82 @@ function frameData(frame: string): string | null {
   return data.length === 0 ? null : data.join("\n");
 }
 
-// a
 function applyFrame(frame: string, state: StreamState, args: CompletionArgs): void {
   const payload = frameData(frame);
   if (payload === null) return;
+  const trimmed = payload.trim();
+  if (trimmed.length === 0) return;
+  // The sentinel closes the stream; there is nothing to accumulate from it.
+  if (trimmed === "[DONE]") return;
 
+  let chunk: OpenAIStreamChunk;
+  try {
+    chunk = JSON.parse(trimmed) as OpenAIStreamChunk;
+  } catch {
+    // A malformed frame is a transport artifact, not a reason to discard the
+    // tokens already received: skip it and keep reading the stream.
+    return;
+  }
 
+  if (chunk.usage !== undefined) {
+    state.usage = chunk.usage;
+    state.sawUsage = true;
+  }
 
+  const choice = chunk.choices?.[0];
+  if (choice === undefined) return;
 
+  const delta = choice.delta;
+  if (delta?.reasoning_content) {
+    state.reasoning += delta.reasoning_content;
+    args.onReasoning?.(delta.reasoning_content);
+  }
+  if (delta?.content) {
+    state.text += delta.content;
+    args.onText?.(delta.content);
+  }
+  if (delta?.tool_calls !== undefined) {
+    state.tools.add(delta.tool_calls);
+  }
+  if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
+    state.finish = choice.finish_reason;
+  }
+}
 
+/**
+ * Estimates the prompt size for a stream that never reports usage. Local
+ * servers commonly omit the final usage frame, and a zero would make the cost
+ * tracker believe the turn was free.
+ */
+function estimatePromptTokens(args: CompletionArgs): number {
+  let total = estimateTokens(args.system);
+  for (const message of args.messages) {
+    for (const block of message.content) {
+      if (block.type === "text") total += estimateTokens(block.text);
+      else if (block.type === "tool_result") total += estimateTokens(block.content);
+      else total += estimateTokens(JSON.stringify(block.input ?? {}));
+    }
+  }
+  return total;
+}
 
+/** Turns the accumulated stream state into the same shape as the JSON path. */
+function finishStream(state: StreamState, args: CompletionArgs): LLMResponse {
+  const content: ContentBlock[] = [];
+  if (state.text.length > 0) content.push({ type: "text", text: state.text });
+  const toolCalls = state.tools.build();
+  content.push(...toolCalls);
+
+  const usage = state.sawUsage ? state.usage : undefined;
+  return {
+    content,
+    stopReason: mapStopReason(state.finish, toolCalls.length > 0),
+    usage: {
+      inputTokens: usage?.prompt_tokens ?? estimatePromptTokens(args),
+      outputTokens: usage?.completion_tokens ?? estimateTokens(state.text + state.reasoning),
+    },
+  };
+}
 
 export interface OpenAICompatOptions {
   /**
@@ -260,6 +326,11 @@ export class OpenAICompatProvider implements Provider {
     // reject it or ignore it, and it inflates the prompt for no benefit.
     if (args.effort !== undefined && this.supportsReasoningEffort) {
       body.reasoning_effort = args.effort;
+    }
+    // Ask for the final usage frame; without it a stream reports no token counts
+    // and the cost tracker has to fall back to an estimate.
+    if (this.streaming) {
+      body.stream_options = { include_usage: true };
     }
 
     return await withRetry(
