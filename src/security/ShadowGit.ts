@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -66,8 +67,11 @@ export class ShadowGit {
     this.authorName = options.authorName ?? "carls-code";
     this.authorEmail = options.authorEmail ?? "carls-code@localhost";
     // A file, not a directory: git creates it. Kept out of the workspace so it
-    // cannot show up in a glob or a `git status`.
-    this.indexPath = join(tmpdir(), `carls-shadow-${process.pid}-${Date.now()}.index`);
+    // cannot show up in a glob or a `git status`. The random suffix matters: two
+    // instances created in the same process and the same millisecond (the
+    // TransactionManager and the runtime both hold one) would otherwise share an
+    // index file and interleave their `add -A` / `read-tree` calls.
+    this.indexPath = join(tmpdir(), `carls-shadow-${process.pid}-${Date.now()}-${randomUUID().slice(0, 8)}.index`);
     this.available = this.detect();
   }
 
