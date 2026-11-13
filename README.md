@@ -122,7 +122,7 @@ claims something works without running it.
 | Sub-agents | isolated read-only exploration with a structured report |
 | Permissions | six modes from read-only to full auto, allow/deny lists, preset `permission:` blocks, diff preview |
 | Hooks | shell hooks around tool calls and sessions, plugin-style events and JSON rewrites |
-| Tools | 62 built-in plus MCP, every schema derived from zod |
+| Tools | 63 built-in plus MCP, every schema derived from zod |
 | MCP | stdio, SSE, Streamable HTTP, `/mcp` inspection |
 | Skills | reusable procedures in three layers, with a usage ledger |
 | Persistent plan | a task graph that survives a restart, with acceptance criteria and verify commands |
