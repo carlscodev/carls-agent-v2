@@ -65,6 +65,20 @@ export interface TypedLinesOptions {
    * message joins the running turn instead of waiting for it.
    */
   onSubmit?: (text: string) => void;
+  /**
+   * Fired when `Esc` is pressed with an empty composer. The REPL turns this into
+   * an immediate `abort()` of the running turn, so the operator never has to wait
+   * for the next step boundary to stop the agent.
+   */
+  onEscape?: () => void;
+  /** Milliseconds to wait before treating a lone `\x1b` as a real Escape. */
+  escapeDelayMs?: number;
+  /**
+   * Fired with the live draft on every keystroke. The chrome layout cannot use
+   * the built-in `\r` echo (the footer is redrawn on a frame budget), so it
+   * repaints the composer row from here instead.
+   */
+  onDraft?: (text: string) => void;
 }
 
 /**
@@ -90,9 +104,22 @@ export function collectTypedLines(options: TypedLinesOptions): TypedLinesHandle 
   let buffer = "";
   let stopped = false;
   let paused = false;
+  // A lone `\x1b` is ambiguous with the head of a CSI sequence that the terminal
+  // split across chunks. readline already waits for its own escape-code timeout,
+  // but a stray `[` / `A` can still arrive right after; this short confirmation
+  // window lets the next key cancel the abort instead of killing a live turn.
+  let escapeTimer: NodeJS.Timeout | undefined;
+  const cancelEscape = (): void => {
+    if (escapeTimer !== undefined) {
+      clearTimeout(escapeTimer);
+      escapeTimer = undefined;
+    }
+  };
+  const escapeDelayMs = options.escapeDelayMs ?? 30;
 
   const echo = options.echo !== false;
   const paint = (): void => {
+    options.onDraft?.(buffer);
     if (!echo) return;
     output.write(`\r\u001b[K${glyph}${buffer}`);
   };
@@ -101,6 +128,10 @@ export function collectTypedLines(options: TypedLinesOptions): TypedLinesHandle 
     if (stopped || paused) return;
     const name = key.name ?? "";
     const seq = sequence ?? key.sequence ?? "";
+    // Any key other than Escape cancels a pending abort: the `\x1b` we saw was
+    // the head of a sequence (arrow, function key), not the operator asking to
+    // stop the turn.
+    if (name !== "escape") cancelEscape();
 
     if (key.ctrl === true) {
       if (name === "c") {
@@ -137,8 +168,21 @@ export function collectTypedLines(options: TypedLinesOptions): TypedLinesHandle 
         return;
       }
       case "escape":
-        buffer = "";
-        if (echo) output.write("\r\u001b[K");
+        // A real Escape clears the draft first; a second one (or an Escape with
+        // nothing typed) aborts the running turn. The short timer is what tells a
+        // genuine keypress from the head of a CSI sequence split across chunks.
+        cancelEscape();
+        if (buffer.length > 0) {
+          buffer = "";
+          options.onDraft?.("");
+          if (echo) output.write("\r\u001b[K");
+          return;
+        }
+        escapeTimer = setTimeout(() => {
+          escapeTimer = undefined;
+          options.onEscape?.();
+        }, escapeDelayMs);
+        if (typeof escapeTimer.unref === "function") escapeTimer.unref();
         return;
       case "backspace":
         buffer = buffer.slice(0, -1);
@@ -161,6 +205,7 @@ export function collectTypedLines(options: TypedLinesOptions): TypedLinesHandle 
     stop() {
       if (stopped) return;
       stopped = true;
+      if (escapeTimer !== undefined) clearTimeout(escapeTimer);
       releaseKeypress();
       input.setRawMode?.(wasRaw);
       // The next prompt inherits the stream; pausing here was what could leave

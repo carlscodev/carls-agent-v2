@@ -41,6 +41,8 @@ export interface ChromeLayout {
   composerRows: number;
   /** Row holding the animated phase timeline, or 0 when not drawn. */
   phaseRow: number;
+  /** Row holding the live thinking line, or 0 when not drawn. */
+  thoughtRow: number;
   /** Columns available to conversation lines, excluding the scrollbar. */
   contentWidth: number;
   /** 1-based divider column for the split inspector, or 0 when hidden. */
@@ -81,6 +83,7 @@ export class Chrome {
   private composerMode = "ask";
   /** Animated Gather -> Act -> Verify line drawn above the composer. */
   private phaseText: string | undefined;
+  private thoughtText: string | undefined;
   /** Right-aligned overlay rows (toasts) composited over the top of the region. */
   private overlayLines: string[] = [];
   private readonly out: NodeJS.WriteStream;
@@ -100,7 +103,20 @@ export class Chrome {
   private originalWrite: WriteFn | undefined;
   private hadOwnWrite = false;
   private ownWrite: unknown;
-  private lastPrompt: { promptText: string; buffer: string; cursor: number } | undefined;
+  private lastPrompt:
+    | { promptText: string; buffer: string; cursor: number; placeholder?: string }
+    | undefined;
+
+  /** Repaints the composer box from the last known state, placeholder included. */
+  private redrawPrompt(): void {
+    if (this.lastPrompt === undefined) return;
+    this.drawPrompt(
+      this.lastPrompt.promptText,
+      this.lastPrompt.buffer,
+      this.lastPrompt.cursor,
+      this.lastPrompt.placeholder,
+    );
+  }
 
   constructor(out: NodeJS.WriteStream = process.stderr) {
     this.out = out;
@@ -188,6 +204,7 @@ export class Chrome {
     composerTop: 1,
     composerRows: 1,
     phaseRow: 0,
+    thoughtRow: 0,
     contentWidth: 79,
     dividerColumn: 0,
     sidebarWidth: 0,
@@ -206,7 +223,7 @@ export class Chrome {
     if (this.composerMode === mode) return;
     this.composerMode = mode;
     if (this.enabled && !this.suspended && this.fullscreenMode && this.lastPrompt !== undefined) {
-      this.drawPrompt(this.lastPrompt.promptText, this.lastPrompt.buffer, this.lastPrompt.cursor);
+      this.redrawPrompt();
     }
   }
 
@@ -225,16 +242,20 @@ export class Chrome {
       const height = Math.max(12, rows);
       const composerRows = 3;
       const statusRow = height;
-      // The phase timeline owns the row above the composer while a turn runs, so
-      // reserving it unconditionally would waste a row when idle. Reserve it only
-      // when there is something to draw.
+      // The phase timeline and the live thinking line each own one row above the
+      // composer while a turn runs, so reserving them unconditionally would waste
+      // two rows when idle. Reserve each only when there is something to draw.
       const phaseRows = this.phaseText !== undefined ? 1 : 0;
-      const composerTop = Math.max(3, height - composerRows - phaseRows);
+      const thoughtRows = this.thoughtText !== undefined ? 1 : 0;
+      const composerTop = Math.max(3, height - composerRows - phaseRows - thoughtRows);
       const phaseRow = phaseRows === 1 ? composerTop - 1 : 0;
+      const thoughtRow = thoughtRows === 1 ? composerTop - 1 - phaseRows : 0;
       const promptRow = composerTop + 1;
-      const maxMenuRows = Math.max(0, composerTop - 3 - phaseRows);
+      const maxMenuRows = Math.max(0, composerTop - 3 - phaseRows - thoughtRows);
       const menuRows = Math.min(this.menuLines.length, maxMenuRows);
-      const menuTop = menuRows > 0 ? composerTop - menuRows : 0;
+      // The menu sits above the phase and thought rows, not over them, or a
+      // completion popup would paint on top of the live status lines.
+      const menuTop = menuRows > 0 ? composerTop - phaseRows - thoughtRows - menuRows : 0;
       const regionTop = 2;
       const regionBottom = Math.max(regionTop, (menuRows > 0 ? menuTop : composerTop) - 1);
       const sidebarWidth =
@@ -257,6 +278,7 @@ export class Chrome {
         composerTop,
         composerRows,
         phaseRow,
+        thoughtRow,
         contentWidth,
         dividerColumn,
         sidebarWidth,
@@ -289,6 +311,7 @@ export class Chrome {
       composerTop: promptRow,
       composerRows: 1,
       phaseRow: 0,
+      thoughtRow: 0,
       contentWidth: width,
       dividerColumn: 0,
       sidebarWidth: 0,
@@ -310,8 +333,10 @@ export class Chrome {
       this.renderViewport();
       this.drawMenu();
       this.drawStatus();
+      this.drawThought();
+      this.drawPhase();
       if (this.lastPrompt !== undefined) {
-        this.drawPrompt(this.lastPrompt.promptText, this.lastPrompt.buffer, this.lastPrompt.cursor);
+        this.redrawPrompt();
       }
       return;
     }
@@ -419,8 +444,10 @@ export class Chrome {
     this.renderViewport();
     this.drawMenu();
     this.drawStatus();
+    this.drawThought();
+    this.drawPhase();
     if (this.lastPrompt !== undefined) {
-      this.drawPrompt(this.lastPrompt.promptText, this.lastPrompt.buffer, this.lastPrompt.cursor);
+      this.redrawPrompt();
     }
   }
 
@@ -543,21 +570,54 @@ export class Chrome {
     this.phaseText = text;
     if (!this.enabled) return;
     if (this.fullscreenMode) {
-      if (had !== has) {
-        // The row is only reserved while a phase is live, so its appearance or
-        // disappearance moves the composer and must re-lay out the screen.
-        this.layout = this.computeLayout();
-        this.applyFullscreenSize();
-        this.renderViewport();
-        this.drawMenu();
-      }
+      if (had !== has) this.relayoutStatusRows();
       this.drawPhase();
-      if (this.lastPrompt !== undefined) {
-        this.drawPrompt(this.lastPrompt.promptText, this.lastPrompt.buffer, this.lastPrompt.cursor);
-      }
+      this.drawThought();
+      this.redrawPrompt();
       return;
     }
     this.drawPhase();
+  }
+
+  /**
+   * Sets the live thinking line drawn above the phase timeline. Passing undefined
+   * removes the row so an idle session reserves nothing for it.
+   */
+  setThought(text: string | undefined): void {
+    const had = this.thoughtText !== undefined;
+    const has = text !== undefined;
+    this.thoughtText = text;
+    if (!this.enabled) return;
+    if (this.fullscreenMode) {
+      if (had !== has) this.relayoutStatusRows();
+      this.drawThought();
+      this.drawPhase();
+      this.redrawPrompt();
+      return;
+    }
+    this.drawThought();
+  }
+
+  /**
+   * Re-lays out the fixed screen after a status row appeared or disappeared. The
+   * rows above the composer are only reserved while live, so a change there moves
+   * the composer and the whole viewport with it.
+   */
+  private relayoutStatusRows(): void {
+    this.layout = this.computeLayout();
+    this.applyFullscreenSize();
+    this.renderViewport();
+    this.drawMenu();
+  }
+
+  /** Paints the thinking row, or clears it when there is nothing to show. */
+  private drawThought(): void {
+    if (!this.enabled || this.suspended) return;
+    const { thoughtRow } = this.layout;
+    if (thoughtRow === 0) return;
+    const width = terminalDimension(this.out.columns);
+    const body = this.thoughtText === undefined ? "" : fit(this.thoughtText, width);
+    this.write(`${ESC}${thoughtRow};1H${ESC}2K${body}`);
   }
 
   /** Paints the phase row, or clears it when there is nothing to show. */
@@ -590,15 +650,16 @@ export class Chrome {
   }
 
   /** Draws the composer; full-screen uses a three-row mode-colored box. */
-  drawPrompt(promptText: string, buffer: string, cursor: number): void {
+  drawPrompt(promptText: string, buffer: string, cursor: number, placeholder?: string): void {
     if (!this.enabled) return;
-    this.lastPrompt = { promptText, buffer, cursor };
+    this.lastPrompt = { promptText, buffer, cursor, ...(placeholder !== undefined ? { placeholder } : {}) };
     const width = terminalDimension(this.out.columns);
     if (!this.fullscreenMode) {
       const { promptRow } = this.layout;
       // An empty prompt shows what it accepts instead of a bare glyph; the cursor
       // still sits right after the prompt, so the placeholder never gets in the way.
-      const ghost = buffer.length === 0 ? pc.gray("ask for a change, or / for commands") : "";
+      const ghost =
+        buffer.length === 0 ? pc.gray(placeholder ?? "ask for a change, or / for commands") : "";
       const line = fit(`${promptText}${buffer}${ghost}`, width);
       this.promptFrame.render([line], { originRow: promptRow });
       const used = visibleWidth(promptText) + cursor;
@@ -618,7 +679,8 @@ export class Chrome {
     const label = ` ${this.composerMode.toUpperCase()} `;
     const topFill = "─".repeat(Math.max(0, width - 3 - label.length));
     const innerWidth = Math.max(1, width - 4);
-    const ghost = buffer.length === 0 ? pc.gray("ask for a change, or / for commands") : "";
+    const ghost =
+      buffer.length === 0 ? pc.gray(placeholder ?? "ask for a change, or / for commands") : "";
     const text = fit(`${promptText}${buffer}${ghost}`, innerWidth);
     const top = `${border("╭─")}${border(label)}${border(topFill)}${border("╮")}`;
     const middle = `${border("│")} ${padAnsi(text, innerWidth)} ${border("│")}`;
@@ -709,7 +771,7 @@ export class Chrome {
       this.drawStatus();
       this.drawPhase();
       if (this.lastPrompt !== undefined) {
-        this.drawPrompt(this.lastPrompt.promptText, this.lastPrompt.buffer, this.lastPrompt.cursor);
+        this.redrawPrompt();
       }
       return;
     }

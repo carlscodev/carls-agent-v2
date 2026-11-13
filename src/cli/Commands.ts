@@ -33,6 +33,12 @@ export interface CommandContext {
   /** Puts text back into the prompt line, used by /editor. */
   composePrompt?: (text: string) => void;
   /**
+   * Called after `/resume` swaps the conversation history, so the REPL can
+   * hydrate the screen with the tail of the session it just loaded. Absent in
+   * headless runs, where there is no transcript to paint.
+   */
+  onHistoryLoaded?: (messages: import("../types/llm.js").Message[]) => void;
+  /**
    * Session-tab controls, wired by the REPL. Absent in one-shot and headless
    * runs, where there is no tab strip, so `/tab` degrades to a message.
    */
@@ -170,6 +176,7 @@ function loadSession(ctx: CommandContext, id: string): void {
   }
   ctx.runtime.replaceHistory(messages);
   printInfo(`Loaded ${messages.length} messages from session ${id}.`);
+  ctx.onHistoryLoaded?.(messages);
 }
 
 async function listAndPickModels(ctx: CommandContext, filter: string): Promise<void> {
