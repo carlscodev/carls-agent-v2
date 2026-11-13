@@ -539,6 +539,9 @@ export class AgentLoop {
         .join("");
 
       if (toolUses.length === 0) {
+        // A provider that emitted a tool call and then dropped it must not leave
+        // a prefetched read running after the turn is already over.
+        streamTools.abort();
         return { steps: step + 1, finalText: text, stoppedReason: "completed" };
       }
 

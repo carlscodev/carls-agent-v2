@@ -75,6 +75,7 @@ import type { AddressInfo } from "node:net";
 let dir: string;
 let logger: Logger;
 let previousHome: string | undefined;
+let previousAppData: string | undefined;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "carls-test-"));
@@ -83,14 +84,19 @@ beforeEach(async () => {
   // a developer's own ~/.carlsrc.json may leak into assertions about defaults.
   // $HOME is redirected because `userConfigPath()` resolves it through
   // `homedir()`, and a real user config otherwise shadows the layer under test.
+  // Windows resolves the same file through %APPDATA%, so both are redirected.
   process.env.CARLS_SYSTEM_CONFIG = join(dir, "no-system-config.json");
   previousHome = process.env.HOME;
   process.env.HOME = join(dir, "home");
+  previousAppData = process.env.APPDATA;
+  process.env.APPDATA = join(dir, "appdata");
 });
 
 afterEach(async () => {
   if (previousHome === undefined) delete process.env.HOME;
   else process.env.HOME = previousHome;
+  if (previousAppData === undefined) delete process.env.APPDATA;
+  else process.env.APPDATA = previousAppData;
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -1115,9 +1121,9 @@ describe("resolveApiKey", () => {
   let base: ReturnType<typeof loadConfig>;
 
   beforeEach(() => {
-    // Built per test, after the global beforeEach has pointed the system
-    // config at a path that does not exist.
-    base = loadConfig({ provider: "openai" });
+    // Built per test against the hermetic workspace, so a developer's own
+    // .carlsrc.json in the checkout cannot supply a stray apiKey.
+    base = loadConfig({ provider: "openai" }, dir);
   });
 
   afterEach(() => {
