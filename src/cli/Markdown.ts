@@ -1,5 +1,5 @@
 import { theme } from "./Theme.js";
-import { visibleWidth } from "./Text.js";
+import { terminalDimension, visibleWidth } from "./Text.js";
 
 /**
  * Renders assistant markdown for a terminal, line by line, so it can be used
@@ -20,7 +20,7 @@ export class MarkdownRenderer {
 
   constructor(out: NodeJS.WriteStream = process.stdout, width?: number) {
     this.out = out;
-    this.barWidth = Math.max(8, Math.min(60, width ?? (out.columns ?? 100) - 2));
+    this.barWidth = Math.max(8, Math.min(60, width ?? terminalDimension(out.columns, 100) - 2));
   }
 
   /**
@@ -81,7 +81,7 @@ export class MarkdownRenderer {
     const preview = this.inFence
       ? `${t.paint(t.colors.border, "│")} ${t.paint(t.colors.markdown.code, this.buffer)}`
       : this.inline(this.buffer);
-    const width = this.out.columns ?? 100;
+    const width = terminalDimension(this.out.columns, 100);
     if (visibleWidth(preview) >= width) {
       this.clearTail();
       return;

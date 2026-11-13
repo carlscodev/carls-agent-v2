@@ -5554,6 +5554,24 @@ describe("Markdown live tail", () => {
     expect(writes.join("")).toContain("partial line");
     md.flush();
   });
+
+  it("still draws the live tail when the pty reports zero columns", async () => {
+    const { MarkdownRenderer } = await import("../src/cli/Markdown.js");
+    const { PassThrough } = await import("node:stream");
+    const out = new PassThrough() as unknown as NodeJS.WriteStream;
+    // A pty with no window size set reports 0; `columns ?? 100` keeps the 0 and
+    // every preview looks wider than the "terminal", so nothing is drawn.
+    (out as unknown as { columns: number }).columns = 0;
+    (out as unknown as { isTTY: boolean }).isTTY = true;
+    const writes: string[] = [];
+    out.on("data", (chunk: Buffer) => writes.push(chunk.toString()));
+
+    const md = new MarkdownRenderer(out);
+    md.setLiveTail(true);
+    md.push("streaming ");
+    expect(writes.join("")).toContain("streaming");
+    md.flush();
+  });
 });
 
 describe("Prompt completion keyboard semantics", () => {

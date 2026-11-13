@@ -7,6 +7,7 @@ import { EFFORTS, MODE_CYCLE, apiKeyEnvFor, defaultModelFor } from "../config/Co
 import { providersByFamily, providerById, PROVIDERS, type ProviderSpec } from "../providers/registry.js";
 import { fetchModels, knownModelsFor, type ModelInfo } from "../models/Catalog.js";
 import { RawSession } from "../cli/Input.js";
+import { terminalDimension } from "../cli/Text.js";
 import { isWindows, userConfigPath } from "../utils/platform.js";
 import { redact } from "../utils/Logger.js";
 
@@ -246,7 +247,7 @@ async function choose<T>(
 }
 
 function heading(output: NodeJS.WriteStream, title: string, subtitle?: string): void {
-  const width = Math.min(72, output.columns ?? 72);
+  const width = Math.min(72, terminalDimension(output.columns, 72));
   output.write(`\n${pc.bold(pc.cyan(title))}\n`);
   output.write(`${pc.gray("─".repeat(Math.max(8, width)))}\n`);
   if (subtitle !== undefined) output.write(`${pc.gray(subtitle)}\n`);
