@@ -22,6 +22,8 @@ import { expandMentions, listWorkspaceFiles } from "./Mentions.js";
 import { PromptQueue, collectTypedLines, drainQueue } from "./Queue.js";
 import { selectList } from "./SelectList.js";
 import { TabManager, shortTitle, type Tab } from "./Tabs.js";
+import { FrameCoalescer } from "./FrameRenderer.js";
+import { formatDuration } from "./Text.js";
 
 export interface SessionOptions {
   overrides: Partial<ResolvedConfig>;
@@ -196,7 +198,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   const tokenCount = (tokens: number): string =>
     tokens >= 1000 ? `${(tokens / 1000).toFixed(tokens >= 10000 ? 0 : 1)}k` : String(Math.round(tokens));
 
-  /** One dense line: agent, model, context pressure, spend, location. */
+  /** One dense line: agent, telemetry, context pressure, spend, location. */
   const statusLine = (): string => {
     const t = theme();
     const ratio = runtime.contextManager.usedRatio(runtime.history);
@@ -218,11 +220,52 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       parts.push(t.paint(t.colors.accent, `@${runtime.config.agentName}`));
     }
     if (runtime.config.effort !== undefined) parts.push(t.paint(t.colors.accent, runtime.config.effort));
-    // Live activity leads the right-hand group so the eye lands on it first.
+
+    // Plan telemetry: the current node is the one a human would ask about.
+    const dag = runtime.dag.snapshot();
+    if (dag.nodes.length > 0) {
+      const active =
+        dag.nodes.find((node) => node.status === "running" || node.status === "verifying") ?? runtime.dag.next();
+      const state =
+        active?.status === "running"
+          ? "run"
+          : active?.status === "verifying"
+            ? "verify"
+            : dag.done
+              ? "ok"
+              : active === undefined
+                ? "blocked"
+                : "next";
+      parts.push(t.paint(t.colors.text.muted, `DAG:${dag.completed}/${dag.nodes.length} ${state}`));
+    }
+
+    const percent = Math.round(ratio * 100);
+    parts.push(t.paint(paint, `CTX:${percent}% ${tokenCount(used)}/${tokenCount(runtime.config.contextWindow)}`));
+
+    const cacheRead = runtime.cost.snapshot().cacheReadTokens;
+    if (cacheRead > 0) {
+      parts.push(t.paint(t.colors.text.faint, `CACHE:${Math.round(runtime.cost.cacheHitRatio() * 100)}%`));
+    }
+    if (runtime.lastCheckpoint !== undefined) {
+      parts.push(t.paint(t.colors.text.faint, `CP:${runtime.lastCheckpoint.id}`));
+    }
+    const lspServers = Object.keys(runtime.config.lspServers ?? {}).length;
+    parts.push(t.paint(t.colors.text.faint, lspServers > 0 ? "LSP:on" : "LSP:off"));
+    if (runtime.subAgentPool.activeCount > 0) {
+      parts.push(t.paint(t.colors.feedback.info, `SA:${runtime.subAgentPool.activeCount}`));
+    }
+    const runningTool = runtime.activeToolSnapshot()[0];
+    if (runningTool !== undefined) {
+      parts.push(t.paint(t.colors.accent, `TOOL:${runningTool.name} ${formatDuration(runningTool.elapsedMs)}`));
+    }
+    // The animated activity segment is what tells the user the agent is busy
+    // even before the first token arrives.
     const live = activityFrame(activity);
     if (live !== undefined) parts.push(live);
-    if (queue.length > 0) parts.push(t.paint(t.colors.feedback.warning, `↑${queue.length} queued`));
-    parts.push(t.paint(paint, `ctx ${tokenCount(used)}/${tokenCount(runtime.config.contextWindow)}`));
+    if (runtime.steeringDepth > 0) {
+      parts.push(t.paint(t.colors.feedback.warning, `↑${runtime.steeringDepth}`));
+    }
+    if (queue.length > 0) parts.push(t.paint(t.colors.feedback.warning, `Q:${queue.length}`));
     const spend = runtime.cost.compact();
     if (spend.length > 0) parts.push(t.paint(t.colors.text.faint, spend));
     parts.push(t.paint(t.colors.text.faint, cwd));
@@ -290,32 +333,82 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   };
 
   /**
-   * Full-screen sidebar listing every tab, mirroring opencode's session picker.
-   * Selecting a row switches tabs; the closing key leaves the active tab alone.
+   * Full-screen inspector. Sessions are selectable; plan nodes, learned rules
+   * and in-flight tools are read-only rows that show their detail when picked.
    */
   const openSidebar = async (): Promise<void> => {
     const t = theme();
+    const items: {
+      id: string;
+      label: string;
+      detail?: string;
+      section?: string;
+      preview?: string[];
+    }[] = [];
+
+    const dag = runtime.dag.snapshot();
+    for (const node of dag.nodes) {
+      items.push({
+        id: `plan:${node.id}`,
+        section: "Plan",
+        label: `${node.id} ${node.status}`,
+        detail: shortTitle(node.title, 40),
+        preview: [
+          `acceptance: ${node.acceptanceCriteria.length > 0 ? node.acceptanceCriteria : "none"}`,
+          `deps: ${node.dependencies.join(", ") || "none"} · retries ${node.retryCount}`,
+        ],
+      });
+    }
+
+    for (const rule of runtime.operatorMemory.all()) {
+      items.push({
+        id: `rule:${rule.id}`,
+        section: "Rules",
+        label: shortTitle(rule.text, 52),
+        detail: `${rule.kind} ×${rule.confirmations}`,
+        preview: [rule.source],
+      });
+    }
+
+    for (const tool of runtime.activeToolSnapshot()) {
+      items.push({
+        id: `tool:${tool.id}`,
+        section: "Running",
+        label: `${tool.name} ${formatDuration(tool.elapsedMs)}`,
+        detail: tool.id,
+        preview: ["in flight"],
+      });
+    }
+
+    for (const [index, tab] of tabs.all().entries()) {
+      const turns = tab.payload.history.filter((message) => message.role === "user").length;
+      items.push({
+        id: `tab:${index}`,
+        section: "Sessions",
+        label: `${index + 1}  ${tab.title}`,
+        detail: index === tabs.activeIndex ? t.paint(t.colors.accent, "● active") : "",
+        preview: [
+          `${turns} turn${turns === 1 ? "" : "s"} · ${tab.payload.config.model}`,
+          tab.payload.cost.compact() || "no spend yet",
+        ],
+      });
+    }
+
     const choice = await selectList({
-      title: `${t.paint(t.colors.accent, "Sessions")} ${t.paint(t.colors.text.faint, `${tabs.size} open`)}`,
-      current: tabs.current().id,
-      items: tabs.all().map((tab, index) => {
-        const turns = tab.payload.history.filter((message) => message.role === "user").length;
-        return {
-          id: String(index),
-          label: `${index + 1}  ${tab.title}`,
-          detail: index === tabs.activeIndex ? t.paint(t.colors.accent, "● active") : "",
-          preview: [
-            `${turns} turn${turns === 1 ? "" : "s"} · ${tab.payload.config.model}`,
-            tab.payload.cost.compact() || "no spend yet",
-          ],
-        };
-      }),
+      title: `${t.paint(t.colors.accent, "Inspector")} ${t.paint(t.colors.text.faint, `${items.length} entries`)}`,
+      current: `tab:${tabs.activeIndex}`,
+      items,
     });
     if (choice === undefined) {
       showStatus();
       return;
     }
-    activateTab(Number.parseInt(choice.id, 10));
+    if (choice.id.startsWith("tab:")) {
+      activateTab(Number.parseInt(choice.id.slice(4), 10));
+      return;
+    }
+    printInfo(`${choice.section ?? "Inspector"} · ${choice.label}`);
+    for (const line of choice.preview ?? []) printInfo(line);
   };
 
   /** Starts the animated footer segment and keeps it ticking. */
@@ -367,6 +460,46 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     markdown.setLiveTail(true);
     let streamed = false;
     let reasoningStarted = false;
+    // Streaming deltas arrive per token; both renderers are batched to one write
+    // per 16 ms frame so a fast model cannot saturate the PTY.
+    const reasoningFrames = new FrameCoalescer((batch) => {
+      // Thinking models stream their scratchpad before the answer. Show it dim
+      // and clearly separated, so it never reads as the final response.
+      if (!reasoningStarted) {
+        spinner.stop();
+        endActivity();
+        if (useChrome) {
+          chrome.moveToRegionBottom();
+          chrome.writeRegion(`\n${theme().paint(theme().colors.text.faint, "✻ pensando")}\n`);
+        } else {
+          process.stderr.write(`\n${pc.gray("✻ pensando")}\n`);
+        }
+        reasoningStarted = true;
+      }
+      const painted = theme().paint(theme().colors.text.faint, batch);
+      if (useChrome) chrome.writeRegion(painted);
+      else process.stderr.write(painted);
+    });
+    const textFrames = new FrameCoalescer((batch) => {
+      if (!streamed) {
+        spinner.stop();
+        endActivity();
+        // Close the reasoning block before the answer starts, or the first word
+        // of the answer lands on the last line of the scratchpad.
+        if (reasoningStarted) {
+          if (useChrome) chrome.writeRegion("\n");
+          else process.stderr.write("\n");
+        }
+        if (useChrome) chrome.writeRegion(`\n${theme().paint(theme().colors.accent, "◆")} ${theme().bold("carls")}\n`);
+        else printAssistantHeader();
+        streamed = true;
+      }
+      markdown.push(batch);
+    });
+    const flushStreams = (): void => {
+      textFrames.flush();
+      reasoningFrames.flush();
+    };
     if (useChrome) chrome.moveToRegionBottom();
     spinner.start("thinking");
     // Typing during a turn queues the message instead of dropping it. The
@@ -382,7 +515,17 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           // Enter steers: the message joins the running turn at its next step
           // boundary. A steer that arrives after the last step is queued below.
           onSubmit: (text) => {
-            runtime.steer(text);
+            const outcome = runtime.steer(text);
+            if (outcome === "ignored") return;
+            if (outcome === "stop") {
+              // A stop must cancel the in-flight turn and its prefetched reads,
+              // not just sit in the queue until the next step boundary.
+              activeAbort?.abort();
+              const line = `${pc.gray("↳")} ${theme().paint(theme().colors.feedback.warning, "stopping")}`;
+              if (useChrome) chrome.writeRegion(`${line}\n`);
+              else process.stderr.write(`\r\u001b[K${line}\n`);
+              return;
+            }
             const line = `${pc.gray("↳ steering")} ${theme().paint(theme().colors.text.muted, text)}`;
             if (useChrome) chrome.writeRegion(`${line}\n`);
             else process.stderr.write(`\r\u001b[K${line}\n`);
@@ -414,43 +557,16 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           setActivity(toolLabel(name, input));
         },
         onReasoning: (chunk) => {
-          // Thinking models stream their scratchpad before the answer. Show it
-          // dim and clearly separated, so it never reads as the final response.
-          if (!reasoningStarted) {
-            spinner.stop();
-            endActivity();
-            if (useChrome) {
-              chrome.moveToRegionBottom();
-              chrome.writeRegion(`\n${theme().paint(theme().colors.text.faint, "✻ pensando")}\n`);
-            } else {
-              process.stderr.write(`\n${pc.gray("✻ pensando")}\n`);
-            }
-            reasoningStarted = true;
-          }
-          const painted = theme().paint(theme().colors.text.faint, chunk);
-          if (useChrome) chrome.writeRegion(painted);
-          else process.stderr.write(painted);
+          reasoningFrames.push(chunk);
         },
         onText: (chunk) => {
-          if (!streamed) {
-            spinner.stop();
-            endActivity();
-            // Close the reasoning block before the answer starts, or the first
-            // word of the answer lands on the last line of the scratchpad.
-            if (reasoningStarted) {
-              if (useChrome) chrome.writeRegion("\n");
-              else process.stderr.write("\n");
-            }
-            if (useChrome) chrome.writeRegion(`\n${theme().paint(theme().colors.accent, "◆")} ${theme().bold("carls")}\n`);
-            else printAssistantHeader();
-            streamed = true;
-          }
-          markdown.push(chunk);
+          textFrames.push(chunk);
         },
         onToolResult: () => {
-          // A model may narrate and then call a tool in the same turn. The
-          // narration has no trailing newline, so without this the next tool
-          // block is appended to the last word of the sentence.
+          // The model may narrate and then call a tool in the same turn. Flush
+          // the coalescer first so the narration reaches the markdown buffer
+          // before the next tool block is appended.
+          flushStreams();
           if (streamed) markdown.flush();
           if (reasoningStarted && !streamed) {
             if (useChrome) chrome.writeRegion("\n");
@@ -461,6 +577,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           if (!streamed) setActivity("thinking");
         },
       });
+      flushStreams();
       spinner.stop();
       endActivity();
       markdown.flush();
@@ -479,10 +596,13 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       if (useChrome) chrome.writeRegion(`${turnSummaryLine(summary)}\n`);
       else printTurnSummary(summary);
     } catch (error) {
+      flushStreams();
       spinner.stop();
       markdown.flush();
       printError((error as Error).message);
     } finally {
+      textFrames.dispose();
+      reasoningFrames.dispose();
       runtime.gate.setPromptPause(undefined);
       composer?.stop();
       // A steer that arrived too late to reach a step boundary still runs.

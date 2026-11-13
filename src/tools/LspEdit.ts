@@ -125,7 +125,11 @@ export class LspEdit implements Tool<LspEditInput> {
       }
       const rows = planned.map((item) => `${toDisplayPath(ctx.cwd, item.path)}: ${item.edits} edit${item.edits === 1 ? "" : "s"}`);
       if (input.dryRun === true) {
-        return { ok: true, output: `${label} would change ${planned.length} file${planned.length === 1 ? "" : "s"}\n${rows.join("\n")}` };
+        return {
+          ok: true,
+          output: `${label} would change ${planned.length} file${planned.length === 1 ? "" : "s"}\n${rows.join("\n")}`,
+          metadata: { paths: planned.map((item) => item.path), dryRun: true },
+        };
       }
       for (const item of planned) {
         await writeFile(item.path, item.text, "utf8");
@@ -135,6 +139,7 @@ export class LspEdit implements Tool<LspEditInput> {
       return {
         ok: true,
         output: `${label} applied to ${planned.length} file${planned.length === 1 ? "" : "s"}\n${rows.join("\n")}`,
+        metadata: { paths: planned.map((item) => item.path) },
       };
     } catch (error) {
       return {

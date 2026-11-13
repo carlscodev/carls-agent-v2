@@ -1,6 +1,7 @@
 import type { SubAgent, SubAgentRole } from "./SubAgent.js";
 import { parseReport } from "./SubAgent.js";
 import { mapWithConcurrency } from "../utils/concurrency.js";
+import type { EventBus } from "./EventBus.js";
 
 /**
  * Runs several sub-agents at once.
@@ -40,6 +41,8 @@ export interface SubAgentPoolOptions {
   concurrency?: number;
   /** Hard cap on tasks per call, so one request cannot fan out without bound. */
   maxTasks?: number;
+  /** Optional telemetry bus; the HUD reads active children from it. */
+  events?: EventBus;
 }
 
 const DEFAULT_CONCURRENCY = 3;
@@ -49,16 +52,24 @@ export class SubAgentPool {
   private readonly agent: SubAgent;
   private readonly concurrency: number;
   private readonly maxTasks: number;
+  private readonly events?: EventBus;
+  private active = 0;
 
   constructor(agent: SubAgent, options: SubAgentPoolOptions = {}) {
     this.agent = agent;
     this.concurrency = Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY);
     this.maxTasks = Math.max(1, options.maxTasks ?? DEFAULT_MAX_TASKS);
+    if (options.events !== undefined) this.events = options.events;
   }
 
   /** How many tasks a single call will accept before refusing the rest. */
   get limit(): number {
     return this.maxTasks;
+  }
+
+  /** Children currently running, for the live HUD. */
+  get activeCount(): number {
+    return this.active;
   }
 
   /**
@@ -68,9 +79,23 @@ export class SubAgentPool {
   async run(tasks: readonly SubAgentTask[]): Promise<SubAgentOutcome[]> {
     const accepted = tasks.slice(0, this.maxTasks);
     return mapWithConcurrency(accepted, this.concurrency, async (task) => {
+      this.active++;
+      this.events?.emit("subagent.status", {
+        role: task.role,
+        goal: task.goal,
+        phase: "start",
+        at: Date.now(),
+      });
       try {
         const raw = await this.agent.run(task.goal, task.role);
         const report = parseReport(raw);
+        this.events?.emit("subagent.status", {
+          role: task.role,
+          goal: task.goal,
+          phase: "done",
+          ok: true,
+          at: Date.now(),
+        });
         return {
           goal: task.goal,
           role: task.role,
@@ -81,6 +106,13 @@ export class SubAgentPool {
           suggestedCommands: report.suggestedCommands,
         } satisfies SubAgentOutcome;
       } catch (error) {
+        this.events?.emit("subagent.status", {
+          role: task.role,
+          goal: task.goal,
+          phase: "failed",
+          ok: false,
+          at: Date.now(),
+        });
         return {
           goal: task.goal,
           role: task.role,
@@ -91,6 +123,8 @@ export class SubAgentPool {
           suggestedCommands: [],
           error: (error as Error).message,
         } satisfies SubAgentOutcome;
+      } finally {
+        this.active = Math.max(0, this.active - 1);
       }
     });
   }

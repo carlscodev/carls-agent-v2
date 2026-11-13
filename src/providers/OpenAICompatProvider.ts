@@ -32,7 +32,11 @@ interface OpenAIChatResponse {
     };
     finish_reason: string | null;
   }[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number | null } | null;
+  };
 }
 
 /** One `data:` frame of a chat-completions stream. */
@@ -49,7 +53,11 @@ interface OpenAIStreamChunk {
     };
     finish_reason?: string | null;
   }[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number | null } | null;
+  };
 }
 
 function toOpenAIMessages(system: string, messages: Message[]): OpenAIMessage[] {
@@ -122,6 +130,8 @@ function parseArguments(raw: string | undefined): unknown {
  */
 class ToolCallAccumulator {
   private readonly calls = new Map<number, { id: string; name: string; args: string }>();
+  /** Indices already handed to the caller, so a call is emitted exactly once. */
+  private readonly flushed = new Set<number>();
 
   add(delta: NonNullable<NonNullable<OpenAIStreamChunk["choices"]>[number]["delta"]>["tool_calls"]): void {
     for (const fragment of delta ?? []) {
@@ -134,20 +144,53 @@ class ToolCallAccumulator {
     }
   }
 
+  /**
+   * Emits every call with an index below `index`. A new call index is the only
+   * in-band signal that the previous call's arguments are finished, so this is
+   * what lets a read-only tool start while the model is still streaming.
+   */
+  flushBefore(index: number, onCall?: (call: Extract<ContentBlock, { type: "tool_use" }>) => void): void {
+    if (onCall === undefined) return;
+    for (const key of [...this.calls.keys()].sort((a, b) => a - b)) {
+      if (key >= index) break;
+      this.flush(key, onCall);
+    }
+  }
+
+  /** Emits every complete call; used at `finish_reason` and at `[DONE]`. */
+  flushAll(onCall?: (call: Extract<ContentBlock, { type: "tool_use" }>) => void): void {
+    if (onCall === undefined) return;
+    for (const key of [...this.calls.keys()].sort((a, b) => a - b)) {
+      this.flush(key, onCall);
+    }
+  }
+
+  private flush(index: number, onCall: (call: Extract<ContentBlock, { type: "tool_use" }>) => void): void {
+    if (this.flushed.has(index)) return;
+    const call = this.calls.get(index);
+    if (call === undefined || call.name.length === 0) return;
+    this.flushed.add(index);
+    onCall(this.toBlock(index, call));
+  }
+
   /** Finished calls in index order, ready to become `tool_use` blocks. */
   build(): ContentBlock[] {
     const out: ContentBlock[] = [];
     for (const index of [...this.calls.keys()].sort((a, b) => a - b)) {
       const call = this.calls.get(index);
       if (call === undefined || call.name.length === 0) continue;
-      out.push({
-        type: "tool_use",
-        id: call.id.length > 0 ? call.id : `call_${index}`,
-        name: call.name,
-        input: parseArguments(call.args),
-      });
+      out.push(this.toBlock(index, call));
     }
     return out;
+  }
+
+  private toBlock(index: number, call: { id: string; name: string; args: string }): Extract<ContentBlock, { type: "tool_use" }> {
+    return {
+      type: "tool_use",
+      id: call.id.length > 0 ? call.id : `call_${index}`,
+      name: call.name,
+      input: parseArguments(call.args),
+    };
   }
 }
 
@@ -157,7 +200,11 @@ interface StreamState {
   reasoning: string;
   tools: ToolCallAccumulator;
   finish: string | null;
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number | null } | null;
+  };
   sawUsage: boolean;
   /** Set when the `[DONE]` sentinel arrives; the reader must stop there. */
   done: boolean;
@@ -209,6 +256,7 @@ function applyFrame(frame: string, state: StreamState, args: CompletionArgs): vo
   if (trimmed.length === 0) return;
   // The sentinel closes the stream; there is nothing to accumulate from it.
   if (trimmed === "[DONE]") {
+    state.tools.flushAll(args.onToolCall);
     state.done = true;
     return;
   }
@@ -240,9 +288,14 @@ function applyFrame(frame: string, state: StreamState, args: CompletionArgs): vo
     args.onText?.(delta.content);
   }
   if (delta?.tool_calls !== undefined) {
+    const minIndex = Math.min(...delta.tool_calls.map((fragment) => fragment.index ?? 0));
+    // A new index means the previous call's arguments are finished. Emitting it
+    // here is what starts a read-only tool before the turn ends.
+    state.tools.flushBefore(minIndex, args.onToolCall);
     state.tools.add(delta.tool_calls);
   }
   if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
+    state.tools.flushAll(args.onToolCall);
     state.finish = choice.finish_reason;
   }
 }
@@ -278,8 +331,16 @@ function finishStream(state: StreamState, args: CompletionArgs): LLMResponse {
     usage: {
       inputTokens: usage?.prompt_tokens ?? estimatePromptTokens(args),
       outputTokens: usage?.completion_tokens ?? estimateTokens(state.text + state.reasoning),
+      ...(cachedPromptTokens(usage) > 0 ? { cacheReadTokens: cachedPromptTokens(usage) } : {}),
     },
   };
+}
+
+/** OpenAI reports cached prompt tokens under `prompt_tokens_details`. */
+function cachedPromptTokens(
+  usage: { prompt_tokens_details?: { cached_tokens?: number | null } | null } | undefined,
+): number {
+  return usage?.prompt_tokens_details?.cached_tokens ?? 0;
 }
 
 export interface OpenAICompatOptions {
@@ -464,6 +525,9 @@ export class OpenAICompatProvider implements Provider {
       usage: {
         inputTokens: response.usage?.prompt_tokens ?? 0,
         outputTokens: response.usage?.completion_tokens ?? 0,
+        ...(cachedPromptTokens(response.usage) > 0
+          ? { cacheReadTokens: cachedPromptTokens(response.usage) }
+          : {}),
       },
     };
   }

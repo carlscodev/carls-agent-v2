@@ -73,6 +73,8 @@ const blue = {
 /** Neutral accents reused across feedback and chrome. */
 const amber = hex("#f5a742");
 const sand = hex("#e5c07b");
+/** The product accent: a single saturated neon green on a near-black canvas. */
+const neon = hex("#00ff88");
 
 export interface ThemeTokens {
   readonly text: {
@@ -122,8 +124,8 @@ export interface ThemeTokens {
 
 const dark: ThemeTokens = {
   text: { base: gray[200], muted: gray[400], faint: gray[500] },
-  border: hex("#484848"),
-  feedback: { error: red[200], warning: amber, success: green[200], info: cyan[200] },
+  border: hex("#2f2f2f"),
+  feedback: { error: red[200], warning: amber, success: neon, info: cyan[200] },
   diff: {
     added: hex("#4fd6be"),
     removed: hex("#c53b53"),
@@ -152,8 +154,8 @@ const dark: ThemeTokens = {
     enumeration: cyan[200],
   },
   categorical: [blue[200], purple[200], green[200], orange[200], red[200]],
-  accent: purple[200],
-  interactive: orange[200],
+  accent: neon,
+  interactive: hex("#5c9cf5"),
 };
 
 /**
@@ -192,8 +194,8 @@ const light: ThemeTokens = {
     enumeration: hex("#226c75"),
   },
   categorical: [blue[300], purple[300], green[300], orange[300], red[300]],
-  accent: purple[300],
-  interactive: orange[300],
+  accent: hex("#007a44"),
+  interactive: blue[300],
 };
 
 export type ThemeName = "dark" | "light";

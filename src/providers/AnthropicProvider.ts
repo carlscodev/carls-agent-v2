@@ -117,12 +117,22 @@ export class AnthropicProvider implements Provider {
       },
     );
 
+    const usage = response.usage as Anthropic.Usage & {
+      cache_read_input_tokens?: number;
+      cache_creation_input_tokens?: number;
+    };
     return {
       content: mapContent(response.content),
       stopReason: mapStopReason(response.stop_reason),
       usage: {
-        inputTokens: response.usage.input_tokens,
-        outputTokens: response.usage.output_tokens,
+        inputTokens: usage.input_tokens,
+        outputTokens: usage.output_tokens,
+        ...(usage.cache_read_input_tokens !== undefined && usage.cache_read_input_tokens > 0
+          ? { cacheReadTokens: usage.cache_read_input_tokens }
+          : {}),
+        ...(usage.cache_creation_input_tokens !== undefined && usage.cache_creation_input_tokens > 0
+          ? { cacheWriteTokens: usage.cache_creation_input_tokens }
+          : {}),
       },
     };
   }

@@ -43,6 +43,32 @@ function streamResponse(chunks: string[]): Response {
   });
 }
 
+/** A `Response` whose frames arrive over time, to observe when a callback fires. */
+function timedStreamResponse(entries: { text: string; delayMs: number }[]): Response {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      let index = 0;
+      const next = (): void => {
+        const entry = entries[index++];
+        if (entry === undefined) {
+          controller.close();
+          return;
+        }
+        setTimeout(() => {
+          controller.enqueue(encoder.encode(entry.text));
+          next();
+        }, entry.delayMs);
+      };
+      next();
+    },
+  });
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
 /** Splits every frame in half so no frame arrives whole. */
 function splitEveryFrame(frames: string[]): string[] {
   const chunks: string[] = [];
@@ -113,6 +139,36 @@ describe("OpenAI-compatible SSE streaming", () => {
 
     const response = await new OpenAICompatProvider("test-key", BASE_URL).complete(args());
     expect(response.stopReason).toBe("max_tokens");
+  });
+
+  it("emits a tool call as soon as the next index starts", async () => {
+    const entries = [
+      {
+        delayMs: 0,
+        text: 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\\"path\\":\\"a.ts\\"}"}}]}}]}\n\n',
+      },
+      {
+        delayMs: 40,
+        text: 'data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_2","function":{"name":"glob_files","arguments":"{\\"pattern\\":\\"*.ts\\"}"}}]}}]}\n\n',
+      },
+      { delayMs: 40, text: 'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n' },
+      { delayMs: 0, text: "data: [DONE]\n\n" },
+    ];
+    const emitted: { name: string; at: number }[] = [];
+    const started = Date.now();
+    vi.stubGlobal("fetch", async () => timedStreamResponse(entries));
+
+    const response = await new OpenAICompatProvider("test-key", BASE_URL).complete(
+      args({ onToolCall: (call) => emitted.push({ name: call.name, at: Date.now() - started }) }),
+    );
+    const completedAt = Date.now() - started;
+
+    // The first call is flushed when index 1 opens, not at finish_reason: that
+    // is what lets a read-only tool start while the model is still streaming.
+    expect(emitted.map((entry) => entry.name)).toEqual(["read_file", "glob_files"]);
+    expect(emitted[0]?.at).toBeLessThan(completedAt);
+    expect(response.stopReason).toBe("tool_use");
+    expect(response.content.filter((block) => block.type === "tool_use")).toHaveLength(2);
   });
 
   it("stops at [DONE] even when the server keeps the connection open", async () => {

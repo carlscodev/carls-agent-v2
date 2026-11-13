@@ -1,4 +1,4 @@
-import type { ContentBlock, Message, Provider, ToolSchema } from "../types/llm.js";
+import type { ContentBlock, LLMResponse, Message, Provider, ToolSchema } from "../types/llm.js";
 import type { AgentRunResult } from "../types/agent.js";
 import type { Checkpoint } from "../types/agent.js";
 import type { Tool, ToolContext, ToolResult } from "../types/tools.js";
@@ -16,6 +16,9 @@ import { redact } from "../utils/Logger.js";
 import { mapWithConcurrency } from "../utils/concurrency.js";
 import pc from "picocolors";
 import type { CompactionPipeline } from "./CompactionPipeline.js";
+import { StreamingToolExecutor, type PrefetchedToolResult } from "./StreamingToolExecutor.js";
+import type { EventBus } from "./EventBus.js";
+import { fileStateCache } from "./FileStateCache.js";
 
 /**
  * How many independent read-only calls one assistant turn may run at once.
@@ -56,6 +59,8 @@ export interface AgentLoopDeps {
    * absent the loop falls back to the plain `contextManager.compact`.
    */
   compaction?: CompactionPipeline;
+  /** Optional push bus; views subscribe instead of polling the loop. */
+  events?: EventBus;
 }
 
 export interface RunOptions {
@@ -121,32 +126,63 @@ export class AgentLoop {
    * Runs one tool call, renders it, and returns the observation block to feed
    * back to the model. Never throws, so a batch of parallel calls cannot reject
    * half-way and drop the results of the calls that already finished.
+   *
+   * A `prefetched` result came from `StreamingToolExecutor`: the call already
+   * ran while the model was still streaming, so this only renders its result and
+   * keeps the transcript in `tool_use` order.
    */
   private async runToolUse(
     toolUse: Extract<ContentBlock, { type: "tool_use" }>,
     ctx: ToolContext,
     options: RunOptions,
     filesTouched: Set<string>,
+    prefetched?: PrefetchedToolResult,
   ): Promise<ContentBlock> {
-    if (!options.silent) process.stderr.write(`\n${toolCallLine(toolUse.name, toolUse.input)}\n`);
-    options.onToolStart?.(toolUse.name, toolUse.input);
+    if (prefetched === undefined) {
+      if (!options.silent) process.stderr.write(`\n${toolCallLine(toolUse.name, toolUse.input)}\n`);
+      options.onToolStart?.(toolUse.name, toolUse.input);
+      this.deps.events?.emit("tool.start", {
+        id: toolUse.id,
+        name: toolUse.name,
+        input: toolUse.input,
+        at: Date.now(),
+      });
+    }
 
     let result: ToolResult;
-    const startedAt = Date.now();
-    try {
-      result = await this.executeTool(toolUse.name, toolUse.input, ctx);
-    } catch (error) {
-      result = { ok: false, output: "", error: `Tool ${toolUse.name} failed: ${(error as Error).message}` };
+    let durationMs: number;
+    if (prefetched !== undefined) {
+      result = prefetched.result;
+      durationMs = prefetched.durationMs;
+    } else {
+      const startedAt = Date.now();
+      try {
+        result = await this.executeTool(toolUse.name, toolUse.input, ctx);
+      } catch (error) {
+        result = { ok: false, output: "", error: `Tool ${toolUse.name} failed: ${(error as Error).message}` };
+      }
+      durationMs = Date.now() - startedAt;
     }
-    const durationMs = Date.now() - startedAt;
 
     if (!options.silent) process.stderr.write(`${toolResultLine(toolUse.name, result, durationMs)}\n`);
     options.onToolResult?.(toolUse.name, result, durationMs);
+    // The prefetcher already published `tool.done` when the run finished; a call
+    // executed inline publishes it here so every path looks the same to a view.
+    if (prefetched === undefined) {
+      this.deps.events?.emit("tool.done", {
+        id: toolUse.id,
+        name: toolUse.name,
+        ok: result.ok,
+        durationMs,
+        at: Date.now(),
+      });
+    }
 
     if (result.ok) {
       const path = result.metadata?.path;
       if (typeof path === "string") filesTouched.add(path);
     }
+    this.invalidateFileState(toolUse.name, result, ctx);
 
     const body = result.ok
       ? result.output
@@ -157,6 +193,32 @@ export class AgentLoop {
       content: this.deps.contextManager.truncateObservation(redact(body)),
       is_error: !result.ok,
     };
+  }
+
+  /**
+   * Drops cached parse state for whatever a write tool touched. Done centrally
+   * so a new write tool cannot forget it and leave `repo_map` serving symbols
+   * from before the edit.
+   */
+  private invalidateFileState(toolName: string, result: ToolResult, ctx: ToolContext): void {
+    if (!result.ok) return;
+    const tool = this.deps.registry.get(toolName);
+    if (tool === undefined || tool.readOnly) return;
+    const paths = result.metadata?.paths;
+    if (Array.isArray(paths)) {
+      for (const path of paths) {
+        if (typeof path === "string") fileStateCache.invalidate(path);
+      }
+      return;
+    }
+    const path = result.metadata?.path;
+    if (typeof path === "string") {
+      fileStateCache.invalidate(path);
+      return;
+    }
+    // A multi-file write with no path metadata may have touched any file under
+    // the workspace. Dropping the subtree costs one rebuild, not a stale index.
+    fileStateCache.invalidateUnder(ctx.cwd);
   }
 
   /**
@@ -368,6 +430,15 @@ export class AgentLoop {
           // The pipeline also runs the cheap layers, so a full summary is only
           // paid for when masking and projection were not enough.
           const { messages: compactedMessages, report } = await this.deps.compaction.autoCompact(history, goal, filesTouched);
+          for (const layer of report.layers) {
+            this.deps.events?.emit("compaction.layer", {
+              layer: layer.layer,
+              applied: layer.applied,
+              tokensBefore: report.tokensBefore,
+              tokensAfter: report.tokensAfter,
+              at: Date.now(),
+            });
+          }
           if (report.layers.some((layer) => layer.applied && layer.layer === 5)) {
             history.splice(0, history.length, ...compactedMessages);
             this.deps.logger.info(
@@ -388,17 +459,71 @@ export class AgentLoop {
         }
       }
 
-      const response = await this.deps.provider.complete({
-        system: this.buildSystemPrompt(this.deps.config.mode),
-        messages: history,
-        tools: this.advertised().schemas() as ToolSchema[],
-        model: this.deps.config.model,
-        maxTokens: this.deps.config.maxTokens,
-        ...(this.deps.config.effort !== undefined ? { effort: this.deps.config.effort } : {}),
+      // Read-only calls are prefetched as soon as their arguments close in the
+      // stream. The executor is scoped to this step: it must not outlive the
+      // assistant message whose tool_use blocks it is executing.
+      const streamTools = new StreamingToolExecutor({
+        execute: (call, signal) => this.executeTool(call.name, call.input, { ...ctx, signal }),
         signal: ctx.signal,
-        ...(options.onText && !options.silent ? { onText: options.onText } : {}),
-        ...(options.onReasoning && !options.silent ? { onReasoning: options.onReasoning } : {}),
+        maxParallel: MAX_PARALLEL_TOOLS,
+        onStart: (call) => {
+          if (!options.silent) process.stderr.write(`\n${toolCallLine(call.name, call.input)}\n`);
+          options.onToolStart?.(call.name, call.input);
+          this.deps.events?.emit("tool.start", {
+            id: call.id,
+            name: call.name,
+            input: call.input,
+            at: Date.now(),
+          });
+        },
+        onDone: (call, outcome) => {
+          this.deps.events?.emit("tool.done", {
+            id: call.id,
+            name: call.name,
+            ok: outcome.result.ok,
+            durationMs: outcome.durationMs,
+            at: Date.now(),
+          });
+        },
       });
+
+      const forwardText = options.onText;
+      const forwardReasoning = options.onReasoning;
+      const onText =
+        forwardText !== undefined && options.silent !== true
+          ? (chunk: string): void => {
+              this.deps.events?.emit("stream.delta", { kind: "text", text: chunk, at: Date.now() });
+              forwardText(chunk);
+            }
+          : undefined;
+      const onReasoning =
+        forwardReasoning !== undefined && options.silent !== true
+          ? (chunk: string): void => {
+              this.deps.events?.emit("stream.delta", { kind: "reasoning", text: chunk, at: Date.now() });
+              forwardReasoning(chunk);
+            }
+          : undefined;
+
+      let response: LLMResponse;
+      try {
+        response = await this.deps.provider.complete({
+          system: this.buildSystemPrompt(this.deps.config.mode),
+          messages: history,
+          tools: this.advertised().schemas() as ToolSchema[],
+          model: this.deps.config.model,
+          maxTokens: this.deps.config.maxTokens,
+          ...(this.deps.config.effort !== undefined ? { effort: this.deps.config.effort } : {}),
+          signal: ctx.signal,
+          ...(onText !== undefined ? { onText } : {}),
+          ...(onReasoning !== undefined ? { onReasoning } : {}),
+          onToolCall: (call) => {
+            streamTools.submit({ id: call.id, name: call.name, input: call.input });
+          },
+        });
+      } catch (error) {
+        streamTools.abort();
+        throw error;
+      }
       this.deps.costTracker.add(response.usage);
 
       const assistantMessage: Message = { role: "assistant", content: response.content };
@@ -433,11 +558,23 @@ export class AgentLoop {
         }
         index += batch.length;
 
-        const blocks = await mapWithConcurrency(batch, MAX_PARALLEL_TOOLS, (toolUse) =>
-          this.runToolUse(toolUse, ctx, options, filesTouched),
-        );
+        const blocks = await mapWithConcurrency(batch, MAX_PARALLEL_TOOLS, (toolUse) => {
+          const call = { id: toolUse.id, name: toolUse.name, input: toolUse.input };
+          if (!streamTools.has(toolUse.id)) {
+            return this.runToolUse(toolUse, ctx, options, filesTouched);
+          }
+          // The call is already running; wait for it, then render its result in
+          // the assistant's block order rather than the completion order.
+          return streamTools
+            .take(call)
+            .then((prefetched) => this.runToolUse(toolUse, ctx, options, filesTouched, prefetched));
+        });
         results.push(...blocks);
       }
+
+      // Cancel any prefetched call the response did not include (a malformed or
+      // truncated stream), so no read survives the step that requested it.
+      streamTools.abort();
 
       const userMessage: Message = { role: "user", content: results };
       history.push(userMessage);

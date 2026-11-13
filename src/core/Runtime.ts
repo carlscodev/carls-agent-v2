@@ -98,6 +98,8 @@ import type { SubAgentRole } from "./SubAgent.js";
 import { SubAgentPool } from "./SubAgentPool.js";
 import { AgentLoop, type RunOptions } from "./AgentLoop.js";
 import { McpClient } from "../mcp/McpClient.js";
+import { EventBus } from "./EventBus.js";
+import type { Checkpoint as ShadowCheckpoint } from "../security/ShadowGit.js";
 
 export interface RuntimeDeps {
   config: ResolvedConfig;
@@ -113,6 +115,8 @@ export class Runtime {
   readonly hooks: Hooks;
   readonly contextManager: ContextManager;
   readonly registry: ToolRegistry;
+  /** Push bus: views subscribe to turn, tool and plan updates. */
+  readonly events: EventBus;
   /** The subset of `registry` whose schemas are sent to the model. */
   private advertised: ToolRegistry;
   readonly gate: PermissionGate;
@@ -142,14 +146,27 @@ export class Runtime {
   private currentGoal = "";
   /** Receipt of the most recent finished turn, shown by `/receipt`. */
   lastReceipt: Receipt | undefined;
+  /** Most recent checkpoint, shown in the HUD without shelling out to git. */
+  lastCheckpoint: ShadowCheckpoint | undefined;
   private readonly mcpSummary: { name: string; transport: string; tools: number; version?: string }[] = [];
   private readonly steeringClassifier = new AutoReviewSteeringClassifier();
+  /** Tools running right now, keyed by tool_use id, for the live inspector. */
+  private readonly activeTools = new Map<string, { id: string; name: string; startedAt: number }>();
 
   constructor(deps: RuntimeDeps, history: Message[] = []) {
     this.config = deps.config;
     this.logger = deps.logger;
     this.session = deps.session;
     this.history = history;
+    this.events = new EventBus();
+    // The HUD reads live tools from these two facts; the bus keeps them exact
+    // without a polling loop in the renderer.
+    this.events.on("tool.start", ({ id, name, at }) => {
+      this.activeTools.set(id, { id, name, startedAt: at });
+    });
+    this.events.on("tool.done", ({ id }) => {
+      this.activeTools.delete(id);
+    });
 
     this.cost = new CostTracker(this.config.model);
     this.backups = new BackupStore(this.session.id);
@@ -166,6 +183,9 @@ export class Runtime {
     // A plan left behind by a previous session is resumed, not discarded: the
     // whole point of persisting it is that a restart continues where it stopped.
     this.dag = PersistentTaskDAG.load(stateDir) ?? new PersistentTaskDAG(stateDir);
+    this.dag.setObserver((snapshot) => {
+      this.events.emit("dag.updated", { snapshot, at: Date.now() });
+    });
     this.operatorMemory = new OperatorCognitiveMemory(join(this.config.cwd, ".carls"));
     this.compaction = new CompactionPipeline({
       contextManager: this.contextManager,
@@ -274,7 +294,7 @@ export class Runtime {
 
     // Each child is a full conversation against the same provider, so the pool is
     // capped well below the tool fan-out limit.
-    this.subAgentPool = new SubAgentPool(this.subAgent, { concurrency: 3, maxTasks: 6 });
+    this.subAgentPool = new SubAgentPool(this.subAgent, { concurrency: 3, maxTasks: 6, events: this.events });
 
     this.loop = new AgentLoop({
       provider: this.provider,
@@ -291,6 +311,7 @@ export class Runtime {
       toolContext: this.baseToolContext(),
       takeSteering: () => this.takeSteering(),
       compaction: this.compaction,
+      events: this.events,
     });
   }
 
@@ -445,20 +466,33 @@ export class Runtime {
     // goal, not an empty string.
     this.currentGoal = goal;
     const startedAt = new Date().toISOString();
-    const userMessage: Message = { role: "user", content: [{ type: "text", text: goal }] };
-    this.history.push(userMessage);
-    this.session.recordMessage(userMessage);
-    const result = await this.loop.run(this.history, goal, options);
-    this.lastReceipt = this.buildReceipt(goal, result.finalText, startedAt, result.steps);
-    // The turn is over and the agent is waiting for input again, which is the
-    // plugin API's `session.idle`.
-    await this.hooks.sessionIdle({
-      sessionId: this.session.id,
-      goal,
-      steps: result.steps,
-      stoppedReason: result.stoppedReason,
-    });
-    return result;
+    const turnStartedAt = Date.now();
+    this.events.emit("turn.start", { goal, sessionId: this.session.id, at: turnStartedAt });
+    let result: AgentRunResult | undefined;
+    try {
+      const userMessage: Message = { role: "user", content: [{ type: "text", text: goal }] };
+      this.history.push(userMessage);
+      this.session.recordMessage(userMessage);
+      result = await this.loop.run(this.history, goal, options);
+      this.lastReceipt = this.buildReceipt(goal, result.finalText, startedAt, result.steps);
+      // The turn is over and the agent is waiting for input again, which is the
+      // plugin API's `session.idle`.
+      await this.hooks.sessionIdle({
+        sessionId: this.session.id,
+        goal,
+        steps: result.steps,
+        stoppedReason: result.stoppedReason,
+      });
+      return result;
+    } finally {
+      this.events.emit("turn.end", {
+        goal,
+        stoppedReason: result?.stoppedReason ?? "error",
+        steps: result?.steps ?? 0,
+        durationMs: Date.now() - turnStartedAt,
+        at: Date.now(),
+      });
+    }
   }
 
   contextReport(): string {
@@ -513,17 +547,45 @@ export class Runtime {
    * as a new instruction and derail the turn), and a stop must be dropped from the
    * queue since the loop's abort is what actually stops the work.
    */
-  steer(text: string): void {
+  steer(text: string): "stop" | "forwarded" | "ignored" {
     const trimmed = text.trim();
-    if (trimmed.length === 0) return;
+    if (trimmed.length === 0) return "ignored";
 
     const decision = this.steeringClassifier.classify(trimmed);
     // A correction or a stated preference is worth remembering; an approval and a
     // question are not.
     this.operatorMemory.learn(decision, trimmed);
 
-    if (decision.intent === "approve" || decision.intent === "stop") return;
-    this.steering.push(decision.instruction.length > 0 ? decision.instruction : trimmed);
+    if (decision.intent === "approve") return "ignored";
+    // The caller owns the abort controller, so it must know the operator asked to
+    // stop: dropping the text silently is not enough.
+    if (decision.intent === "stop") return "stop";
+    const instruction = decision.instruction.length > 0 ? decision.instruction : trimmed;
+    this.steering.push(instruction);
+    this.events.emit("steer.queued", {
+      text: instruction,
+      depth: this.steering.length,
+      at: Date.now(),
+    });
+    return "forwarded";
+  }
+
+  /** Instructions waiting for the running turn's next step boundary. */
+  get steeringDepth(): number {
+    return this.steering.length;
+  }
+
+  /** Tools in flight, newest last, for the sidebar and the HUD. */
+  activeToolSnapshot(): { id: string; name: string; elapsedMs: number }[] {
+    const now = Date.now();
+    return [...this.activeTools.values()]
+      .map((tool) => ({ id: tool.id, name: tool.name, elapsedMs: Math.max(0, now - tool.startedAt) }))
+      .sort((a, b) => a.elapsedMs - b.elapsedMs);
+  }
+
+  /** Records the checkpoint created by `/checkpoint`, for the footer. */
+  setLastCheckpoint(checkpoint: ShadowCheckpoint | undefined): void {
+    this.lastCheckpoint = checkpoint;
   }
 
   /** Drains steering messages; the loop calls this at every step boundary. */
@@ -617,6 +679,7 @@ export class Runtime {
     await this.hooks.sessionEnd({ sessionId: this.session.id });
     for (const client of this.mcpClients) client.close();
     this.shadowGit.dispose();
+    this.events.clear();
   }
 }
 

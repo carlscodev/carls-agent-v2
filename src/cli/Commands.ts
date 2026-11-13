@@ -22,6 +22,7 @@ import { applyPreset, discoverAgents, findAgent } from "../agents/Presets.js";
 import { writeTranscript } from "./Export.js";
 import { composeInEditor, editorSpec } from "./Editor.js";
 import { ExecutionReceipt } from "../symbiosis/ExecutionReceipt.js";
+import { fileStateCache } from "../core/FileStateCache.js";
 
 export interface CommandContext {
   runtime: Runtime;
@@ -380,6 +381,7 @@ export const COMMANDS: CommandSpec[] = [
         return false;
       }
       printInfo(`Checkpoint ${checkpoint.id} · ${checkpoint.files} files · "${checkpoint.label}"`);
+      ctx.runtime.setLastCheckpoint(checkpoint);
       printInfo(`Rewind with /rewind ${checkpoint.id}`);
       return false;
     },
@@ -423,6 +425,9 @@ export const COMMANDS: CommandSpec[] = [
       const safety = shadow.create(`before rewind to ${checkpoint.id}`);
       try {
         const result = shadow.rewind(checkpoint);
+        // The working tree changed wholesale; every cached parse is suspect.
+        fileStateCache.invalidateUnder(ctx.runtime.config.cwd);
+        ctx.runtime.setLastCheckpoint(safety ?? checkpoint);
         printInfo(`Rewound to ${checkpoint.id} · restored ${result.restored} files`);
         if (result.deleted.length > 0) {
           printInfo(`Removed ${result.deleted.length} file(s) added since then: ${result.deleted.slice(0, 5).join(", ")}`);

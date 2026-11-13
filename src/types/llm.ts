@@ -30,6 +30,10 @@ export type StopReason =
 export interface Usage {
   inputTokens: number;
   outputTokens: number;
+  /** Prompt tokens served from the provider's prompt cache, when reported. */
+  cacheReadTokens?: number;
+  /** Prompt tokens written to the cache on this call, when reported. */
+  cacheWriteTokens?: number;
 }
 
 export interface LLMResponse {
@@ -54,6 +58,13 @@ export interface CompletionArgs {
    * splicing the model's private scratchpad into the answer.
    */
   onReasoning?: (chunk: string) => void;
+  /**
+   * Fires as soon as a `tool_use` block is complete in the stream, before the
+   * turn ends. Read-only calls can start executing while the model is still
+   * emitting text; a provider that cannot stream tool calls simply never calls
+   * this, and the loop falls back to executing after `complete()` resolves.
+   */
+  onToolCall?: (call: Extract<ContentBlock, { type: "tool_use" }>) => void;
 }
 
 export interface Provider {

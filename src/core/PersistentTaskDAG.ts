@@ -82,6 +82,8 @@ export class PersistentTaskDAG {
   private createdAt: string;
   private nodes: DagNode[];
   private counter = 0;
+  /** Push notification for the TUI; never used by the graph's own logic. */
+  private observer?: (snapshot: DagSnapshot) => void;
 
   constructor(stateDir: string, objective = "", nodes: DagNode[] = [], createdAt?: string) {
     this.path = join(stateDir, "dag.json");
@@ -97,6 +99,12 @@ export class PersistentTaskDAG {
   /** Path of the persisted file, for `/dag` and the receipt. */
   get statePath(): string {
     return this.path;
+  }
+
+  /** Subscribes the UI to every transition; passing undefined detaches it. */
+  setObserver(observer?: (snapshot: DagSnapshot) => void): void {
+    if (observer === undefined) delete this.observer;
+    else this.observer = observer;
   }
 
   /**
@@ -328,5 +336,8 @@ export class PersistentTaskDAG {
     } catch {
       // A read-only workspace must not break the plan; it just will not resume.
     }
+    // Publish even when the write failed: the in-memory plan did change, and a
+    // HUD that only updates on a writable disk would lie about the real state.
+    this.observer?.(this.snapshot());
   }
 }

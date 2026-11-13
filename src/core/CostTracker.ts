@@ -19,6 +19,8 @@ const PRICES: Record<string, ModelPrice> = {
 export interface CostSnapshot {
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   usd: number;
   priced: boolean;
 }
@@ -26,6 +28,8 @@ export interface CostSnapshot {
 export class CostTracker {
   private inputTokens = 0;
   private outputTokens = 0;
+  private cacheReadTokens = 0;
+  private cacheWriteTokens = 0;
   private model: string;
 
   constructor(model: string) {
@@ -36,9 +40,22 @@ export class CostTracker {
     this.model = model;
   }
 
-  add(usage: { inputTokens: number; outputTokens: number }): void {
+  add(usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+  }): void {
     this.inputTokens += usage.inputTokens;
     this.outputTokens += usage.outputTokens;
+    this.cacheReadTokens += usage.cacheReadTokens ?? 0;
+    this.cacheWriteTokens += usage.cacheWriteTokens ?? 0;
+  }
+
+  /** Share of prompt tokens served from cache, 0 when the provider is silent. */
+  cacheHitRatio(): number {
+    const prompt = this.inputTokens + this.cacheReadTokens;
+    return prompt > 0 ? this.cacheReadTokens / prompt : 0;
   }
 
   snapshot(): CostSnapshot {
@@ -47,6 +64,8 @@ export class CostTracker {
       return {
         inputTokens: this.inputTokens,
         outputTokens: this.outputTokens,
+        cacheReadTokens: this.cacheReadTokens,
+        cacheWriteTokens: this.cacheWriteTokens,
         usd: 0,
         priced: false,
       };
@@ -57,6 +76,8 @@ export class CostTracker {
     return {
       inputTokens: this.inputTokens,
       outputTokens: this.outputTokens,
+      cacheReadTokens: this.cacheReadTokens,
+      cacheWriteTokens: this.cacheWriteTokens,
       usd,
       priced: true,
     };

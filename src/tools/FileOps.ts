@@ -526,13 +526,15 @@ export class WriteMany implements Tool<{ files: { path: string; content: string 
 
   async run(input: {files: { path: string; content: string}[] }, ctx: ToolContext): Promise<ToolResult> {
     const written: string[] = [];
+    const writtenPaths: string[] = [];
     for (const file of input.files) {
       const target = guardPath(ctx, file.path);
       ctx.backups?.save(target);
       await writeAtomic(target, file.content);
       written.push(`${toDisplayPath(ctx.cwd, target)} (${file.content.length} B)`);
+      writtenPaths.push(target);
     }
-    return { ok: true, output: `Wrote ${written.length} files:\n${written.join("\n")}`, metadata: { count: written.length } };
+    return { ok: true, output: `Wrote ${written.length} files:\n${written.join("\n")}`, metadata: { count: written.length, paths: writtenPaths } };
   }
 }
 

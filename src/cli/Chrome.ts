@@ -1,5 +1,6 @@
 import pc from "picocolors";
 import { terminalDimension, visibleWidth } from "./Text.js";
+import { FrameRenderer } from "./FrameRenderer.js";
 
 const ESC = "\u001b[";
 const SAVE = "\u001b7";
@@ -44,9 +45,18 @@ export class Chrome {
   /** Completion menu rows, drawn just above the status line. */
   private menuLines: string[] = [];
   private readonly out: NodeJS.WriteStream;
+  /** Diffing writers for the three rows that change while the TUI runs. */
+  private readonly statusFrame: FrameRenderer;
+  private readonly menuFrame: FrameRenderer;
+  private readonly promptFrame: FrameRenderer;
 
   constructor(out: NodeJS.WriteStream = process.stderr) {
     this.out = out;
+    // Chrome updates are small and latency-sensitive: write them immediately,
+    // but let the renderer drop unchanged rows and wrap each batch in Mode 2026.
+    this.statusFrame = new FrameRenderer(out, { coalesce: false });
+    this.menuFrame = new FrameRenderer(out, { coalesce: false });
+    this.promptFrame = new FrameRenderer(out, { coalesce: false });
   }
 
   static supported(out: NodeJS.WriteStream = process.stderr): boolean {
@@ -108,6 +118,10 @@ export class Chrome {
   resize(): void {
     if (!this.enabled) return;
     this.layout = this.computeLayout();
+    // Every origin moved, so the previous frame buffers describe the wrong rows.
+    this.statusFrame.reset();
+    this.menuFrame.reset();
+    this.promptFrame.reset();
     this.drawHeader();
     this.applyRegion();
     this.moveToRegionBottom();
@@ -195,6 +209,7 @@ export class Chrome {
       this.applyRegion();
       this.moveToRegionBottom();
     }
+    this.menuFrame.reset();
     this.drawMenu();
   }
 
@@ -202,10 +217,8 @@ export class Chrome {
     const { menuRows, menuTop } = this.layout;
     if (menuRows === 0 || menuTop === 0) return;
     const width = terminalDimension(this.out.columns);
-    for (let index = 0; index < menuRows; index++) {
-      const line = fit(this.menuLines[index] ?? "", width);
-      this.out.write(`${ESC}${menuTop + index};1H${ESC}2K${line}`);
-    }
+    const lines = this.menuLines.map((line) => fit(line, width));
+    this.menuFrame.render(lines, { originRow: menuTop });
   }
 
   /** Clears every menu row and collapses the reserved space. */
@@ -221,11 +234,15 @@ export class Chrome {
 
   drawStatus(): void {
     if (!this.enabled) return;
-    const { statusRow, height } = this.layout;
+    const { statusRow } = this.layout;
     const width = terminalDimension(this.out.columns);
     const body = fit(this.statusText, width);
-    this.out.write(`${SAVE}${ESC}${statusRow};1H${ESC}2K${body}${RESTORE}`);
-    void height;
+    // The cursor must come back to the conversation region: the status frame is
+    // positioned absolutely, and leaving it there would send the next write to
+    // the footer row.
+    this.out.write(SAVE);
+    this.statusFrame.render([body], { originRow: statusRow });
+    this.out.write(RESTORE);
   }
 
   /** Draws the input line at the reserved prompt row. */
@@ -237,7 +254,7 @@ export class Chrome {
     // still sits right after the prompt, so the placeholder never gets in the way.
     const ghost = buffer.length === 0 ? pc.gray("ask for a change, or / for commands") : "";
     const line = fit(`${promptText}${buffer}${ghost}`, width);
-    this.out.write(`${ESC}${promptRow};1H${ESC}2K${line}`);
+    this.promptFrame.render([line], { originRow: promptRow });
     const used = visibleWidth(promptText) + cursor;
     const column = Math.min(width - 1, used) + 1;
     this.out.write(`${ESC}${promptRow};${column}H`);
@@ -247,12 +264,14 @@ export class Chrome {
   clearPrompt(): void {
     if (!this.enabled) return;
     const { promptRow } = this.layout;
+    this.promptFrame.clear();
     this.out.write(`${ESC}${promptRow};1H${ESC}2K`);
   }
 
   /** Clears the reserved status row. */
   private clearStatus(): void {
     if (!this.enabled) return;
+    this.statusFrame.clear();
     this.out.write(`${ESC}${this.layout.statusRow};1H${ESC}2K`);
   }
 
@@ -277,6 +296,9 @@ export class Chrome {
     }
     this.menuLines = [];
     this.layout = this.computeLayout();
+    this.menuFrame.reset();
+    this.promptFrame.reset();
+    this.statusFrame.reset();
     this.out.write(`${ESC}r`);
     this.clearPrompt();
     this.clearStatus();
@@ -288,6 +310,9 @@ export class Chrome {
     // A command can print past the bottom of the screen while the region is off,
     // which scrolls the whole screen and corrupts both the header and the footer.
     // Repainting all three from scratch is the only way back to a known state.
+    this.statusFrame.reset();
+    this.menuFrame.reset();
+    this.promptFrame.reset();
     this.clearStatus();
     this.clearPrompt();
     this.applyRegion();
@@ -312,6 +337,9 @@ export class Chrome {
     this.out.write(`${ESC}${promptRow};1H${ESC}2K`);
     if (finalLine !== undefined) this.out.write(`${ESC}${promptRow};1H${finalLine}\n`);
     else this.out.write(`${ESC}${promptRow};1H\n`);
+    this.statusFrame.dispose();
+    this.menuFrame.dispose();
+    this.promptFrame.dispose();
   }
 }
 

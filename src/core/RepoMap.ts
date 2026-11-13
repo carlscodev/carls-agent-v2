@@ -1,7 +1,8 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { globbySync } from "globby";
 import { charsForTokens, estimateTokens } from "../utils/tokens.js";
+import { FileStateCache, contentHash, fileStateCache } from "./FileStateCache.js";
 
 /**
  * A repository symbol map, built without an AST dependency.
@@ -54,6 +55,8 @@ export interface RepoMapOptions {
   maxFiles?: number;
   /** Extra glob patterns to skip. */
   ignore?: string[];
+  /** Parse cache; shared with the write tools so edits invalidate it. */
+  cache?: FileStateCache;
 }
 
 const SOURCE_GLOBS = ["**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs,py,go,rs,rb,java}"];
@@ -242,6 +245,10 @@ export interface RepoMapStats {
   /** Approximate tokens the full index would cost. */
   fullTokens: number;
   builtAt: number;
+  /** Files served from the parse cache during the last build. */
+  cachedFiles: number;
+  /** Files actually read and parsed during the last build. */
+  parsedFiles: number;
 }
 
 /**
@@ -253,10 +260,14 @@ export class RepoMap {
   private readonly bySymbol = new Map<string, SymbolEntry[]>();
   private readonly importedBy = new Map<string, number>();
   private readonly root: string;
+  private readonly cache: FileStateCache;
   private builtAt = 0;
+  private cachedFiles = 0;
+  private parsedFiles = 0;
 
-  constructor(root: string) {
+  constructor(root: string, options: { cache?: FileStateCache } = {}) {
     this.root = resolve(root);
+    this.cache = options.cache ?? fileStateCache;
   }
 
   get size(): number {
@@ -274,7 +285,7 @@ export class RepoMap {
       symbols += index.symbols.length;
       for (const symbol of index.symbols) fullTokens += estimateTokens(symbol.signature);
     }
-    return { files: this.files.size, symbols, fullTokens, builtAt: this.builtAt };
+    return { files: this.files.size, symbols, fullTokens, builtAt: this.builtAt, cachedFiles: this.cachedFiles, parsedFiles: this.parsedFiles };
   }
 
   /**
@@ -285,6 +296,8 @@ export class RepoMap {
     this.files.clear();
     this.bySymbol.clear();
     this.importedBy.clear();
+    this.cachedFiles = 0;
+    this.parsedFiles = 0;
 
     const maxFiles = options.maxFiles ?? 2000;
     const matches = globbySync(SOURCE_GLOBS, {
@@ -299,6 +312,29 @@ export class RepoMap {
     for (const relativePath of matches.sort().slice(0, maxFiles)) {
       const file = toPosix(relativePath);
       const absolute = join(this.root, file);
+      let info: ReturnType<typeof statSync>;
+      try {
+        info = statSync(absolute);
+      } catch {
+        // The file vanished between the glob and the stat; drop any cached copy
+        // so a later build does not resurrect a stale entry.
+        this.cache.invalidate(absolute);
+        continue;
+      }
+
+      const cached = this.cache.lookup(absolute, info);
+      if (cached !== undefined) {
+        this.cachedFiles++;
+        this.files.set(file, {
+          file: cached.file,
+          symbols: cached.symbols,
+          imports: cached.imports,
+          lines: cached.lines,
+        });
+        this.indexSymbols(cached.symbols, cached.imports);
+        continue;
+      }
+
       let source: string;
       try {
         source = readFileSync(absolute, "utf8");
@@ -308,24 +344,40 @@ export class RepoMap {
       if (source.length > MAX_FILE_BYTES) continue;
 
       const isTypeScript = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/.test(file);
-      const lines = source.split(/\r?\n/).length;
+      const rawLines = source.split(/\r?\n/);
+      const lines = rawLines.length;
       const symbols = extractSymbols(source, file, isTypeScript);
-      const imports = importsOf(source.split(/\r?\n/), file);
+      const imports = importsOf(rawLines, file);
 
+      this.cache.put(absolute, {
+        file,
+        mtimeMs: info.mtimeMs,
+        size: info.size,
+        contentHash: contentHash(source),
+        symbols,
+        imports,
+        lines,
+      });
+      this.parsedFiles++;
       this.files.set(file, { file, symbols, imports, lines });
-      for (const symbol of symbols) {
-        const bucket = this.bySymbol.get(symbol.name);
-        if (bucket === undefined) this.bySymbol.set(symbol.name, [symbol]);
-        else bucket.push(symbol);
-      }
-      for (const imported of imports) {
-        const key = withoutExtension(imported);
-        this.importedBy.set(key, (this.importedBy.get(key) ?? 0) + 1);
-      }
+      this.indexSymbols(symbols, imports);
     }
 
     this.builtAt = Date.now();
     return this.stats();
+  }
+
+  /** Folds one file's symbols and imports into the lookup indexes. */
+  private indexSymbols(symbols: SymbolEntry[], imports: string[]): void {
+    for (const symbol of symbols) {
+      const bucket = this.bySymbol.get(symbol.name);
+      if (bucket === undefined) this.bySymbol.set(symbol.name, [symbol]);
+      else bucket.push(symbol);
+    }
+    for (const imported of imports) {
+      const key = withoutExtension(imported);
+      this.importedBy.set(key, (this.importedBy.get(key) ?? 0) + 1);
+    }
   }
 
   /** Exact-name lookup, case-insensitive, ranked by how central the file is. */
