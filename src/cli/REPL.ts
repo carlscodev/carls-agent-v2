@@ -50,6 +50,7 @@ import {
 import { formatDuration, terminalDimension, truncate } from "./Text.js";
 import { samePath } from "../utils/platform.js";
 import { restoreTerminal, writeSessionBanner } from "./SessionBanner.js";
+import { countTurns, resumeHydrationLines } from "./ResumeHydration.js";
 
 export interface SessionOptions {
   overrides: Partial<ResolvedConfig>;
@@ -160,6 +161,8 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   let interruptCount = 0;
   let lastGoal: string | undefined;
   let activeAbort: AbortController | undefined;
+  /** Set when `Esc` aborted the turn, so the closing line can say so. */
+  let composerStoppedByEscape = false;
   /** Full-screen continuous animation clock (zero timers while idle). */
   let ticker: AnimationTicker | undefined;
   /** Sidebar inspector state in the full-screen layout. */
@@ -289,6 +292,24 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       chrome.writeRegion(`${promptGlyph()}${text}\n`);
     } else {
       process.stderr.write(`${promptGlyph()}${text}\n`);
+    }
+  };
+
+  /**
+   * Replays the tail of a resumed or freshly loaded session as compact cards, so
+   * the screen matches the history the model is holding instead of staying blank.
+   */
+  const hydrateHistory = (messages: import("../types/llm.js").Message[]): void => {
+    if (messages.length === 0) return;
+    const shown = 3;
+    const hydration = resumeHydrationLines(messages, {
+      turns: shown,
+      width: terminalDimension(process.stderr.columns, 80),
+    });
+    for (const line of hydration) writeLine(line);
+    const total = countTurns(messages);
+    if (total > shown) {
+      writeLine(theme().paint(theme().colors.text.faint, `  … y ${total - shown} turno(s) anteriores en el contexto.`));
     }
   };
 
@@ -643,6 +664,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
         // phase line and the write cursor. When the turn ends the ticker stops,
         // so all three freeze together instead of one timer per animation.
         tickPhase();
+        tickThought();
         cursorTick += 1;
         if (streamMarkdown !== undefined) streamMarkdown.setCursor(streamCursor(cursorTick, true) ?? "");
       }, 80);
@@ -712,9 +734,40 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     if (useChrome) chrome.setPhase(undefined);
   };
 
+  /**
+   * Live thinking line shown above the phase timeline. It carries the router's
+   * classification, the auto-discovered skills and the loop's cognitive
+   * transitions, so the operator can see the agent reasoning instead of a blank
+   * screen. The most recent line wins; a dim spinner prefix keeps it alive.
+   */
+  let thoughtText: string | undefined;
+  let thoughtTick = 0;
+  /** Tail of the provider's native scratchpad, folded into the thinking line. */
+  let reasoningTail = "";
+  const THOUGHT_SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  const setThought = (text: string): void => {
+    thoughtText = text;
+    if (useChrome) chrome.setThought(paintThought());
+  };
+  const paintThought = (): string => {
+    if (thoughtText === undefined) return "";
+    const spinner = THOUGHT_SPINNER[thoughtTick % THOUGHT_SPINNER.length] ?? "⠋";
+    return theme().paint(theme().colors.text.faint, `${spinner} ${thoughtText}`);
+  };
+  const tickThought = (): void => {
+    thoughtTick += 1;
+    if (useChrome && thoughtText !== undefined) chrome.setThought(paintThought());
+  };
+  const clearThought = (): void => {
+    thoughtText = undefined;
+    if (useChrome) chrome.setThought(undefined);
+  };
+
   const runGoal = async (goal: string): Promise<void> => {
     busy = true;
     interruptCount = 0;
+    composerStoppedByEscape = false;
+    reasoningTail = "";
     activeAbort = new AbortController();
     streamTelemetry = undefined;
     rateWindow.clear();
@@ -848,6 +901,23 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           // With the fixed layout the footer is redrawn constantly, so only the
           // final "queued" line is printed there.
           echo: !useChrome,
+          // The composer stays alive for the whole turn: every keystroke repaints
+          // the prompt row so the operator sees what they are typing in real time
+          // instead of a frozen screen.
+          onDraft: (text) => {
+            if (!useChrome) return;
+            chrome.drawPrompt(
+              `${theme().paint(theme().colors.accent, "❯")} `,
+              text,
+              text.length,
+              "escribiendo steering en vivo...  (Enter: inyectar · Esc: cancelar turno)",
+            );
+          },
+          // Escape with an empty composer aborts the running turn immediately.
+          onEscape: () => {
+            activeAbort?.abort();
+            composerStoppedByEscape = true;
+          },
           // Enter steers: the message joins the running turn at its next step
           // boundary. A steer that arrives after the last step is queued below.
           onSubmit: (text) => {
@@ -881,6 +951,16 @@ export async function runRepl(options: SessionOptions): Promise<number> {
         })
       : undefined;
     activeComposer = composer;
+    // Paint the live composer immediately so the operator sees it is alive and
+    // what it accepts before they type the first character.
+    if (useChrome) {
+      chrome.drawPrompt(
+        `${theme().paint(theme().colors.accent, "❯")} `,
+        "",
+        0,
+        "escribiendo steering en vivo...  (Enter: inyectar · Esc: cancelar turno)",
+      );
+    }
     // Approvals read stdin line by line; the composer steps aside while one is
     // on screen so a "y" cannot also become a steering message.
     runtime.gate.setPromptPause((paused) => {
@@ -901,6 +981,17 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     const detachToolDone = runtime.events.on("tool.done", ({ id, name, ok, durationMs }) =>
       toolDone(id, name, ok, durationMs),
     );
+    // The loop narrates its cognition on the bus (classification, skill activation,
+    // reasoning, decision). Rendering it here keeps the agent loop free of any
+    // terminal code while still giving the operator a live thinking panel.
+    const detachThought = runtime.events.on("agent.thought", ({ text }) => setThought(text));
+    // Hybrid thinking: when the provider exposes a native scratchpad
+    // (`reasoning_content`), its tail is what the operator wants to watch; the
+    // narrated thoughts above remain the fallback for models that emit none.
+    const detachReasoning = runtime.events.on("reasoning.delta", ({ text }) => {
+      reasoningTail = (reasoningTail + text).slice(-160).replace(/\s+/g, " ").trim();
+      setThought(`pensando: ${reasoningTail}`);
+    });
     try {
       const result = await runtime.runTurn(goal, {
         signal: activeAbort.signal,
@@ -986,8 +1077,15 @@ export async function runRepl(options: SessionOptions): Promise<number> {
         markdown.push(result.finalText);
         markdown.flush();
       }
-      if (result.stoppedReason === "aborted") printInfo("Stopped.");
-      else if (result.stoppedReason === "max_steps") printError(result.finalText);
+      if (result.stoppedReason === "aborted") {
+        if (composerStoppedByEscape) {
+          const banner = `${pc.red("✗")} ${pc.bold("Turno interrumpido por el operador")} ${pc.gray("[ESC]")}`;
+          if (useChrome) chrome.writeRegion(`\n${pc.gray("╭─")} ${banner} ${pc.gray("─".repeat(Math.max(0, 20)))}\n`);
+          else process.stderr.write(`\n${pc.gray("╭─")} ${banner} ${pc.gray("─".repeat(20))}\n`);
+        } else {
+          printInfo("Stopped.");
+        }
+      } else if (result.stoppedReason === "max_steps") printError(result.finalText);
       // The closing line is what tells the user the agent stopped rather than
       // hung: it reports the wall-clock time, the step count and the spend.
       const spend = runtime.cost.compact();
@@ -1002,6 +1100,8 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     } finally {
       detachTools();
       detachToolDone();
+      detachThought();
+      detachReasoning();
       flushBatch();
       streamMarkdown = undefined;
       textFrames.dispose();
@@ -1019,10 +1119,15 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       endActivity();
       stopTicker();
       clearPhase();
+      clearThought();
+      reasoningTail = "";
       streamTelemetry = undefined;
       if (useChrome) {
         chrome.writeRegion("\n");
         chrome.moveToRegionBottom();
+        // The turn is over, so the composer returns to its idle prompt text
+        // instead of the live-steering placeholder.
+        chrome.clearPrompt();
       } else {
         process.stdout.write("\n");
       }
@@ -1075,6 +1180,10 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   };
 
   try {
+    // A resumed session restores the model's history but not the screen. Replay
+    // the tail of the log as compact cards so what the operator sees matches the
+    // context the model is actually holding, instead of an empty transcript.
+    hydrateHistory(options.resumeMessages ?? []);
     // Text to resume the prompt with: a mention re-opens the line the user was
     // editing instead of starting over.
     let resume: string | undefined;
@@ -1208,6 +1317,9 @@ export async function runRepl(options: SessionOptions): Promise<number> {
             composePrompt: (text: string) => {
               resume = text;
             },
+            // /resume swaps the history in place; repaint its tail so the screen
+            // does not keep showing the previous session.
+            onHistoryLoaded: (messages) => hydrateHistory(messages),
           });
         } finally {
           if (suspendCommand) chrome.resume();

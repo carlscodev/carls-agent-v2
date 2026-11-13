@@ -105,6 +105,11 @@ Interactive runs (`stderr` is a TTY) use the alternate screen by default:
 - a three-row mode-colored composer (green build/auto/yolo, cyan plan, amber ask)
   and a one-row tactical footer with the live spinner, step, tool timer and
   token rate;
+- a live thinking row above the phase timeline: the loop narrates its cognition
+  on the event bus (`agent.thought`: classification, activated skills, step
+  reasoning, tool decision) and the provider's native scratchpad streams through
+  `reasoning.delta`; the row shows the most recent line with a dim spinner and
+  reserves no space when idle;
 - a one-column scrollbar and a "new messages" pill when the view is detached
   from the live edge.
 
@@ -112,6 +117,15 @@ Interactive runs (`stderr` is a TTY) use the alternate screen by default:
 stops with zero timers when it ends. Use `--no-alt-screen` (or a non-TTY
 `stderr`) for the legacy inline layout; `-p` never enters the alternate screen
 and stdout stays the model's answer only.
+
+### Resuming a session
+
+`--resume [id]` restores the model's history, and the REPL also repaints the tail
+of that history as compact cards (`ResumeHydration`) so the screen matches the
+context the model is holding instead of staying blank. The last three turns are
+shown with their opening prompt, a one-line assistant summary and the number of
+tool calls; older turns are collapsed into a count. `/resume` inside a session
+swaps the history in place and repaints through the same path.
 
 ## Autocomplete
 

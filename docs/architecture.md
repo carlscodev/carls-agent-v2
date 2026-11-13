@@ -20,6 +20,29 @@ user message
 truncation. It never throws on a tool failure: an error becomes a `tool_result`
 with `is_error: true`, which the model can read and react to.
 
+### Dual-speed intent routing
+
+Before touching the disk or the skill catalog, `AgentLoop` classifies the goal
+with `routeIntent` (`src/core/IntentRouter.ts`). The router is pure and lexical —
+no LLM call, no I/O — so a greeting never pays for a pre-scan and a real project
+never gets the thin conversational prompt:
+
+| Profile | Trigger | Effect |
+| --- | --- | --- |
+| `CONVERSATIONAL_FAST_PATH` | bare greeting, thanks, short conceptual question | no skill discovery, no power-mode prompt |
+| `DIRECT_CODE_TASK` | an edit/command verb with no named artifact | normal gather-act-verify |
+| `HEAVY_ARCHITECT_POWER_MODE` | build verb + artifact, or an artifact with a detected role | domain skills injected at full length plus `POWER_MODE_MANDATE(role)` |
+
+`detectRole` maps the goal's domain keywords to one of four expert roles (web/UI,
+3D browser game, full-stack/backend, systems) and supplies the role's skill hints.
+Order matters: a greeting that also names an artifact ("hola, hazme una web") is
+power mode, because the artifact rule is checked before the conversational one.
+
+The loop narrates each transition on the event bus as `agent.thought`
+(`classify`, `skill`, `reasoning`, `decide`, `note`), and the provider's native
+scratchpad streams as `reasoning.delta`. The TUI renders both in a live thinking
+row; the core imports no renderer.
+
 ### Parallel read-only calls
 
 Consecutive read-only tool calls issued in one turn run concurrently, capped by
@@ -255,7 +278,8 @@ tested without executing an installer.
 
 | Path | Responsibility |
 | --- | --- |
-| `src/core/AgentLoop.ts` | gather-act-verify loop, parallel batching, observation truncation |
+| `src/core/AgentLoop.ts` | gather-act-verify loop, dual-speed intent routing, parallel batching, observation truncation |
+| `src/core/IntentRouter.ts` | pure lexical classifier: fast path, direct task, power mode + expert role |
 | `src/core/ContextManager.ts` | token budget, compaction, safe cut, checkpoint fallback |
 | `src/core/Runtime.ts` | wiring: tools, provider, gate, sub-agents, system prompt |
 | `src/core/SubAgent.ts` | isolated read-only nested loop |

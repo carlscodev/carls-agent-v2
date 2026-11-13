@@ -17,10 +17,11 @@ import { mapWithConcurrency } from "../utils/concurrency.js";
 import pc from "picocolors";
 import type { CompactionPipeline } from "./CompactionPipeline.js";
 import { StreamingToolExecutor, type PrefetchedToolResult } from "./StreamingToolExecutor.js";
-import type { EventBus } from "./EventBus.js";
+import type { EventBus, AgentThoughtEvent } from "./EventBus.js";
 import { fileStateCache } from "./FileStateCache.js";
 import type { SkillRegistry } from "../skills/SkillRegistry.js";
 import { discoverSkillsForGoal } from "../skills/SkillDiscovery.js";
+import { routeIntent, type ExpertRole, type IntentDecision } from "./IntentRouter.js";
 
 /**
  * How many independent read-only calls one assistant turn may run at once.
@@ -89,6 +90,23 @@ export function lazyCodeDump(text: string): { language: string; lines: number } 
 export const EXECUTION_FIRST_CORRECTION =
   "[SISTEMA]: Violación de protocolo Execution-First. No pegues el código en el chat. Usa write_file / edit_file ahora mismo para escribir estos archivos directamente en el disco y verifica su funcionamiento.";
 
+/**
+ * The non-negotiable contract appended to a power-mode turn. The operator asked
+ * for something to be built, so the turn must produce a plan, real files and a
+ * verified project rather than a chat answer with code fences.
+ */
+export function POWER_MODE_MANDATE(role: ExpertRole): string {
+  return [
+    "",
+    "[MODO POTENCIA ACTIVO] El operador pidió construir algo real. Cumple este contrato sin excepciones:",
+    `- Rol experto activo: ${role}. Actúa con el criterio de ese especialista senior.`,
+    "- Paso 1 obligatorio: crea primero el plan con plan_task (tareas atómicas y verificables) antes de escribir código.",
+    "- Escribe TODOS los archivos reales en disco con write_file / edit_file. Está PROHIBIDO escupir el código en el chat.",
+    "- Verifica el resultado: ejecuta tests, build o el comando de arranque con bash y arregla lo que falle.",
+    "- No declares la tarea terminada hasta que el proyecto funcione de punta a punta sobre el disco.",
+  ].join("\n");
+}
+
 export interface AgentLoopDeps {
   provider: Provider;
   registry: ToolRegistry;
@@ -141,6 +159,11 @@ export interface RunOptions {
   onSteer?: (messages: string[]) => void;
   /** Called at the start of every model step, for progress UI. */
   onStep?: (step: number, maxSteps: number) => void;
+  /**
+   * Pre-computed routing decision. The caller may classify once and reuse it for
+   * its own banner; passing it here avoids a second classification per turn.
+   */
+  intent?: IntentDecision;
   /** External abort, e.g. Ctrl+C in the REPL. */
   signal?: AbortSignal;
   /**
@@ -486,20 +509,50 @@ export class AgentLoop {
     const signal = options.signal ?? new AbortController().signal;
     const ctx: ToolContext = { ...this.deps.toolContext, signal };
     const filesTouched = new Set<string>();
+    // Classify the goal before touching the disk or the skill catalog. The router
+    // is pure and sub-millisecond, so a greeting never pays for the power-mode
+    // pre-scan and a real project never gets the thin conversational prompt.
+    const decision = options.intent ?? routeIntent(goal);
+    const fastPath = decision.profile === "CONVERSATIONAL_FAST_PATH";
+    const powerMode = decision.profile === "HEAVY_ARCHITECT_POWER_MODE";
+    const emitThought = (phase: AgentThoughtEvent["phase"], text: string): void => {
+      this.deps.events?.emit("agent.thought", { phase, text, at: Date.now() });
+    };
+    if (fastPath) {
+      emitThought("classify", "◆ Analizando solicitud: modo FAST-PATH · conversación directa (sin pre-escaneo ni DAG)");
+    } else if (powerMode) {
+      emitThought(
+        "classify",
+        `◆ Analizando solicitud: modo POWER-MODE · Rol detectado: ${decision.role ?? "Systems Architect"}`,
+      );
+    } else {
+      emitThought("classify", "◆ Analizando solicitud: modo DIRECT-TASK · ejecución con herramientas");
+    }
     // Compute the turn prompt once: the skill catalog is static for the run, and
     // rebuilding it on every step would only duplicate tokens.
     const discovery =
-      this.deps.skillRegistry !== undefined
-        ? discoverSkillsForGoal(this.deps.skillRegistry, goal)
+      this.deps.skillRegistry !== undefined && !fastPath
+        ? discoverSkillsForGoal(this.deps.skillRegistry, goal, {
+            // Power mode injects the domain skills at full length: the templates
+            // and checklists are the point, so the body cap is lifted.
+            ...(powerMode ? { limit: 3, minScore: 0, bodyChars: 8000 } : {}),
+          })
         : { relevant: [], block: "" };
     // A discovered skill is injected silently into the prompt, so the only way a
     // user learns it happened is this event. The toast subscribes to it.
     for (const hit of discovery.relevant) {
       this.deps.events?.emit("skill.active", { name: hit.skill.name, at: Date.now() });
+      emitThought(
+        "skill",
+        `◆ Activando Skill especializada: ${hit.skill.name} (aplicando reglas de arquitectura y UI al 100%)`,
+      );
     }
     const baseSystem = this.buildSystemPrompt(this.deps.config.mode);
-    const turnSystem = discovery.block.length > 0 ? `${baseSystem}\n\n${discovery.block}` : baseSystem;
-    const creationRequest = isCreationRequest(goal);
+    let turnSystem = discovery.block.length > 0 ? `${baseSystem}\n\n${discovery.block}` : baseSystem;
+    if (powerMode) {
+      turnSystem = `${turnSystem}\n\n${POWER_MODE_MANDATE(decision.role ?? "Systems Architect")}`;
+    }
+    const creationRequest = powerMode || isCreationRequest(goal);
     let madeChanges = false;
     let lazyCorrections = 0;
 
@@ -569,6 +622,11 @@ export class AgentLoop {
       // Read-only calls are prefetched as soon as their arguments close in the
       // stream. The executor is scoped to this step: it must not outlive the
       // assistant message whose tool_use blocks it is executing.
+      const contextPct = Math.round(this.deps.contextManager.usedRatio(history) * 100);
+      emitThought(
+        "reasoning",
+        `⠋ Razonando siguiente paso con ${this.deps.config.model} (paso ${step + 1}/${maxSteps} · contexto ${contextPct}%)...`,
+      );
       const streamTools = new StreamingToolExecutor({
         execute: (call, signal) => this.executeTool(call.name, call.input, { ...ctx, signal }),
         signal: ctx.signal,
@@ -610,6 +668,7 @@ export class AgentLoop {
         forwardReasoning !== undefined && options.silent !== true
           ? (chunk: string): void => {
               this.deps.events?.emit("stream.delta", { kind: "reasoning", text: chunk, at: Date.now() });
+              this.deps.events?.emit("reasoning.delta", { text: chunk, source: "reasoning_content", at: Date.now() });
               forwardReasoning(chunk);
             }
           : undefined;
@@ -679,6 +738,13 @@ export class AgentLoop {
       // nag a model that already did the work in an earlier step.
       for (const toolUse of toolUses) {
         if (WRITE_TOOLS.has(toolUse.name)) madeChanges = true;
+      }
+      if (toolUses.length > 0) {
+        const names = [...new Set(toolUses.map((toolUse) => toolUse.name))];
+        emitThought(
+          "decide",
+          `◆ Decisión tomada: invocando ${names.length === 1 ? names[0] : `${names.length} herramientas`} (${names.join(", ")})`,
+        );
       }
 
       // Consecutive read-only calls are independent, so they run together;

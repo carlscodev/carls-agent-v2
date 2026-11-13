@@ -105,6 +105,21 @@ export interface OperatorRuleEvent {
   at: number;
 }
 
+/** A reasoning/thinking delta, kept separate from the answer stream. */
+export interface ReasoningDeltaEvent {
+  text: string;
+  /** Which provider field carried it, for the thinking panel's provenance line. */
+  source: "reasoning_content" | "reasoning" | "thinking" | "think-tag";
+  at: number;
+}
+
+/** A cognitive transition the loop narrates when the model emits no reasoning. */
+export interface AgentThoughtEvent {
+  phase: "classify" | "skill" | "reasoning" | "decide" | "note";
+  text: string;
+  at: number;
+}
+
 export interface CarlsEventMap {
   "turn.start": TurnStartEvent;
   "turn.end": TurnEndEvent;
@@ -119,6 +134,8 @@ export interface CarlsEventMap {
   "skill.active": SkillActiveEvent;
   "checkpoint.created": CheckpointCreatedEvent;
   "operator.rule": OperatorRuleEvent;
+  "reasoning.delta": ReasoningDeltaEvent;
+  "agent.thought": AgentThoughtEvent;
 }
 
 export type CarlsEventName = keyof CarlsEventMap;
