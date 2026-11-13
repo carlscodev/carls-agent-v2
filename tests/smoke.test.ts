@@ -721,6 +721,56 @@ describe("AgentLoop (scripted provider)", () => {
     expect(reloaded.length).toBeGreaterThanOrEqual(4);
   });
 
+  it("forwards reasoning and text deltas to the caller", async () => {
+    const { AgentLoop } = await import("../src/core/AgentLoop.js");
+    const { CostTracker } = await import("../src/core/CostTracker.js");
+    const { Hooks } = await import("../src/core/Hooks.js");
+
+    const registry = new ToolRegistry();
+    const config = loadConfig({ yolo: true, maxSteps: 3 }, dir);
+    const session = new SessionStore(dir, config.model, undefined, join(dir, "sessions"));
+    const provider: import("../src/types/llm.js").Provider = {
+      name: "scripted",
+      async complete(args) {
+        // A thinking model emits its scratchpad before the answer; both streams
+        // must reach the caller separately so the UI can style them differently.
+        args.onReasoning?.("think ");
+        args.onReasoning?.("hard");
+        args.onText?.("answer");
+        return {
+          content: [{ type: "text", text: "answer" }],
+          stopReason: "end_turn",
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      },
+    };
+
+    const loop = new AgentLoop({
+      provider,
+      registry,
+      gate: new PermissionGate(config, logger, async () => "y"),
+      contextManager: new ContextManager({ contextWindow: 200000, compactThreshold: 0.75, truncateLimit: 8000 }),
+      session,
+      costTracker: new CostTracker(config.model),
+      hooks: new Hooks(config.hooks, logger, dir),
+      config,
+      logger,
+      systemPrompt: "test",
+      toolContext: { cwd: dir, config, session, logger },
+    });
+
+    const reasoning: string[] = [];
+    const text: string[] = [];
+    const history: Message[] = [{ role: "user", content: [{ type: "text", text: "go" }] }];
+    await loop.run(history, "go", {
+      onReasoning: (chunk) => reasoning.push(chunk),
+      onText: (chunk) => text.push(chunk),
+    });
+
+    expect(reasoning.join("")).toBe("think hard");
+    expect(text.join("")).toBe("answer");
+  });
+
   it("advances the stored updatedAt so the session list orders by real recency", async () => {
     const root = join(dir, "recency-sessions");
     const older = new SessionStore("/work/a", "m", "older", root);
