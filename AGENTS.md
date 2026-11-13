@@ -144,26 +144,46 @@ Two notes from a real run of that block:
 ## Pushing to `carlscodev` (sandbox caveat)
 
 `carlscodev/carls-agent-v2` is the only repository this project pushes to, and
-the local branch is `main`. In this sandbox the push can fail even though the
-working tree is clean:
+the local branch is `main`. The default credentials in this sandbox cannot
+write:
 
-- Both available GitHub credentials — `GITHUB_TOKEN` and the OpenHands git
+- Both ambient GitHub credentials — `GITHUB_TOKEN` and the OpenHands git
   credential helper (`~/.openhands/git-credential-helper`) — authenticate as
   `BerunHaider`, which has **read-only** access to `carlscodev/carls-agent-v2`
-  (`permissions.push: false`). A `git push` therefore ends with
+  (`permissions.push: false`). A `git push` with them ends with
   `403 ... denied to BerunHaider`.
-- `HANDOFF.md` records the intended write path as `cloud_git push`, a command
-  that does not exist in this image; there is no other writer configured.
 
-When a direct push is blocked, commit locally, deploy to the VM (see above) and
+### Working write path: a `carlscodev` fine-grained PAT
+
+A fine-grained PAT owned by `carlscodev` (`permissions.push: true`, verified)
+pushes and opens PRs directly. Pass it inline on the push URL so it is never
+written to `.git/config`:
+
+```bash
+git checkout -b feat/<slug>                       # never push to main directly
+git push "https://carlscodev:${GH_PAT}@github.com/carlscodev/carls-agent-v2.git" feat/<slug>
+```
+
+Then open the PR with the REST API (`POST /repos/.../pulls`) using
+`Authorization: Bearer $GH_PAT`. Keep the token out of the repo: never
+`git remote set-url` with it, never echo it, never write it to a tracked file.
+
+When no PAT is available, commit locally, deploy to the VM (see above) and
 report the blocker. Do not retarget the remote at `BerunHaider`.
 
-### Working write path: delegate through the OpenHands Cloud API
+### CI does not run in this account
+
+`Actions has been disabled for this user`, so no workflow ever fires on a push
+or a pull request — the runs list stays empty. Verify locally instead:
+`npm run typecheck && npm test && npm run build`. An empty CI section on a PR is
+expected here, not a failure.
+
+### Delegating through the OpenHands Cloud API
 
 A delegated Cloud conversation runs inside a sandbox whose
-`GITHUB_PERSONAL_ACCESS_TOKEN` *does* have write access to `carlscodev` (verified:
-it pushed `feat/phase8-cinematic-tui` and opened PR #2). The shell's own token
-stays read-only, so use the API to push branches:
+`GITHUB_PERSONAL_ACCESS_TOKEN` *does* have write access to `carlscodev` (it
+pushed `feat/phase8-cinematic-tui` and opened PR #2). Use this when the shell has
+no PAT:
 
 ```bash
 curl -s -X POST "https://app.all-hands.dev/api/v1/app-conversations" \
