@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
@@ -231,8 +231,9 @@ function chooseArtifact(options: InstallOptions, paths: WindowsInstallPaths): Ch
   const candidates: { kind: "exe" | "bundle"; path: string }[] = [];
   if (options.exeFile !== undefined) candidates.push({ kind: "exe", path: options.exeFile });
   if (options.bundleFile !== undefined) candidates.push({ kind: "bundle", path: options.bundleFile });
-  candidates.push({ kind: "exe", path: layout.exeFile });
-  // Running from the installed SEA is the normal path for `carls --install-win`.
+  // Running as the installed SEA is the normal path for `carls --install-win`:
+  // install the binary the user is actually running, not a release/ directory
+  // that happens to exist in the current working directory.
   if (basename(process.execPath).toLowerCase() === "carls.exe") {
     candidates.push({ kind: "exe", path: process.execPath });
   }
@@ -241,6 +242,7 @@ function chooseArtifact(options: InstallOptions, paths: WindowsInstallPaths): Ch
   if (argvEntry !== undefined && basename(argvEntry).toLowerCase() === "carls.bundle.cjs") {
     candidates.push({ kind: "bundle", path: argvEntry });
   }
+  candidates.push({ kind: "exe", path: layout.exeFile });
   candidates.push({ kind: "bundle", path: layout.bundleFile });
 
   for (const candidate of candidates) {
@@ -337,6 +339,28 @@ export interface UninstallResult {
   pathChanged: boolean;
 }
 
+/**
+ * Deletes a file after this process releases it. Windows keeps an executing
+ * image locked, so `carls.exe --uninstall-win` cannot delete itself; a tiny
+ * detached shell waits for the exit and removes it then.
+ */
+function scheduleDeferredDelete(file: string): void {
+  try {
+    const comspec = process.env.ComSpec ?? "cmd.exe";
+    const command = `ping 127.0.0.1 -n 3 >nul & del /f /q "${file}"`;
+    const child = spawn(comspec, ["/d", "/s", "/c", command], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      shell: false,
+    });
+    child.on("error", () => undefined);
+    child.unref();
+  } catch {
+    // The next install overwrites the file, so a failed schedule is not fatal.
+  }
+}
+
 /** Removes the installed files and the exact Path entry, leaving user data alone. */
 export function uninstallWindows(options: InstallOptions = {}): UninstallResult {
   const platform = options.platform ?? process.platform;
@@ -349,9 +373,13 @@ export function uninstallWindows(options: InstallOptions = {}): UninstallResult 
   const log = options.log ?? ((line: string) => process.stdout.write(`${line}\n`));
   const removed: string[] = [];
   for (const file of [paths.exeFile, paths.bundleFile, paths.cmdFile]) {
-    if (fileExists(file)) {
+    if (!fileExists(file)) continue;
+    try {
       rmSync(file, { force: true });
       removed.push(file);
+    } catch {
+      scheduleDeferredDelete(file);
+      log(`${file} is in use; it will be removed after this process exits.`);
     }
   }
 

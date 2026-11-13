@@ -1,4 +1,5 @@
 import * as readline from "node:readline";
+import { claimKeypress } from "./Input.js";
 
 /**
  * Prompts typed while the agent is working.
@@ -83,7 +84,6 @@ export interface TypedLinesHandle {
 export function collectTypedLines(options: TypedLinesOptions): TypedLinesHandle {
   const { input, output } = options;
   const glyph = options.glyph ?? "⏳ ";
-  readline.emitKeypressEvents(input);
   const wasRaw = input.isRaw === true;
   input.setRawMode?.(true);
   input.resume();
@@ -156,20 +156,28 @@ export function collectTypedLines(options: TypedLinesOptions): TypedLinesHandle 
     }
   };
 
-  input.on("keypress", onKey);
+  let releaseKeypress = claimKeypress(input, onKey);
   return {
     stop() {
       if (stopped) return;
       stopped = true;
-      input.off("keypress", onKey);
+      releaseKeypress();
       input.setRawMode?.(wasRaw);
+      // The next prompt inherits the stream; pausing here was what could leave
+      // a ConPTY reader deaf after the first turn.
+      input.resume();
       output.write("\r\u001b[K");
     },
     pause() {
       paused = true;
+      // Hand the route to whatever owns the terminal now (the ask_user box or
+      // an approval line). The listener stays installed once, in the router.
+      releaseKeypress();
     },
     resume() {
       paused = false;
+      releaseKeypress();
+      releaseKeypress = claimKeypress(input, onKey);
       // A widget that took stdin (the ask_user box, an approval prompt) pauses
       // the stream on its way out; the composer must resume it or every later
       // keystroke would sit in the kernel buffer.

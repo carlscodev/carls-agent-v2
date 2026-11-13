@@ -1,6 +1,7 @@
 import * as readline from "node:readline";
 import pc from "picocolors";
 import type { Chrome } from "./Chrome.js";
+import { claimKeypress } from "./Input.js";
 import { applyCompletion, complete, type Completion, type CompletionResult } from "./Autocomplete.js";
 import type { Runtime } from "../core/Runtime.js";
 import { theme } from "./Theme.js";
@@ -91,7 +92,6 @@ export class Prompt {
 
   /** Reads one line. Never rejects; every exit path is a typed result. */
   async read(options: PromptOptions): Promise<PromptResult> {
-    readline.emitKeypressEvents(this.input);
     const wasRaw = this.input.isRaw === true;
     this.input.setRawMode?.(true);
     this.input.resume();
@@ -102,12 +102,17 @@ export class Prompt {
 
     return await new Promise<PromptResult>((resolve) => {
       let settled = false;
+      let releaseKeypress: (() => void) | undefined;
       const finish = (result: PromptResult): void => {
         if (settled) return;
         settled = true;
-        this.input.off("keypress", onKey);
+        releaseKeypress?.();
+        releaseKeypress = undefined;
         this.input.setRawMode?.(wasRaw);
-        this.input.pause();
+        // Never pause: the steering composer or the next prompt must inherit a
+        // live stream. On Windows/ConPTY a pause here can leave the keyboard
+        // unread even after the next resume().
+        this.input.resume();
         // The menu occupies real rows above the status line; leaving it up would
         // strand it there once the line is submitted.
         this.menu = undefined;
@@ -393,7 +398,7 @@ export class Prompt {
         }
       };
 
-      this.input.on("keypress", onKey);
+      releaseKeypress = claimKeypress(this.input, onKey);
       render();
     });
   }

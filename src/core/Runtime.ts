@@ -1,14 +1,11 @@
-import { platform, release } from "node:os";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
 import type { Message, Provider } from "../types/llm.js";
 import type { ToolContext } from "../types/tools.js";
 import type { AgentRunResult, Checkpoint } from "../types/agent.js";
 import type { Effort, PermissionMode, ResolvedConfig } from "../config/Config.js";
 import { specFor } from "../config/Config.js";
 import { Logger } from "../utils/Logger.js";
-import { toLf } from "../utils/eol.js";
 import { createProvider } from "../providers/ProviderBase.js";
 import { ollamaShow } from "../providers/OllamaProvider.js";
 import { localModelContext } from "../providers/discovery.js";
@@ -91,7 +88,6 @@ import { BackupStore } from "./Backups.js";
 import { CostTracker } from "./CostTracker.js";
 import { Hooks } from "./Hooks.js";
 import { MemoryLoader } from "./MemoryLoader.js";
-import { SkillLoader } from "../skills/SkillLoader.js";
 import { ContextManager, contextReport } from "./ContextManager.js";
 import { findRuntimeAsset } from "../os/RuntimePaths.js";
 import { SubAgent } from "./SubAgent.js";
@@ -102,6 +98,9 @@ import { McpClient } from "../mcp/McpClient.js";
 import { EventBus } from "./EventBus.js";
 import type { Checkpoint as ShadowCheckpoint } from "../security/ShadowGit.js";
 import { autoResolveAskUser, type AskUserHandler, type AskUserPayload, type AskUserResult } from "../types/askUser.js";
+import { buildSystemPrompt } from "./SystemPrompt.js";
+
+export { buildSystemPrompt };
 
 export interface RuntimeDeps {
   config: ResolvedConfig;
@@ -148,6 +147,8 @@ export class Runtime {
   private currentGoal = "";
   /** Receipt of the most recent finished turn, shown by `/receipt`. */
   lastReceipt: Receipt | undefined;
+  /** Skills created during the last turn, shown as SKILL:+name in the HUD. */
+  lastSkillsCreated: string[] = [];
   /** Most recent checkpoint, shown in the HUD without shelling out to git. */
   lastCheckpoint: ShadowCheckpoint | undefined;
   private readonly mcpSummary: { name: string; transport: string; tools: number; version?: string }[] = [];
@@ -293,6 +294,7 @@ export class Runtime {
           logger: this.logger,
           systemPrompt: buildSystemPrompt(subConfig),
           toolContext: this.subAgentToolContext(),
+          skillRegistry: this.skills,
         });
       },
     });
@@ -317,6 +319,7 @@ export class Runtime {
       takeSteering: () => this.takeSteering(),
       compaction: this.compaction,
       events: this.events,
+      skillRegistry: this.skills,
     });
   }
 
@@ -473,6 +476,8 @@ export class Runtime {
     this.currentGoal = goal;
     const startedAt = new Date().toISOString();
     const turnStartedAt = Date.now();
+    this.lastSkillsCreated = [];
+    const beforeSkills = new Set(this.skills.skills.map((skill) => skill.name));
     this.events.emit("turn.start", { goal, sessionId: this.session.id, at: turnStartedAt });
     let result: AgentRunResult | undefined;
     try {
@@ -480,7 +485,13 @@ export class Runtime {
       this.history.push(userMessage);
       this.session.recordMessage(userMessage);
       result = await this.loop.run(this.history, goal, options);
-      this.lastReceipt = this.buildReceipt(goal, result.finalText, startedAt, result.steps);
+      // A `save_skill`/`evolve_skill` call writes to `.agents/skills`; refreshing
+      // the registry is what turns that into a receipt entry and a HUD badge.
+      this.skills.refresh();
+      this.lastSkillsCreated = this.skills.skills
+        .map((skill) => skill.name)
+        .filter((name) => !beforeSkills.has(name));
+      this.lastReceipt = this.buildReceipt(goal, result.finalText, startedAt, result.steps, this.lastSkillsCreated);
       // The turn is over and the agent is waiting for input again, which is the
       // plugin API's `session.idle`.
       await this.hooks.sessionIdle({
@@ -491,6 +502,9 @@ export class Runtime {
       });
       return result;
     } finally {
+      // A provider error, an abort or a throwing callback must not leave a
+      // prefetched read running past the turn that requested it.
+      this.loop.abortActiveTools();
       this.events.emit("turn.end", {
         goal,
         stoppedReason: result?.stoppedReason ?? "error",
@@ -594,6 +608,12 @@ export class Runtime {
     this.lastCheckpoint = checkpoint;
   }
 
+  /** Flushes the session log and the persistent plan before a clean exit. */
+  flushState(): void {
+    this.session.flush();
+    this.dag.save();
+  }
+
   /** The REPL installs the keyboard widget here; tests may install a script. */
   setAskUserHandler(handler?: AskUserHandler): void {
     if (handler === undefined) delete this.askUserHandler;
@@ -678,7 +698,7 @@ export class Runtime {
    * files written, the task graph for plan progress, the operator memory for the
    * rules in force — not from the model's own account of what it did.
    */
-  buildReceipt(goal: string, answer: string, startedAt: string, steps: number): Receipt {
+  buildReceipt(goal: string, answer: string, startedAt: string, steps: number, skillsCreated: string[] = []): Receipt {
     return ExecutionReceipt.build({
       goal,
       answer,
@@ -687,6 +707,7 @@ export class Runtime {
       filesWritten: this.backups.list().map((entry) => entry.path),
       ...(this.dag.all().length > 0 ? { dag: this.dag.snapshot() } : {}),
       operatorRules: this.operatorMemory.activeTexts(),
+      ...(skillsCreated.length > 0 ? { skillsCreated } : {}),
     });
   }
 
@@ -708,105 +729,6 @@ export class Runtime {
     await Promise.all(this.mcpClients.map((client) => client.close().catch(() => undefined)));
     this.shadowGit.dispose();
     this.events.clear();
-  }
-}
-
-export function buildSystemPrompt(config: ResolvedConfig): string {
-  const sections: string[] = [];
-  sections.push(
-    [
-      "You are carls-code, an autonomous software engineering agent working in a terminal.",
-      "You operate in a strict gather-act-verify loop:",
-      "1. GATHER: explore with read_file, glob_files, grep_search before changing anything.",
-      "2. ACT: apply minimal changes with edit_file or write_file.",
-      "3. VERIFY: run the project's tests, linter or compiler with bash and fix failures until they pass.",
-      "Never claim something works without running it. Prefer small, reviewable edits.",
-      "Delegate broad exploration to delegate_task to keep your context small: pass one `goal`, or a",
-      "`tasks` array to run several investigations at once. Choose the role that fits — explorer to map",
-      "code, planner to order a change, auditor to hunt bugs, tester to find what is untested.",
-      "Before a large or risky change, call repo_map to see the symbols and signatures you are about to",
-      "touch without reading whole files.",
-      "Independent read-only calls run in parallel, so ask for every read_file, grep_search, glob_files",
-      "or delegate_task you already know you need in the SAME turn instead of one after another.",
-      "Use the specialised tools instead of bash when one exists: multi_read and write_many batch file I/O,",
-      "apply_patch applies a unified diff, tree_view and list_dir map a project, git_* cover version control,",
-      "web_search and web_fetch read the web (fetch returns text, not markup), network_request and http_download",
-      "handle raw HTTP, computer_use and browser_* drive a desktop or a page,",
-      "and secret_scan checks for leaked credentials before you commit.",
-      "Stop and summarise once the goal is met or you are blocked.",
-    ].join("\n"),
-  );
-
-  sections.push(
-    [
-      "Elicitation rule:",
-      "- A direct or technical request (fix the bug in X, run the tests, rename a symbol) needs ZERO questions: act immediately.",
-      "- A new project or an open design with several plausible paths (build me a game, make me an app, design a system) MUST start with ask_user:",
-      "  group 2-4 high-impact questions (stack/engine, visual style, core mechanics, scope) in ONE call, then use plan_task.",
-      "- ask_user returns a JSON answer map; treat those answers as requirements. In a headless run the defaults are selected automatically.",
-    ].join("\n"),
-  );
-
-  sections.push(`Environment: ${platform()} ${release()} · node ${process.version} · cwd ${config.cwd}`);
-
-  const git = gitSnapshot(config.cwd);
-  if (git !== undefined) sections.push(`Git:\n${git}`);
-
-  const memory = MemoryLoader.load(config.cwd);
-  if (memory) sections.push(`Project instructions (${memory.file}):\n${memory.content}`);
-
-  const skills = SkillLoader.discover(config.cwd);
-  if (skills.length > 0) {
-    // The index is a menu, not the catalog: past a few dozen entries it costs
-    // more context than the task. The rest stay reachable by name.
-    const indexLimit = 40;
-    const listed = skills.slice(0, indexLimit);
-    const index = listed
-      .map((skill) => {
-        const when = skill.whenToUse !== undefined ? ` — ${skill.whenToUse}` : "";
-        return `- ${skill.name}: ${skill.description}${when}`;
-      })
-      .join("\n")
-      .concat(skills.length > indexLimit ? `\n… ${skills.length - indexLimit} more; ask for one by name.` : "");
-    sections.push(
-      [
-        "Skills (reusable procedures). Read one with use_skill before acting when it matches the task,",
-        "and add new ones with save_skill after discovering a non-obvious workflow:",
-        index,
-      ].join("\n"),
-    );
-  }
-
-  // An agent preset comes last: it is the most specific instruction in the
-  // prompt, and it should be the freshest thing the model read.
-  if (config.agentPrompt !== undefined && config.agentPrompt.trim().length > 0) {
-    const label = config.agentName !== undefined ? `Agent: ${config.agentName}` : "Active agent";
-    sections.push(`${label}\n${config.agentPrompt.trim()}`);
-  }
-
-  return sections.join("\n\n");
-}
-
-function gitSnapshot(cwd: string): string | undefined {
-  try {
-    const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    // `git status --short` separates entries with the platform's line ending, so
-    // normalise before trimming; otherwise every path in the prompt ends with a
-    // stray `\r`.
-    const status = toLf(
-      execFileSync("git", ["status", "--short"], {
-        cwd,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }),
-    ).trim();
-    return `branch ${branch}${status.length > 0 ? `\n${status.slice(0, 4000)}` : " · clean"}`;
-  } catch {
-    return undefined;
   }
 }
 

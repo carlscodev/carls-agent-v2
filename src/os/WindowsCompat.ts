@@ -173,10 +173,12 @@ function matchInDirectory(
       };
     }
   }
-  // A file with an extension PATHEXT does not list (for example our own
-  // `carls.exe` when PATHEXT was cleared) is still a legitimate direct target.
-  if (win32.extname(base).length > 0 && isFile(base)) {
-    return { file: normalizeWindowsPath(base), launcher: "direct", extension: win32.extname(base).toUpperCase() };
+  // A file whose extension PATHEXT omits is not directly executable by
+  // CreateProcess. Only the two native executable formats are safe to run
+  // without a shell (this also covers a cleared PATHEXT and `carls.exe`).
+  const extension = win32.extname(base).toUpperCase();
+  if ((extension === ".EXE" || extension === ".COM") && isFile(base)) {
+    return { file: normalizeWindowsPath(base), launcher: "direct", extension };
   }
   return undefined;
 }
@@ -293,6 +295,13 @@ export function planDirectWindowsCommand(
   if (executable === undefined) return undefined;
   const resolved = resolveWindowsExecutable(executable, options);
   if (resolved === undefined) return undefined;
+  // A shell started directly would lose the UTF-8 prologue the platform-shell
+  // path prepends, turning `powershell -Command "Write-Output ñ"` into mojibake.
+  // Send these through `shellForPlatform()` instead.
+  const name = basename(resolved.file).toLowerCase();
+  if (name === "powershell" || name === "powershell.exe" || name === "pwsh" || name === "pwsh.exe" || name === "cmd" || name === "cmd.exe") {
+    return undefined;
+  }
   return { file: resolved.file, args, launcher: resolved.launcher, extension: resolved.extension };
 }
 

@@ -19,6 +19,8 @@ import type { CompactionPipeline } from "./CompactionPipeline.js";
 import { StreamingToolExecutor, type PrefetchedToolResult } from "./StreamingToolExecutor.js";
 import type { EventBus } from "./EventBus.js";
 import { fileStateCache } from "./FileStateCache.js";
+import type { SkillRegistry } from "../skills/SkillRegistry.js";
+import { discoverSkillsForGoal } from "../skills/SkillDiscovery.js";
 
 /**
  * How many independent read-only calls one assistant turn may run at once.
@@ -27,6 +29,65 @@ import { fileStateCache } from "./FileStateCache.js";
  * series. Six keeps a local endpoint and the permission gate comfortable.
  */
 const MAX_PARALLEL_TOOLS = 6;
+
+/** Tools that actually put something on disk, for the Execution-First guard. */
+const WRITE_TOOLS: ReadonlySet<string> = new Set([
+  "write_file",
+  "edit_file",
+  "apply_patch",
+  "write_many",
+  "file_append",
+  "file_delete",
+  "file_move",
+  "file_copy",
+  "make_dir",
+  "lsp_edit",
+]);
+
+const LAZY_CODE_LANGUAGES: ReadonlySet<string> = new Set([
+  "html",
+  "tsx",
+  "jsx",
+  "ts",
+  "js",
+  "css",
+  "vue",
+  "svelte",
+  "py",
+  "go",
+  "rs",
+  "java",
+  "c",
+  "cpp",
+]);
+
+/** True when the operator asked for something to be built, not merely explained. */
+export function isCreationRequest(goal: string): boolean {
+  const normalized = goal
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  return /\b(crea\w*|constru\w*|haz\w*|hacer|build|create|make|genera\w*|desarrolla\w*)\b/.test(normalized);
+}
+
+/** Detects a long fenced source block that should have been written to disk. */
+export function lazyCodeDump(text: string): { language: string; lines: number } | undefined {
+  const fence = /```([A-Za-z0-9+#-]*)\r?\n([\s\S]*?)```/g;
+  for (;;) {
+    const match = fence.exec(text);
+    if (match === null) return undefined;
+    const language = (match[1] ?? "").toLowerCase();
+    if (!LAZY_CODE_LANGUAGES.has(language)) continue;
+    const body = match[2] ?? "";
+    const lines = body.split("\n");
+    const count = lines.length > 0 && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
+    if (count > 25) return { language, lines: count };
+  }
+}
+
+/** The corrective observation injected when the model tries to chat code at us. */
+export const EXECUTION_FIRST_CORRECTION =
+  "[SISTEMA]: Violación de protocolo Execution-First. No pegues el código en el chat. Usa write_file / edit_file ahora mismo para escribir estos archivos directamente en el disco y verifica su funcionamiento.";
 
 export interface AgentLoopDeps {
   provider: Provider;
@@ -61,6 +122,8 @@ export interface AgentLoopDeps {
   compaction?: CompactionPipeline;
   /** Optional push bus; views subscribe instead of polling the loop. */
   events?: EventBus;
+  /** Skill catalog used for the per-turn auto-discovery block. */
+  skillRegistry?: SkillRegistry;
 }
 
 export interface RunOptions {
@@ -84,9 +147,27 @@ export interface RunOptions {
 
 export class AgentLoop {
   private readonly deps: AgentLoopDeps;
+  /**
+   * Executor for the step in flight. The step paths cancel it themselves, but
+   * an abrupt throw or an external abort must not leave a prefetched read
+   * running against a turn that is already over.
+   */
+  private activeTools: StreamingToolExecutor | undefined;
 
   constructor(deps: AgentLoopDeps) {
     this.deps = deps;
+  }
+
+  /** Cancels any prefetched tool still running for this loop. */
+  abortActiveTools(): void {
+    this.activeTools?.abort();
+    this.activeTools = undefined;
+  }
+
+  /** Cancels one step's prefetch cohort and clears the safety-net pointer. */
+  private finishTools(executor: StreamingToolExecutor): void {
+    executor.abort();
+    if (this.activeTools === executor) this.activeTools = undefined;
   }
 
   /**
@@ -397,6 +478,17 @@ export class AgentLoop {
     }
     const ctx: ToolContext = { ...this.deps.toolContext, signal: abortController.signal };
     const filesTouched = new Set<string>();
+    // Compute the turn prompt once: the skill catalog is static for the run, and
+    // rebuilding it on every step would only duplicate tokens.
+    const discovery =
+      this.deps.skillRegistry !== undefined
+        ? discoverSkillsForGoal(this.deps.skillRegistry, goal)
+        : { relevant: [], block: "" };
+    const baseSystem = this.buildSystemPrompt(this.deps.config.mode);
+    const turnSystem = discovery.block.length > 0 ? `${baseSystem}\n\n${discovery.block}` : baseSystem;
+    const creationRequest = isCreationRequest(goal);
+    let madeChanges = false;
+    let lazyCorrections = 0;
 
     for (let step = 0; step < maxSteps; step++) {
       if (ctx.signal.aborted) {
@@ -488,6 +580,7 @@ export class AgentLoop {
           });
         },
       });
+      this.activeTools = streamTools;
 
       const forwardText = options.onText;
       const forwardReasoning = options.onReasoning;
@@ -509,7 +602,7 @@ export class AgentLoop {
       let response: LLMResponse;
       try {
         response = await this.deps.provider.complete({
-          system: this.buildSystemPrompt(this.deps.config.mode),
+          system: turnSystem,
           messages: history,
           tools: this.advertised().schemas() as ToolSchema[],
           model: this.deps.config.model,
@@ -523,7 +616,7 @@ export class AgentLoop {
           },
         });
       } catch (error) {
-        streamTools.abort();
+        this.finishTools(streamTools);
         throw error;
       }
       this.deps.costTracker.add(response.usage);
@@ -541,10 +634,36 @@ export class AgentLoop {
         .join("");
 
       if (toolUses.length === 0) {
+        // Anti-Lazy guard: a creation request answered with a long fenced code
+        // block and no write is a protocol violation, not a finished task. Nudge
+        // the model once, then let the normal loop continue so it can write.
+        if (
+          creationRequest &&
+          !madeChanges &&
+          this.deps.config.mode !== "plan" &&
+          lazyCorrections < 1 &&
+          lazyCodeDump(text) !== undefined
+        ) {
+          lazyCorrections += 1;
+          const correction: Message = {
+            role: "user",
+            content: [{ type: "text", text: EXECUTION_FIRST_CORRECTION }],
+          };
+          history.push(correction);
+          this.deps.session.recordMessage(correction);
+          this.finishTools(streamTools);
+          continue;
+        }
         // A provider that emitted a tool call and then dropped it must not leave
         // a prefetched read running after the turn is already over.
-        streamTools.abort();
+        this.finishTools(streamTools);
         return { steps: step + 1, finalText: text, stoppedReason: "completed" };
+      }
+
+      // Remember that this turn actually produced files; the guard must not
+      // nag a model that already did the work in an earlier step.
+      for (const toolUse of toolUses) {
+        if (WRITE_TOOLS.has(toolUse.name)) madeChanges = true;
       }
 
       // Consecutive read-only calls are independent, so they run together;
@@ -579,7 +698,7 @@ export class AgentLoop {
 
       // Cancel any prefetched call the response did not include (a malformed or
       // truncated stream), so no read survives the step that requested it.
-      streamTools.abort();
+      this.finishTools(streamTools);
 
       const userMessage: Message = { role: "user", content: results };
       history.push(userMessage);

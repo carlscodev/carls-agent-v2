@@ -364,12 +364,17 @@ export function findSeaFuseOffset(executable: Buffer): number {
 }
 
 function patchSeaFuse(executable: Buffer): boolean {
-  const offset = findSeaFuseOffset(executable);
-  if (offset < 0) return false;
-  const stateOffset = offset + SEA_FUSE_PREFIX.length + 1; // skip the ':'
-  if (stateOffset >= executable.length) return false;
-  executable.write("1", stateOffset, "latin1");
-  return true;
+  const needle = Buffer.from(`${SEA_FUSE_PREFIX}:0`, "latin1");
+  let patched = false;
+  let offset = executable.indexOf(needle);
+  while (offset >= 0) {
+    // The byte after the ':' is the fuse state; 1 means "this is a SEA".
+    executable.write("1", offset + needle.length - 1, "latin1");
+    patched = true;
+    offset = executable.indexOf(needle, offset + needle.length);
+  }
+  // A binary that already has the fuse armed (re-injecting into a SEA) is fine.
+  return patched || findSeaFuseOffset(executable) >= 0;
 }
 
 export interface SignatureStripResult {
@@ -496,16 +501,16 @@ export interface ResourceSectionResult {
 /**
  * Builds the replacement `.rsrc` payload.
  *
- * Node's manifest, icon and version information are kept: their data entries
- * are copied verbatim, and because the original `.rsrc` section stays mapped in
- * the image, their absolute RVAs remain valid. Only the directory tree — whose
- * offsets are relative — is re-laid-out, with the SEA blob added as type 10
- * (`RT_RCDATA`) named `NODE_SEA_BLOB`, which is what `FindResource` looks up.
+ * Node's manifest, icon and version information are kept: each payload is
+ * copied into the new section and its RVA rebased. Only the directory tree —
+ * whose offsets are relative — is re-laid-out, with the SEA blob added as type
+ * 10 (`RT_RCDATA`) named `NODE_SEA_BLOB`, which is what `FindResource` looks up.
  */
 export function buildResourceSection(
   oldResourceSection: Buffer,
   blob: Buffer,
   sectionRva: number,
+  oldResourceRva?: number,
 ): ResourceSectionResult {
   const root = parseResourceTree(oldResourceSection);
   const existing = root.ids.findIndex(
@@ -565,10 +570,45 @@ export function buildResourceSection(
   };
 
   const rootOffset = allocate(root);
+
+  // Resource data (manifest, icons, version, ...) is copied into the new
+  // section too. Windows resolves a data entry's RVA through the section that
+  // holds the resource directory, so leaving the payload in the old section
+  // makes GetFileVersionInfo return nothing and can make the loader reject the
+  // image even though the directory tree itself is valid.
+  interface DataCopy {
+    data: ResourceData;
+    sourceOffset: number;
+    targetOffset: number;
+    size: number;
+  }
+  const copies: DataCopy[] = [];
+  if (oldResourceRva !== undefined) {
+    const collect = (directory: ResourceDirectory): void => {
+      for (const node of [...directory.named, ...directory.ids]) {
+        if (node.data !== undefined) {
+          const sourceOffset = node.data.rva - oldResourceRva;
+          if (
+            node.data.size > 0 &&
+            sourceOffset >= 0 &&
+            sourceOffset + node.data.size <= oldResourceSection.length
+          ) {
+            const targetOffset = alignUp(cursor, 8);
+            cursor = targetOffset + alignUp(node.data.size, 8);
+            copies.push({ data: node.data, sourceOffset, targetOffset, size: node.data.size });
+          }
+        }
+        if (node.child !== undefined) collect(node.child);
+      }
+    };
+    collect(root);
+  }
+
   cursor = alignUp(cursor, 8);
   const blobOffset = cursor;
   cursor += blob.length;
   seaData.rva = sectionRva + blobOffset;
+  for (const copy of copies) copy.data.rva = sectionRva + copy.targetOffset;
 
   const section = Buffer.alloc(cursor);
   const write = (directory: ResourceDirectory): void => {
@@ -619,6 +659,14 @@ export function buildResourceSection(
   };
 
   write(root);
+  for (const copy of copies) {
+    oldResourceSection.copy(
+      section,
+      copy.targetOffset,
+      copy.sourceOffset,
+      copy.sourceOffset + copy.size,
+    );
+  }
   blob.copy(section, blobOffset);
   return { section, rootOffset };
 }
@@ -724,7 +772,7 @@ export function injectSeaBlob(executable: Buffer, blob: Buffer): SeaInjectionRes
     oldResource = stripped.buffer.subarray(offset, offset + length);
   }
 
-  const built = buildResourceSection(oldResource, blob, sectionRva);
+  const built = buildResourceSection(oldResource, blob, sectionRva, info.resourceRva);
   const appended = appendSection(
     stripped.buffer,
     info,
@@ -790,6 +838,7 @@ export interface BuildExecutableOptions {
 
 export interface ExecutableArtifact {
   exeFile: string;
+  bundleFile: string;
   blobFile: string;
   cmdFile: string;
   injectedBy: "postject" | "builtin";
@@ -875,6 +924,7 @@ export async function buildExecutable(
 
   return {
     exeFile: layout.exeFile,
+    bundleFile: layout.bundleFile,
     blobFile: layout.blobFile,
     cmdFile: layout.cmdFile,
     injectedBy,

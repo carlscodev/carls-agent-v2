@@ -96,6 +96,15 @@ export class SessionStore {
     this.touch();
   }
 
+  /**
+   * Durability point for a clean exit. The log is append-only and written with
+   * `appendFileSync`, so the bytes are already on disk; re-emitting the meta
+   * record also refreshes `updatedAt` so `--resume` picks this session first.
+   */
+  flush(): void {
+    this.touch();
+  }
+
   private touch(): void {
     this.meta = { ...this.meta, updatedAt: new Date().toISOString() };
     // Persisted so `SessionStore.list()` can order by real recency; without this

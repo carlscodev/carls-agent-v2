@@ -75,6 +75,93 @@ function mapContent(blocks: Anthropic.ContentBlock[]): ContentBlock[] {
   return out;
 }
 
+type AnthropicMessageStream = ReturnType<Anthropic["messages"]["stream"]>;
+
+/**
+ * Resolves as soon as the protocol's `message_stop` has produced the final
+ * message, then aborts the stream.
+ *
+ * The SDK's `finalMessage()` waits for the underlying `for await` to finish,
+ * which only happens when the HTTP body closes. An SSE gateway or a keep-alive
+ * proxy may leave that socket open after `message_stop`, so awaiting it leaves
+ * the turn pending forever: the answer is on screen, but the REPL never gets
+ * the prompt back. The `message` event is emitted exactly at `message_stop`
+ * with the complete snapshot, so that is the correct completion signal.
+ */
+function waitForFinalMessage(
+  stream: AnthropicMessageStream,
+  signal?: AbortSignal,
+): Promise<Anthropic.Message> {
+  return new Promise<Anthropic.Message>((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = (): void => {
+      stream.off("message", onMessage);
+      stream.off("streamEvent", onStreamEvent);
+      stream.off("end", onEnd);
+      signal?.removeEventListener("abort", onSignalAbort);
+      // The error/abort listeners stay attached on purpose: aborting a settled
+      // stream makes the SDK emit `abort`, and with no listener it turns that
+      // into an unhandled rejection. They are no-ops once `settled` is true.
+    };
+    const finish = (action: () => void): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      action();
+    };
+    const closeWith = (message: Anthropic.Message): void => {
+      finish(() => {
+        // Release the socket instead of waiting for a keep-alive peer to close
+        // it; the message is already complete at this point.
+        try {
+          stream.abort();
+        } catch {
+          // The stream may already be closed; the message is still good.
+        }
+        resolve(message);
+      });
+    };
+    const onMessage = (message: Anthropic.Message): void => closeWith(message);
+    // The SDK's SSE splitter misses a final `\n\n` when it lands at the end of
+    // the last chunk (the index loop stops two bytes early), so `message_stop`
+    // can stay buffered forever on a keep-alive socket. `message_delta` carries
+    // the final stop_reason and the complete snapshot, which is an equivalent
+    // end signal and arrives one frame earlier.
+    const onStreamEvent = (
+      event: Anthropic.MessageStreamEvent,
+      snapshot: Anthropic.Message,
+    ): void => {
+      if (event.type === "message_stop") closeWith(snapshot);
+      else if (event.type === "message_delta" && event.delta.stop_reason !== null) {
+        closeWith(snapshot);
+      }
+    };
+    const onError = (error: Error): void => finish(() => reject(error));
+    const onAbort = (error: Error): void => finish(() => reject(error));
+    const onEnd = (): void =>
+      finish(() => reject(new Error("The stream ended before producing a final message.")));
+    const onSignalAbort = (): void => {
+      finish(() => reject(new Error("The request was aborted.")));
+      try {
+        stream.abort();
+      } catch {
+        // Already closed.
+      }
+    };
+
+    stream.on("message", onMessage);
+    stream.on("streamEvent", onStreamEvent);
+    stream.on("error", onError);
+    stream.on("abort", onAbort);
+    stream.on("end", onEnd);
+    if (signal !== undefined) {
+      if (signal.aborted) onSignalAbort();
+      else signal.addEventListener("abort", onSignalAbort, { once: true });
+    }
+  });
+}
+
 export class AnthropicProvider implements Provider {
   readonly name = "anthropic";
   private readonly client: Anthropic;
@@ -102,14 +189,14 @@ export class AnthropicProvider implements Provider {
     };
 
     // Real token streaming: text deltas are forwarded as they arrive, and the
-    // final message is awaited once the stream completes.
+    // turn completes at `message_stop` rather than at transport close.
     const response = await withRetry(
       async () => {
         const stream = this.client.messages.stream(request, { signal: args.signal });
         if (args.onText) {
           stream.on("text", (delta: string) => args.onText?.(delta));
         }
-        return stream.finalMessage();
+        return await waitForFinalMessage(stream, args.signal);
       },
       {
         onRetry: (attempt, delay) =>

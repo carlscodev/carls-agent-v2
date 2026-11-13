@@ -329,6 +329,22 @@ export class Chrome {
     this.drawStatus();
   }
 
+  /**
+   * Settles the footer at the end of a turn.
+   *
+   * Any coalesced frame is written immediately (cancelling its timer) and the
+   * cursor is made visible again. FrameRenderer always opens and closes DEC
+   * mode 2026 inside one write, so there is no synchronised update left open
+   * across ticks for the terminal to freeze on.
+   */
+  finishTurn(): void {
+    if (!this.enabled) return;
+    this.statusFrame.flush();
+    this.menuFrame.flush();
+    this.promptFrame.flush();
+    this.out.write("\u001b[?25h");
+  }
+
   /** Restores the terminal and prints the closing line. */
   disable(finalLine?: string): void {
     if (!this.enabled) return;

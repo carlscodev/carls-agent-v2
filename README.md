@@ -63,6 +63,25 @@ carls --version
 carls --doctor
 ```
 
+### Native Windows executable
+
+From a clone on Windows, `npm run build:exe` produces one `release\carls.exe`
+(Node SEA) with the bundle, the builtin skills and the version embedded, plus
+`carls.cmd` as a no-npm launcher. `npm run build:bundle` stops after the
+single-file CommonJS bundle.
+
+```powershell
+npm install
+npm run build:exe
+.\release\carls.exe --version
+.\release\carls.exe --install-win    # %LOCALAPPDATA%\carls\bin + user Path
+.\release\carls.exe --uninstall-win
+```
+
+The installer needs no administrator, never calls npm and never truncates an
+existing `Path`; open a new terminal after it so `carls` resolves from any
+directory.
+
 ## Quick start
 
 ```bash

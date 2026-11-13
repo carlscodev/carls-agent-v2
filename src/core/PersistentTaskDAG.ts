@@ -107,6 +107,11 @@ export class PersistentTaskDAG {
     else this.observer = observer;
   }
 
+  /** Forces a write on a clean exit even when no transition happened. */
+  save(): void {
+    this.persist();
+  }
+
   /**
    * Loads a graph from disk, or returns undefined when there is none.
    *

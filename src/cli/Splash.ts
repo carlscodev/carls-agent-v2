@@ -1,5 +1,5 @@
-import * as readline from "node:readline";
 import pc from "picocolors";
+import { claimKeypress } from "./Input.js";
 import { terminalDimension, visibleWidth } from "./Text.js";
 
 const EYES = ["◕   ◕", "◔   ◔", "•   •", "◕   ◕"];
@@ -25,7 +25,6 @@ export class Splash {
 
     const input = process.stdin;
     const out = process.stderr;
-    readline.emitKeypressEvents(input);
     const wasRaw = input.isRaw === true;
     input.setRawMode?.(true);
     input.resume();
@@ -35,7 +34,7 @@ export class Splash {
     const onKey = (): void => {
       skipped = true;
     };
-    input.on("keypress", onKey);
+    const releaseKeypress = claimKeypress(input, onKey);
 
     const draw = (): void => {
       const art = Splash.art(frame, info);
@@ -63,9 +62,11 @@ export class Splash {
       }
       out.write("\u001b[2J\u001b[H\u001b[?25h");
     } finally {
-      input.off("keypress", onKey);
+      releaseKeypress();
       input.setRawMode?.(wasRaw);
-      input.pause();
+      // Leave stdin flowing for the prompt; a pause on a Windows pseudo-console
+      // can survive the next resume and swallow the first line.
+      input.resume();
     }
   }
 

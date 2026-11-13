@@ -126,4 +126,8 @@ push a branch, not a tag; the `gh` token has no write there.
 - File access goes through `guardPath`; a rewritten hook input and a
   `WorkspaceEdit` are re-validated the same way.
 - Terminal width is correctness — measure with `src/cli/Text.ts`.
+- A model stream ends at `[DONE]` / `message_stop` / the final `message_delta`,
+  never at socket close; cancel the reader and return.
+- Raw stdin has one keypress route. Resume it between turns; never pause it on
+  Windows, and close mode 2026 in the same write that opened it.
 - No secrets in the repo, ever.

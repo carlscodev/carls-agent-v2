@@ -211,6 +211,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--agent":
         parsed.agent = next(arg);
         break;
+      case "-r":
       case "--resume": {
         const value = argv[i + 1];
         if (value === undefined || value.startsWith("--")) {
@@ -255,7 +256,7 @@ USAGE
   carls                       Start the interactive REPL
   carls "query"               Run one query, then exit
   carls -p "query"            Same as above (print mode)
-  carls --resume [id]         Resume the latest session (or one by id)
+  carls -r, --resume [id]     Resume the latest session (or one by id)
 
 OPTIONS
   -h, --help                  Show this help

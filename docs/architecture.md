@@ -90,6 +90,20 @@ appends it as the last text block of the summary message. Appending rather than
 inserting a second message avoids emitting two consecutive user turns, which
 some providers reject.
 
+## Ending a turn
+
+A provider's turn ends at the protocol marker, not at TCP close: `[DONE]` and
+`message_stop` / the final `message_delta` cancel the reader immediately.
+Gateways routinely keep an SSE socket open after the last frame, and waiting for
+the transport leaves the REPL showing a finished answer with no prompt.
+
+The REPL owns raw stdin through one keypress route (`src/cli/Input.ts`). The
+prompt, the steering composer, the splash and the full-screen selectors claim
+and release it in turn; none of them pauses stdin between turns, because a
+paused Windows pseudo-console can remain deaf after the next resume. At turn
+end every frame writer is flushed, synchronized output is closed in the same
+write that opened it, and the cursor is made visible before the prompt returns.
+
 ## The task horizon
 
 Long work outlives a context window and often a process. `PersistentTaskDAG`
@@ -246,8 +260,9 @@ tested without executing an installer.
 | `src/cli/` | REPL, Chrome layout, prompt, palette, renderers, commands |
 | `src/security/PermissionGate.ts` | the six permission modes |
 | `src/skills/` | discovery and usage ledger |
+| `src/os/` | OS profile, win32 path/PATHEXT/UTF-8 compatibility, native Windows build (bundle + SEA) and per-user install |
 | `src/update/Updater.ts` | release check and tag-pinned update |
-| `scripts/` | installers and shared shell helpers |
+| `scripts/` | installers, shared shell helpers and the native Windows build entry point |
 
 ## Tests
 

@@ -101,9 +101,13 @@ export class FrameRenderer {
     this.timer.unref?.();
   }
 
-  /** Writes the pending frame immediately. */
+  /** Writes the pending frame immediately and cancels a scheduled flush. */
   flush(): void {
     if (this.disposed) return;
+    if (this.timer !== undefined) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
     const next = this.pending;
     if (next === undefined) return;
     this.pending = undefined;

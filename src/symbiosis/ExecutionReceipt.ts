@@ -39,6 +39,8 @@ export interface ReceiptInput {
   compaction?: CompactionReport;
   /** Skills loaded during the session. */
   skillsUsed?: readonly string[];
+  /** Skills created or evolved during the session. */
+  skillsCreated?: readonly string[];
   /** Operator rules in force at the end. */
   operatorRules?: readonly string[];
   /** Reasons the task could not be finished, if any. */
@@ -57,6 +59,7 @@ export interface Receipt {
   plan?: { completed: number; total: number; blocked: boolean };
   compacted: boolean;
   skillsUsed: string[];
+  skillsCreated: string[];
   operatorRules: string[];
   blockers: string[];
   /** True when something was verified and nothing was rolled back. */
@@ -93,6 +96,7 @@ export class ExecutionReceipt {
         : {}),
       compacted: input.compaction !== undefined && input.compaction.layers.some((layer) => layer.applied && layer.layer === 5),
       skillsUsed: [...(input.skillsUsed ?? [])],
+      skillsCreated: [...(input.skillsCreated ?? [])],
       operatorRules: [...(input.operatorRules ?? [])],
       blockers: [...(input.blockers ?? [])],
       clean: rolledBack.length === 0,
@@ -135,6 +139,7 @@ export class ExecutionReceipt {
     }
     if (receipt.compacted) lines.push("Context: compacted during the task (live state was re-anchored)");
     if (receipt.skillsUsed.length > 0) lines.push(`Skills used: ${receipt.skillsUsed.join(", ")}`);
+    if (receipt.skillsCreated.length > 0) lines.push(`Skills created: ${receipt.skillsCreated.join(", ")}`);
     if (receipt.operatorRules.length > 0) lines.push(`Operator rules in force: ${receipt.operatorRules.join(" | ")}`);
     if (receipt.blockers.length > 0) {
       lines.push("Blockers:");

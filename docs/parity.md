@@ -43,6 +43,7 @@ terminal vocabulary (glyphs, panels, mode cycling) is our own.
 | Themes | dark/light, 256-colour and no-colour degradation |
 | Print mode | stdout answer only, pipeable |
 | Install | one-line curl (Linux/macOS) and PowerShell (Windows), self-bootstrapping |
+| Native Windows binary | `npm run build:exe` emits one `carls.exe` (Node SEA) plus `carls.cmd`; `--install-win` copies it to `%LOCALAPPDATA%\carls\bin` and adds that directory to the user `Path` |
 | Updates | `carls update`, tag-pinned, cached startup notice |
 | Diagnostics | `/doctor` covering config, credentials, endpoint, MCP, updates |
 | CI | Linux + macOS on Node 20/22/24, installer end to end on both, Windows job for build + CLI + PowerShell installer |

@@ -17,6 +17,8 @@
 | `--setup` | provider wizard (writes the config, no restart needed) |
 | `--providers` | list every bundled provider and its credential variable |
 | `--doctor` | config, credentials, endpoint, MCP and update status |
+| `--install-win` | copy `carls.exe` to `%LOCALAPPDATA%\carls\bin`, add it to the user `Path`, then exit (Windows only) |
+| `--uninstall-win` | remove the per-user Windows files and the exact `Path` entry, then exit |
 | `update [--check] [--ref <tag>] [--dry-run]` | install, or only report, the latest release |
 | `-v, --version`, `-h, --help` | version and help |
 
@@ -81,8 +83,27 @@ composer steps aside, so answering `y` cannot also steer the turn.
 | `/config`, `/permissions`, `/theme`, `/init` | configuration, policy, colours, `AGENTS.md` setup |
 | `/providers`, `/setup`, `/doctor` | provider list, wizard, diagnostics |
 | `/update [--check]` | install or check for a newer release |
+| `/install-win`, `/uninstall-win` | per-user native install and cleanup (Windows) |
 | `/retry` | re-run the last task |
 | `/exit` | leave |
+
+## Native Windows build
+
+`npm run build:exe` (after `npm install`) produces:
+
+| Artifact | Purpose |
+| --- | --- |
+| `release/carls.bundle.cjs` | one self-contained CommonJS file with every runtime dependency, the builtin skills and the version embedded |
+| `release/sea-config.json` | Node SEA config (`useCodeCache: true`, warning disabled) |
+| `release/sea-prep.blob` | the SEA payload |
+| `release/carls.exe` | `node.exe` with the blob in a `NODE_SEA_BLOB` resource and the SEA fuse flipped |
+| `release/carls.cmd` | launcher that starts the exe without npm |
+
+`npm run build:bundle` stops after the bundle. Piping `carls.exe` through
+`--install-win` copies it to `%LOCALAPPDATA%\carls\bin` and appends that
+directory to the **user** `Path` only when it is missing; the existing value is
+read without `%VAR%` expansion and never truncated (no `setx`). Open a new
+terminal afterwards. `--uninstall-win` removes the files and that one entry.
 
 ## Exit codes
 

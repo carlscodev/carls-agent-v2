@@ -6,6 +6,48 @@ export interface KeyEvent {
   sequence?: string | undefined;
 }
 
+export type KeypressHandler = (sequence: string | undefined, key: readline.Key) => void;
+
+interface KeypressRoute {
+  handler?: KeypressHandler;
+  listener: (sequence: string | undefined, key: readline.Key) => void;
+}
+
+/**
+ * One dispatcher per input stream.
+ *
+ * The prompt, the steering composer, the splash and the full-screen selectors
+ * all need raw keypresses, but only one of them may act at a time. Attaching a
+ * keypress listener per widget let a stopped or paused widget keep swallowing
+ * keys (or left the stream paused after a ConPTY hand-off). This router keeps a
+ * single listener attached and points it at the current owner; claiming twice
+ * hands ownership to the newest widget, and releasing only clears it when that
+ * widget is still the owner.
+ */
+const routes = new WeakMap<NodeJS.ReadStream, KeypressRoute>();
+
+export function claimKeypress(input: NodeJS.ReadStream, handler: KeypressHandler): () => void {
+  readline.emitKeypressEvents(input);
+  let route = routes.get(input);
+  if (route === undefined) {
+    const created: KeypressRoute = {
+      listener: (sequence, key) => {
+        created.handler?.(sequence, key);
+      },
+    };
+    routes.set(input, created);
+    input.on("keypress", created.listener);
+    route = created;
+  }
+  route.handler = handler;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (route.handler === handler) delete route.handler;
+  };
+}
+
 /**
  * Reads one line at a time, creating a short-lived readline interface per
  * prompt. Between lines no readline listener is attached to stdin, which is
@@ -69,7 +111,6 @@ export class RawSession {
     input: NodeJS.ReadStream,
     fn: (next: () => Promise<KeyEvent>) => Promise<T>,
   ): Promise<T> {
-    readline.emitKeypressEvents(input);
     const wasRaw = input.isRaw === true;
     if (input.setRawMode) input.setRawMode(true);
     input.resume();
@@ -86,7 +127,7 @@ export class RawSession {
         queue.push(event);
       }
     };
-    input.on("keypress", onKey);
+    const releaseKeypress = claimKeypress(input, onKey);
 
     const next = (): Promise<KeyEvent> =>
       new Promise<KeyEvent>((resolve) => {
@@ -101,9 +142,11 @@ export class RawSession {
     try {
       return await fn(next);
     } finally {
-      input.off("keypress", onKey);
+      releaseKeypress();
       if (input.setRawMode) input.setRawMode(wasRaw);
-      input.pause();
+      // Keep the stream live for the prompt/composer that takes over. Pausing
+      // here on Windows is what left the next reader deaf to the keyboard.
+      input.resume();
     }
   }
 }

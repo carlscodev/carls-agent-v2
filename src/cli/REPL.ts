@@ -26,6 +26,7 @@ import { PromptWizardBox, wizardBoxHeight } from "./PromptWizardBox.js";
 import { autoResolveAskUser, type AskUserHandler, type AskUserPayload, type AskUserResult } from "../types/askUser.js";
 import { FrameCoalescer } from "./FrameRenderer.js";
 import { formatDuration } from "./Text.js";
+import { restoreTerminal, writeSessionBanner } from "./SessionBanner.js";
 
 export interface SessionOptions {
   overrides: Partial<ResolvedConfig>;
@@ -115,19 +116,38 @@ export async function runRepl(options: SessionOptions): Promise<number> {
    */
   let activity: { label: string; startedAt: number; step?: number; maxSteps?: number } | undefined;
   let activityTimer: NodeJS.Timeout | undefined;
+  /** Set when the operator asked to leave; the finally block prints the resume banner. */
+  let shutdownRequested = false;
+
+  const turnCount = (target: Runtime): number =>
+    target.history.filter((message) => message.role === "user").length;
+
+  /** Restores the terminal and prints where to continue. Idempotent. */
+  const printExitBanner = (): void => {
+    const tab = tabs.current();
+    tab.payload.flushState();
+    process.stdin.setRawMode?.(false);
+    process.stdin.pause();
+    if (useChrome) chrome.disable();
+    else restoreTerminal(process.stderr);
+    writeSessionBanner(process.stderr, tab.id, turnCount(tab.payload));
+  };
 
   const onSigint = (): void => {
     if (busy && activeAbort) {
-      process.stderr.write(`\n${pc.yellow("Interrupting…")}\n`);
+      // Case A: abort the turn cleanly, keep the session and the plan, and let
+      // the operator press Ctrl+C again to leave once the prompt returns.
       activeAbort.abort();
+      runtime.flushState();
+      process.stderr.write(
+        `\n${pc.yellow("[Turno cancelado por el operador — Presiona Ctrl+C de nuevo para salir]")}\n`,
+      );
       return;
     }
-    interruptCount++;
-    if (interruptCount >= 2) {
-      process.stderr.write("\n");
-      process.exit(0);
-    }
-    process.stderr.write(`\n${pc.gray("Press Ctrl+C again to exit, or type /exit.")}\n`);
+    // Case B: leave immediately and leave a copy-pasteable resume command.
+    shutdownRequested = true;
+    printExitBanner();
+    process.exit(0);
   };
   process.on("SIGINT", onSigint);
 
@@ -257,6 +277,9 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     }
     if (runtime.lastCheckpoint !== undefined) {
       parts.push(t.paint(t.colors.text.faint, `CP:${runtime.lastCheckpoint.id}`));
+    }
+    if (runtime.lastSkillsCreated.length > 0) {
+      parts.push(t.paint(t.colors.accent, `SKILL:+${runtime.lastSkillsCreated.join(",")}`));
     }
     const lspServers = Object.keys(runtime.config.lspServers ?? {}).length;
     parts.push(t.paint(t.colors.text.faint, lspServers > 0 ? "LSP:on" : "LSP:off"));
@@ -557,7 +580,17 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           // boundary. A steer that arrives after the last step is queued below.
           onSubmit: (text) => {
             const outcome = runtime.steer(text);
-            if (outcome === "ignored") return;
+            if (outcome === "ignored") {
+              // The classifier drops approval-like text because it may be an
+              // answer to a gate prompt. A line submitted to this composer is a
+              // new instruction (the composer is paused while a gate is open),
+              // so queue it instead of letting it disappear.
+              const depth = queue.push(text);
+              const line = `${pc.gray("↳")} ${theme().paint(theme().colors.text.muted, `queued (${depth}): ${text}`)}`;
+              if (useChrome) chrome.writeRegion(`${line}\n`);
+              else process.stderr.write(`\r\u001b[K${line}\n`);
+              return;
+            }
             if (outcome === "stop") {
               // A stop must cancel the in-flight turn and its prefetched reads,
               // not just sit in the queue until the next step boundary.
@@ -662,7 +695,30 @@ export async function runRepl(options: SessionOptions): Promise<number> {
         process.stdout.write("\n");
       }
       showStatus();
+      if (useChrome) chrome.finishTurn();
+      // The prompt is next and must find a live stream and a visible cursor.
+      // This is deliberately a resume, never a pause: on ConPTY a pause here
+      // can survive the next resume and leave the keyboard unread.
+      if (interactive) process.stdin.resume();
     }
+  };
+
+  /** Runs everything queued while a turn was running, in order. */
+  const drainQueued = async (): Promise<void> => {
+    await drainQueue(queue, async (queued) => {
+      lastGoal = queued;
+      const echo = `${promptGlyph()}${queued}`;
+      if (useChrome) chrome.writeRegion(`${echo}\n`);
+      else process.stderr.write(`${echo}\n`);
+      const queuedExpanded = expandMentions(queued, runtime.config.cwd);
+      if (queuedExpanded.attached.length > 0) {
+        printInfo(`attached ${queuedExpanded.attached.join(", ")}`);
+      }
+      for (const skip of queuedExpanded.skipped) {
+        printInfo(`could not attach ${skip.path} (${skip.reason})`);
+      }
+      await runGoal(queuedExpanded.text);
+    });
   };
 
   try {
@@ -682,7 +738,10 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           ...(useChrome ? { chrome } : {}),
         });
         resume = undefined;
-        if (result.type === "eof") break;
+        if (result.type === "eof") {
+          shutdownRequested = true;
+          break;
+        }
         if (result.type === "new-tab") {
           await openTab();
           continue;
@@ -740,10 +799,10 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           }
         } else {
         if (result.type === "interrupt") {
-          interruptCount += 1;
-          if (interruptCount >= 2) break;
-          process.stderr.write(`${pc.gray("Press Ctrl+C again to exit, or type /exit.")}\n`);
-          continue;
+          // Idle Ctrl+C exits immediately and prints the resume banner; there
+          // is no half-finished turn to protect any more.
+          shutdownRequested = true;
+          break;
         }
           if (result.type !== "line") continue;
           input = result.text.trim();
@@ -755,7 +814,10 @@ export async function runRepl(options: SessionOptions): Promise<number> {
         }
       } else {
         const line = await reader.next(pc.cyan("❯ "));
-        if (line === null) break;
+        if (line === null) {
+          shutdownRequested = true;
+          break;
+        }
         input = line.trim();
       }
       interruptCount = 0;
@@ -785,6 +847,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
                 return;
               }
               await runGoal(lastGoal);
+              await drainQueued();
             },
             // /editor hands its text back to the same prompt line.
             composePrompt: (text: string) => {
@@ -794,7 +857,10 @@ export async function runRepl(options: SessionOptions): Promise<number> {
         } finally {
           if (useChrome) chrome.resume();
         }
-        if (shouldExit) break;
+        if (shouldExit) {
+          shutdownRequested = true;
+          break;
+        }
         // A command can change the mode or the model (/mode, /model), so the
         // footer is refreshed here rather than only after a turn.
         showStatus();
@@ -830,27 +896,25 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       await runGoal(expanded.text);
 
       // Queued while the turn ran; each one expands its own mentions.
-      await drainQueue(queue, async (queued) => {
-        lastGoal = queued;
-        const echo = `${promptGlyph()}${queued}`;
-        if (useChrome) chrome.writeRegion(`${echo}\n`);
-        else process.stderr.write(`${echo}\n`);
-        const queuedExpanded = expandMentions(queued, runtime.config.cwd);
-        if (queuedExpanded.attached.length > 0) {
-          printInfo(`attached ${queuedExpanded.attached.join(", ")}`);
-        }
-        await runGoal(queuedExpanded.text);
-      });
+      await drainQueued();
     }
   } finally {
     process.off("SIGINT", onSigint);
     if (useChrome) process.off("SIGWINCH", onResize);
     spinner.stop();
     chrome.disable();
+    process.stdin.setRawMode?.(false);
+    process.stdin.pause();
     await closeBrowser();
     // Every tab owns a runtime, an MCP client set and a session-end hook, so all
-    // of them have to be closed, not just the one on screen.
+    // of them have to be flushed and closed, not just the one on screen.
+    for (const tab of tabs.all()) tab.payload.flushState();
     await Promise.all(tabs.all().map((tab) => tab.payload.close()));
+    // Print after the runtimes are closed so a shutdown hook cannot overwrite
+    // the one block the operator needs to copy. Piped runs stay banner-free.
+    if (shutdownRequested && interactive) {
+      writeSessionBanner(process.stderr, tabs.current().id, turnCount(tabs.current().payload));
+    }
   }
   return 0;
 }
