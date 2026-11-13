@@ -40,7 +40,11 @@ export interface TransactionOptions {
   files: readonly string[];
   /** Commands that define success, e.g. `npm test`. Empty means "LSP only". */
   commands?: readonly VerificationCommand[];
-  /** How many repair attempts before the caller must roll back. Default 3. */
+  /**
+   * How many times `work` may be invoked before the transaction gives up and
+   * rolls back. Default 1: a repair is the agent's job, not this class's, so a
+   * caller opts into retries only when its `work` is idempotent.
+   */
   maxAttempts?: number;
   /** Skip the language-server pass (no server configured, or a non-code change). */
   skipLsp?: boolean;
@@ -168,10 +172,27 @@ export class TransactionManager {
     }
 
     const messages: string[] = [];
+    let failed = 0;
     // Reverse order: the newest copy of a file is the state immediately before the
     // last edit, which is what undoing a sequence has to apply first.
     for (const entry of [...snapshot.entries].reverse()) {
-      messages.push(this.deps.backups.restore(entry));
+      let message: string;
+      try {
+        message = this.deps.backups.restore(entry);
+      } catch (error) {
+        // One file that cannot be restored must not abort the rest of the batch:
+        // the operator wants the whole tree back, and a partial restore reported
+        // honestly is better than a throw that hides the entries already done.
+        message = `FAILED: ${entry.path}: ${(error as Error).message}`;
+      }
+      if (message.startsWith("FAILED:")) failed++;
+      messages.push(message);
+    }
+    if (failed > 0) {
+      return {
+        rolledBack: false,
+        detail: `${failed} of ${snapshot.entries.length} file(s) could not be restored: ${messages.join("; ")}`,
+      };
     }
     return { rolledBack: true, detail: messages.join("; ") };
   }
@@ -191,33 +212,42 @@ export class TransactionManager {
     work: (attempt: number) => Promise<void>,
   ): Promise<TransactionOutcome> {
     const files = [...options.files];
+    const maxAttempts = Math.max(1, options.maxAttempts ?? 1);
     const snapshot = this.begin(options.label, files);
 
-    try {
-      await work(1);
-    } catch (error) {
-      const rolled = this.rollback(snapshot);
-      const outcome: TransactionOutcome = {
-        committed: false,
-        rolledBack: rolled.rolledBack,
-        snapshot: snapshot.snapshot,
-        ...(snapshot.checkpoint !== undefined ? { checkpoint: snapshot.checkpoint } : {}),
-        reason: `the change failed before verification: ${(error as Error).message}`,
-        failedHypothesis: options.label,
-      };
-      this.deps.onRollback?.(outcome);
-      return outcome;
-    }
+    let verification: VerificationOutcome | undefined;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await work(attempt);
+      } catch (error) {
+        const rolled = this.rollback(snapshot);
+        const outcome: TransactionOutcome = {
+          committed: false,
+          rolledBack: rolled.rolledBack,
+          snapshot: snapshot.snapshot,
+          ...(snapshot.checkpoint !== undefined ? { checkpoint: snapshot.checkpoint } : {}),
+          reason: `the change failed before verification: ${(error as Error).message}`,
+          failedHypothesis: options.label,
+        };
+        this.deps.onRollback?.(outcome);
+        return outcome;
+      }
 
-    const verification = await this.verify(options);
-    if (verification.clean) {
-      return {
-        committed: true,
-        rolledBack: false,
-        snapshot: snapshot.snapshot,
-        ...(snapshot.checkpoint !== undefined ? { checkpoint: snapshot.checkpoint } : {}),
-        verification,
-      };
+      verification = await this.verify(options);
+      if (verification.clean) {
+        return {
+          committed: true,
+          rolledBack: false,
+          snapshot: snapshot.snapshot,
+          ...(snapshot.checkpoint !== undefined ? { checkpoint: snapshot.checkpoint } : {}),
+          verification,
+        };
+      }
+
+      // Verification failed with another attempt still allowed. Restore the
+      // baseline first, so the retry starts from the snapshot instead of stacking
+      // a second edit on top of the state that just failed.
+      if (attempt < maxAttempts) this.rollback(snapshot);
     }
 
     const rolled = this.rollback(snapshot);
@@ -226,8 +256,8 @@ export class TransactionManager {
       rolledBack: rolled.rolledBack,
       snapshot: snapshot.snapshot,
       ...(snapshot.checkpoint !== undefined ? { checkpoint: snapshot.checkpoint } : {}),
-      verification,
-      reason: `verification failed: ${verification.problems.join("; ")}. Rollback: ${rolled.detail}`,
+      ...(verification !== undefined ? { verification } : {}),
+      reason: `verification failed: ${verification?.problems.join("; ") ?? "unknown"}. Rollback: ${rolled.detail}`,
       failedHypothesis: options.label,
     };
     this.deps.onRollback?.(outcome);

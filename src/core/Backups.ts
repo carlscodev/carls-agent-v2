@@ -54,7 +54,11 @@ export class BackupStore {
     }
     try {
       mkdirSync(this.dir, { recursive: true });
-      const copy = join(this.dir, `${Date.now()}-${basename(absolute)}`);
+      // The id makes the name unique: two files with the same basename saved in
+      // the same millisecond (a `write_many` batch, or any two `index.ts`) would
+      // otherwise share one copy path, and the second save would overwrite the
+      // first file's snapshot, corrupting the rollback of the first.
+      const copy = join(this.dir, `${Date.now()}-${randomUUID().slice(0, 8)}-${basename(absolute)}`);
       copyFileSync(absolute, copy);
       const entry: BackupEntry = {
         id: randomUUID().slice(0, 8),
@@ -166,7 +170,11 @@ export class BackupStore {
       unlinkSync(entry.path);
       return `deleted ${entry.path} (it did not exist before the edit)`;
     }
-    if (!existsSync(entry.copy)) return `backup for ${entry.path} is missing`;
+    // A missing copy means the snapshot itself is gone, not that the file was
+    // restored. Say so explicitly: the caller (`TransactionManager.rollback`)
+    // scans for this marker to report a failed rollback instead of a false
+    // success, and the human needs to know the tree is still dirty.
+    if (!existsSync(entry.copy)) return `FAILED: backup for ${entry.path} is missing`;
     copyFileSync(entry.copy, entry.path);
     return `restored ${entry.path}`;
   }

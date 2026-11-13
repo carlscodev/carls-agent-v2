@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { Skill } from "./SkillLoader.js";
+import { parseFrontmatter } from "./SkillLoader.js";
 import { SkillGraph, SkillHistory } from "./SkillEvolution.js";
 
 /**
@@ -174,11 +175,17 @@ export class SkillCurator {
     const latest = this.history.latest(name);
     if (latest === undefined) return { acceptable: true, reason: "no previous revision to compare against" };
 
-    const before = latest.contents.length;
-    const after = nextBody.length;
+    // Compare body against body. The revision stores the whole file, frontmatter
+    // included, so measuring it against the bare body compares two different
+    // things: any rewrite that grew by less than the frontmatter's own length
+    // (~90 chars) would look shorter and slip past the growth rule, which is
+    // exactly the padding the rule exists to stop.
+    const previousBody = parseFrontmatter(latest.contents).body.trim();
+    const before = previousBody.length;
+    const after = nextBody.trim().length;
     if (after <= before) return { acceptable: true, reason: "the rewrite is not longer than the previous revision" };
 
-    const newStructure = countStructure(nextBody) - countStructure(latest.contents);
+    const newStructure = countStructure(nextBody) - countStructure(previousBody);
     if (newStructure > 0) {
       return { acceptable: true, reason: `longer, but adds ${newStructure} new step(s) or check(s)` };
     }
