@@ -260,14 +260,21 @@ export function expandMcpServers(
  */
 function readMcpJsonIfExists(path: string): Record<string, McpServerConfig> {
   const parsed = readJsonIfExists(path) as ConfigFileShape & Record<string, unknown>;
-  const nested = parsed.mcpServers;
-  if (nested !== undefined && typeof nested === "object") return nested;
-  const bare: Record<string, McpServerConfig> = {};
+  // Both spellings are read from the same file rather than one shadowing the
+  // other: `/mcp add` writes the nested `mcpServers` map into a file that may
+  // already hold bare entries, and returning early would silently drop them.
+  const servers: Record<string, McpServerConfig> = {};
   for (const [name, value] of Object.entries(parsed)) {
     if (name === "mcpServers") continue;
-    if (value !== null && typeof value === "object") bare[name] = value as McpServerConfig;
+    if (value !== null && typeof value === "object") servers[name] = value as McpServerConfig;
   }
-  return bare;
+  const nested = parsed.mcpServers;
+  if (nested !== undefined && typeof nested === "object") {
+    for (const [name, value] of Object.entries(nested as Record<string, McpServerConfig>)) {
+      servers[name] = value;
+    }
+  }
+  return servers;
 }
 
 /**
