@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { homedir, platform as osPlatform } from "node:os";
-import { isAbsolute, join, normalize, resolve, sep } from "node:path";
+import { posix, resolve, sep, win32 } from "node:path";
 import {
   currentPlatform,
   isTermux,
@@ -73,15 +73,30 @@ export function detectOsProfile(): OsProfile {
  * absolute against `base`, and collapses `.`/`..` and duplicate separators.
  * Two spellings of the same file must compare equal, or a tool reports an edit
  * to a path the agent never mentioned.
+ *
+ * The path flavour is injectable so a Windows host can test the Linux and
+ * Termux branches without pretending its own separators are POSIX ones.
  */
-export function normalizeWorkspacePath(input: string, base: string): string {
+export interface NormalizeWorkspaceOptions {
+  platform?: Platform;
+  home?: string;
+}
+
+export function normalizeWorkspacePath(
+  input: string,
+  base: string,
+  options: NormalizeWorkspaceOptions = {},
+): string {
+  const platform = options.platform ?? currentPlatform();
+  const path = platform === "win32" ? win32 : posix;
+  const home = options.home ?? homedir();
   let expanded = input;
   if (input === "~") {
-    expanded = homedir();
+    expanded = home;
   } else if (input.startsWith("~/") || input.startsWith("~\\")) {
-    expanded = join(homedir(), input.slice(2));
+    expanded = path.join(home, input.slice(2));
   }
-  return normalize(isAbsolute(expanded) ? expanded : resolve(base, expanded));
+  return path.normalize(path.isAbsolute(expanded) ? expanded : path.resolve(base, expanded));
 }
 
 export interface CwdIntegrity {

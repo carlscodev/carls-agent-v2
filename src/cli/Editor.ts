@@ -40,6 +40,10 @@ export function editorSpec(
 export interface ComposeOptions {
   initial: string;
   spec?: EditorSpec | undefined;
+  /** Environment used to pick the editor; defaults to the process environment. */
+  env?: NodeJS.ProcessEnv;
+  /** Platform used for the editor fallback; defaults to the host. */
+  platform?: NodeJS.Platform;
   /** Editor processes can hang; the wait is bounded. */
   timeoutMs?: number;
 }
@@ -54,7 +58,7 @@ export interface ComposeResult {
 
 /** Runs the editor on a temp file and returns what it saved. */
 export async function composeInEditor(options: ComposeOptions): Promise<ComposeResult> {
-  const spec = options.spec ?? editorSpec();
+  const spec = options.spec ?? editorSpec(options.env, options.platform);
   if (spec === undefined) {
     return { text: options.initial, changed: false, error: "no editor is configured" };
   }

@@ -52,7 +52,11 @@ export class Hooks {
   private runOne(command: string, payload: unknown): Promise<{ code: number; stdout: string }> {
     return new Promise((resolve) => {
       const shell = shellForPlatform();
-      const child = spawn(shell.file, [...shell.args, command], {
+      // PowerShell returns 1 for any failing native command unless the command
+      // ends with `exit $LASTEXITCODE`; preserving code 2 is what lets a hook
+      // veto a tool call on Windows exactly as it does on POSIX.
+      const commandText = `${command}${shell.commandSuffix ?? ""}`;
+      const child = spawn(shell.file, [...shell.args, commandText], {
         cwd: this.cwd,
         env: { ...process.env, CARLS_HOOK: "1" },
         stdio: ["pipe", "pipe", "pipe"],

@@ -119,9 +119,12 @@ export class BashExecution implements Tool<Input> {
     return new Promise<SpawnOutcome>((resolve) => {
       // Windows has no /bin/bash: the platform shell is cmd.exe or PowerShell.
       const shell = shellForPlatform();
-      const wrapped = sandboxed ? sandboxCommand(shell.file, shell.args, command, cwd) : undefined;
+      // PowerShell loses a native command's exit code unless the command ends
+      // with `exit $LASTEXITCODE`; the shell spec carries that suffix.
+      const commandText = `${command}${shell.commandSuffix ?? ""}`;
+      const wrapped = sandboxed ? sandboxCommand(shell.file, shell.args, commandText, cwd) : undefined;
       const file = wrapped?.file ?? shell.file;
-      const args = wrapped?.args ?? [...shell.args, command];
+      const args = wrapped?.args ?? [...shell.args, commandText];
 
       const child = spawn(file, args, {
         cwd,

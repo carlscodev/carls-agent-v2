@@ -1901,19 +1901,40 @@ describe("onboarding provider switching", () => {
 });
 
 describe("installer launcher node resolution", () => {
+  /** Git Bash prints `/c/...`; Node needs `C:\\...` to stat the same file. */
+  const toPosix = (value: string): string =>
+    process.platform === "win32"
+      ? value.replace(/^([A-Za-z]):[\\/]/, (_match, drive: string) => `/${drive.toLowerCase()}/`).replace(/\\/g, "/")
+      : value;
+  const toPosixPathList = (value: string): string =>
+    process.platform === "win32" ? value.split(";").filter(Boolean).map(toPosix).join(":") : value;
+  const toHost = (value: string): string => {
+    if (process.platform !== "win32") return value;
+    const match = /^\/([A-Za-z])\/(.*)$/.exec(value);
+    return match === null ? value : `${match[1]?.toUpperCase()}:\\${match[2]?.replace(/\//g, "\\")}`;
+  };
+  /** Git Bash omits `.exe`; Node needs the real filename to stat it. */
+  const hostExists = (value: string): boolean => {
+    const host = toHost(value);
+    if (existsSync(host)) return true;
+    return process.platform === "win32" && existsSync(`${host}.exe`);
+  };
+
   /** The launcher must never embed a node path that does not exist. */
   async function resolveNodeBin(env: Record<string, string | undefined>, nodeDir?: string): Promise<string> {
     const { execFile } = await import("node:child_process");
     const script = [
-      `PATH=${JSON.stringify(env.PATH ?? process.env.PATH ?? "")} export PATH`,
-      `CARLS_NODE_DIR=${JSON.stringify(nodeDir ?? "")} export CARLS_NODE_DIR`,
-      `. ${JSON.stringify(join(process.cwd(), "scripts", "lib", "node-bin.sh"))}`,
+      `PATH=${JSON.stringify(toPosixPathList(env.PATH ?? process.env.PATH ?? ""))} export PATH`,
+      `CARLS_NODE_DIR=${JSON.stringify(nodeDir !== undefined ? toPosix(nodeDir) : "")} export CARLS_NODE_DIR`,
+      `. ${JSON.stringify(toPosix(join(process.cwd(), "scripts", "lib", "node-bin.sh")))}`,
       "carls_resolve_node_bin",
     ].join("\n");
-    // An absolute bash path: the test deliberately empties PATH, and a bare
-    // "bash" would fail to spawn before the script even runs.
+    // An absolute bash path on POSIX; Git Bash's `bash` on Windows. The test
+    // deliberately empties the child PATH, so the interpreter must be resolved
+    // from the parent environment before the script runs.
+    const shell = process.platform === "win32" ? "bash" : "/bin/bash";
     const result = await new Promise<{ stdout: string }>((resolve, reject) => {
-      execFile("/bin/bash", ["-c", script], {}, (error, stdout) => {
+      execFile(shell, ["-c", script], {}, (error, stdout) => {
         if (error && (error as { code?: number }).code !== 1) reject(error);
         else resolve({ stdout: stdout.trim() });
       });
@@ -1925,15 +1946,15 @@ describe("installer launcher node resolution", () => {
     const bin = await resolveNodeBin({ PATH: process.env.PATH });
     expect(bin).not.toContain("/node/bin/node");
     expect(bin.length).toBeGreaterThan(0);
-    expect(existsSync(bin)).toBe(true);
+    expect(hostExists(bin)).toBe(true);
   });
 
   it("uses the private node only when that binary really exists", async () => {
     const fake = join(dir, "nodehome");
     await mkdir(join(fake, "bin"), { recursive: true });
-    expect(await resolveNodeBin({ PATH: process.env.PATH }, fake)).not.toContain(fake);
+    expect(await resolveNodeBin({ PATH: process.env.PATH }, fake)).not.toContain(toPosix(fake));
     await writeFile(join(fake, "bin", "node"), "#!/bin/sh\n", { mode: 0o755 });
-    expect(await resolveNodeBin({ PATH: process.env.PATH }, fake)).toBe(join(fake, "bin", "node"));
+    expect(toHost(await resolveNodeBin({ PATH: process.env.PATH }, fake))).toBe(join(fake, "bin", "node"));
   });
 
   it("still produces a runnable launcher when node is not on PATH", async () => {
@@ -2443,7 +2464,7 @@ describe("mcp transports", () => {
         expect(result.ok).toBe(true);
         expect(result.output).toBe("called");
       } finally {
-        client.close();
+        await client.close();
         server.close();
       }
     });
@@ -2484,7 +2505,7 @@ describe("mcp transports", () => {
       expect(result.ok).toBe(true);
       expect(result.output).toBe("pong");
     } finally {
-      client.close();
+      await client.close();
     }
   });
 
@@ -2496,7 +2517,16 @@ describe("mcp transports", () => {
     expect(
       buildTransport("remote", { url: "https://x/sse", transport: "sse" }, logger, dir).kind,
     ).toBe("sse");
-    expect(buildTransport("local", { command: "node" }, logger, dir).kind).toBe("stdio");
+    const localTransport = buildTransport(
+      "local",
+      { command: process.execPath, args: ["-e", ""] },
+      logger,
+      dir,
+    );
+    expect(localTransport.kind).toBe("stdio");
+    // Close it before `afterEach` removes the workspace: on Windows the child
+    // holds a handle to its cwd until it exits.
+    await localTransport.close();
 
     const frames: { event: string; data: string }[] = [];
     const parse = createSseParser((frame) => frames.push(frame));
@@ -2875,7 +2905,7 @@ describe("plugin hooks", () => {
     '  appendFileSync(new URL("./hook-log.txt", import.meta.url), `${payload.event}|${payload.toolName ?? ""}|${payload.input?.command ?? ""}\\n`);',
     '  if (payload.event === "tool.execute.before") {',
     '    if (payload.input.command === "forbidden") { process.exitCode = 2; process.stdout.write("not allowed"); return; }',
-    '    process.stdout.write(JSON.stringify({ args: { command: `${payload.input.command} && echo rewritten` } }));',
+    '    process.stdout.write(JSON.stringify({ args: { command: `${payload.input.command}; echo rewritten` } }));',
     '    return;',
     "  }",
     '  if (payload.event === "tool.execute.after") process.stdout.write(JSON.stringify({ output: "observation replaced" }));',
@@ -2975,7 +3005,7 @@ describe("plugin hooks", () => {
     // The rewrite reached bash, not just the hook.
     const log = await readFile(join(workspace, "hook-log.txt"), "utf8");
     expect(log).toContain("tool.execute.before|bash|echo original");
-    expect(log).toContain("tool.execute.after|bash|echo original && echo rewritten");
+    expect(log).toContain("tool.execute.after|bash|echo original; echo rewritten");
   });
 
   it("fires session.idle when a turn finishes", async () => {
@@ -3045,6 +3075,8 @@ describe("external editor", () => {
     expect(untouched.changed).toBe(false);
 
     // The no-editor path must not inherit whatever this machine has configured.
+    // The platform is injected as Linux because Windows intentionally falls
+    // back to notepad, which would block the test waiting for a window.
     const saved = {
       CARLS_EDITOR: process.env.CARLS_EDITOR,
       VISUAL: process.env.VISUAL,
@@ -3054,7 +3086,7 @@ describe("external editor", () => {
     delete process.env.VISUAL;
     delete process.env.EDITOR;
     try {
-      const noEditor = await composeInEditor({ initial: "x" });
+      const noEditor = await composeInEditor({ initial: "x", env: {}, platform: "linux" });
       expect(noEditor.error).toBe("no editor is configured");
       expect(noEditor.changed).toBe(false);
     } finally {
@@ -3422,14 +3454,19 @@ describe("agent presets", () => {
   it("discovers project and global presets, project winning on a name clash", async () => {
     const { discoverAgents } = await import("../src/agents/Presets.js");
     const previousHome = process.env.HOME;
+    const previousLocalAppData = process.env.LOCALAPPDATA;
     const home = join(dir, "preset-home");
     const project = join(dir, "preset-project");
-    await mkdir(join(home, ".carls", "agents"), { recursive: true });
+    // Windows resolves the user data dir through %LOCALAPPDATA%, POSIX through
+    // $HOME. The test sets both so the same fixture is discovered everywhere.
+    const userRoot = process.platform === "win32" ? join(home, "carls") : join(home, ".carls");
+    await mkdir(join(userRoot, "agents"), { recursive: true });
     await mkdir(join(project, ".agents", "agents"), { recursive: true });
-    await writeFile(join(home, ".carls", "agents", "docs.md"), "global docs agent");
-    await writeFile(join(home, ".carls", "agents", "reviewer.md"), "global reviewer");
+    await writeFile(join(userRoot, "agents", "docs.md"), "global docs agent");
+    await writeFile(join(userRoot, "agents", "reviewer.md"), "global reviewer");
     await writeFile(join(project, ".agents", "agents", "reviewer.md"), "project reviewer");
     process.env.HOME = home;
+    if (process.platform === "win32") process.env.LOCALAPPDATA = home;
     try {
       const agents = discoverAgents(project);
       expect(agents.map((agent) => agent.name)).toEqual(["docs", "reviewer"]);
@@ -3439,6 +3476,8 @@ describe("agent presets", () => {
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;
+      if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+      else process.env.LOCALAPPDATA = previousLocalAppData;
     }
   });
 
@@ -4163,11 +4202,17 @@ describe("os runtime adapter", () => {
 
   it("normalises workspace paths deterministically", () => {
     const base = "/work/project";
-    expect(normalizeWorkspacePath("src/a.ts", base)).toBe("/work/project/src/a.ts");
-    expect(normalizeWorkspacePath("./src/../src/a.ts", base)).toBe("/work/project/src/a.ts");
-    expect(normalizeWorkspacePath("/abs/./b/../c.ts", base)).toBe("/abs/c.ts");
+    expect(normalizeWorkspacePath("src/a.ts", base, { platform: "linux" })).toBe("/work/project/src/a.ts");
+    expect(normalizeWorkspacePath("./src/../src/a.ts", base, { platform: "linux" })).toBe("/work/project/src/a.ts");
+    expect(normalizeWorkspacePath("/abs/./b/../c.ts", base, { platform: "linux" })).toBe("/abs/c.ts");
     // Two spellings of the same file must collapse to one string.
-    expect(normalizeWorkspacePath("src/./a.ts", base)).toBe(normalizeWorkspacePath("src/a.ts", base));
+    expect(normalizeWorkspacePath("src/./a.ts", base, { platform: "linux" })).toBe(
+      normalizeWorkspacePath("src/a.ts", base, { platform: "linux" }),
+    );
+    // The same function must produce native separators on a Windows host.
+    expect(normalizeWorkspacePath("src/a.ts", "C:\\work\\project", { platform: "win32" })).toBe(
+      "C:\\work\\project\\src\\a.ts",
+    );
   });
 
   it("forces UTF-8 output from child processes", () => {
@@ -4197,27 +4242,54 @@ describe("os runtime adapter", () => {
   });
 
   it("kills a whole process tree, not just the shell", async () => {
-    // The shell backgrounds a long-lived grandchild and keeps running itself, so
-    // killing only the shell would leave the grandchild behind.
+    // A Node parent spawns a Node grandchild and prints its pid. The script is a
+    // real file so the command needs no shell-specific quoting on either host.
+    const script = join(dir, "grandchild.cjs");
+    await writeFile(
+      script,
+      [
+        'const { spawn } = require("node:child_process");',
+        'const child = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore" });',
+        "console.log(`gc=${child.pid}`);",
+        "setInterval(() => {}, 1000);",
+      ].join("\n"),
+    );
     const tool = new BashExecution();
     const ctx = makeContext();
-    const outcome = await tool.run(
-      tool.parse({
-        command: `node -e "setInterval(()=>{},100)" & echo "gc=$!"; sleep 30; true`,
-        timeout_ms: 1200,
-      }),
-      ctx,
-    );
+    // PowerShell treats a leading quoted path as a string; `&` invokes it. The
+    // POSIX shells need no call operator.
+    const command = isWindows()
+      ? `& "${process.execPath}" "${script}"`
+      : `"${process.execPath}" "${script}"`;
+    const outcome = await tool.run(tool.parse({ command, timeout_ms: 1200 }), ctx);
     const match = /gc=(\d+)/.exec(outcome.output);
     expect(match).not.toBeNull();
     const grandchild = Number(match?.[1]);
     expect(Number.isFinite(grandchild)).toBe(true);
 
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    // `process.kill(pid, 0)` succeeds for a zombie, so the state is read instead:
-    // a dead-but-unreaped child shows `Z`, which is still a successful kill.
-    const state = execFileSync("ps", ["-o", "stat=", "-p", String(grandchild)], { encoding: "utf8" }).trim();
-    expect(state === "" || state.startsWith("Z")).toBe(true);
+    // `process.kill(pid, 0)` succeeds for a zombie on POSIX, so the state is
+    // read there; Windows has no `ps`, so the existence probe is the signal.
+    const gone = async (pid: number): Promise<boolean> => {
+      for (let attempt = 0; attempt < 60; attempt++) {
+        if (isWindows()) {
+          try {
+            process.kill(pid, 0);
+          } catch {
+            return true;
+          }
+        } else {
+          try {
+            const state = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).trim();
+            if (state === "" || state.startsWith("Z")) return true;
+          } catch {
+            return true;
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return false;
+    };
+    expect(await gone(grandchild)).toBe(true);
   });
 
   it("reports a workspace the command destroyed instead of a later ENOENT", async () => {
@@ -4226,7 +4298,13 @@ describe("os runtime adapter", () => {
     const tool = new BashExecution();
     const ctx = { ...makeContext(), cwd: victim };
 
-    const outcome = await tool.run(tool.parse({ command: "cd .. && rm -rf victim" }), ctx);
+    // Windows keeps a handle to a process's cwd, so the shell has to release
+    // both its location and the OS current directory before deleting it. POSIX
+    // only needs `cd ..`.
+    const command = isWindows()
+      ? `Set-Location ..; [Environment]::CurrentDirectory = (Get-Location).Path; Remove-Item -LiteralPath "${victim}" -Recurse -Force`
+      : `cd .. && rm -rf "${victim}"`;
+    const outcome = await tool.run(tool.parse({ command }), ctx);
 
     expect(existsSync(victim)).toBe(false);
     expect(outcome.ok).toBe(false);
@@ -4236,7 +4314,7 @@ describe("os runtime adapter", () => {
 
   it("leaves a normal command's cwd untouched", async () => {
     const tool = new BashExecution();
-    const outcome = await tool.run(tool.parse({ command: "echo hi && pwd" }), makeContext());
+    const outcome = await tool.run(tool.parse({ command: "echo hi" }), makeContext());
     expect(outcome.ok).toBe(true);
     expect(outcome.metadata?.cwdIntact).toBe(true);
     expect(outcome.output).toContain("hi");

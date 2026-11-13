@@ -94,23 +94,37 @@ export class ShadowGit {
    */
   private git(args: string[], options: { quiet?: boolean; input?: string } = {}): string {
     try {
-      return execFileSync("git", args, {
-        cwd: this.cwd,
-        encoding: "utf8",
-        input: options.input,
-        maxBuffer: 32 * 1024 * 1024,
-        env: {
-          ...process.env,
-          GIT_INDEX_FILE: this.indexPath,
-          GIT_AUTHOR_NAME: this.authorName,
-          GIT_AUTHOR_EMAIL: this.authorEmail,
-          GIT_COMMITTER_NAME: this.authorName,
-          GIT_COMMITTER_EMAIL: this.authorEmail,
-          // Keep the output machine-readable and independent of the user's locale.
-          LC_ALL: "C",
+      return execFileSync(
+        "git",
+        [
+          // A checkpoint is a byte-for-byte snapshot. The user's global
+          // autocrlf setting would otherwise rewrite LF files to CRLF on a
+          // Windows checkout and make a rewind “restore” different bytes than
+          // the ones that were captured.
+          "-c",
+          "core.autocrlf=false",
+          "-c",
+          "core.safecrlf=false",
+          ...args,
+        ],
+        {
+          cwd: this.cwd,
+          encoding: "utf8",
+          input: options.input,
+          maxBuffer: 32 * 1024 * 1024,
+          env: {
+            ...process.env,
+            GIT_INDEX_FILE: this.indexPath,
+            GIT_AUTHOR_NAME: this.authorName,
+            GIT_AUTHOR_EMAIL: this.authorEmail,
+            GIT_COMMITTER_NAME: this.authorName,
+            GIT_COMMITTER_EMAIL: this.authorEmail,
+            // Keep the output machine-readable and independent of the user's locale.
+            LC_ALL: "C",
+          },
+          stdio: ["pipe", "pipe", options.quiet === true ? "ignore" : "pipe"],
         },
-        stdio: ["pipe", "pipe", options.quiet === true ? "ignore" : "pipe"],
-      });
+      );
     } catch (error) {
       const stderr = (error as { stderr?: string }).stderr ?? "";
       throw new ShadowGitError(stderr.trim() || (error as Error).message);

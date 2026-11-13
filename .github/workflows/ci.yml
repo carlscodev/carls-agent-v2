@@ -14,15 +14,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The unit and integration suite: real filesystem, real bash, scripted
-  # provider. POSIX only, so it runs on Linux and macOS.
+  # The unit and integration suite: real filesystem, real shell, scripted
+  # provider. The matrix spans all three desktop platforms; a Windows-only
+  # regression must fail CI, not wait for a user to report it.
   test:
     name: test · ${{ matrix.os }} · node ${{ matrix.node }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         node: ["20", "22", "24"]
     steps:
       - uses: actions/checkout@v4

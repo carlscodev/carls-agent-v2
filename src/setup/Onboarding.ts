@@ -306,7 +306,10 @@ async function pickCredential(
 ): Promise<{ key?: string; stored: boolean; cancelled: boolean }> {
   const existing = provider.apiKeyEnv.find((name) => (process.env[name] ?? "").length > 0);
   if (existing !== undefined) {
-    output.write(`${pc.green("✓")} Found ${pc.bold(existing)} in the environment; using it.\n`);
+    // No styling inside the sentence: a nested bold sequence splits the name
+    // from “in the environment”, which makes the message unsearchable and
+    // unreadable in a captured log.
+    output.write(`${pc.green("✓")} Found ${existing} in the environment; using it.\n`);
     return { stored: false, cancelled: false };
   }
 

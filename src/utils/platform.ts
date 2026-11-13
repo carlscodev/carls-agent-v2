@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir, platform as osPlatform } from "node:os";
-import { join, win32 } from "node:path";
+import { join, posix, win32 } from "node:path";
 
 export type Platform = "win32" | "darwin" | "linux" | "android" | "other";
 
@@ -40,6 +40,13 @@ export interface ShellSpec {
   args: string[];
   /** Human label used in prompts and error messages. */
   label: string;
+  /**
+   * Appended to every command string. PowerShell's `-Command` collapses any
+   * native non-zero exit into 1, so a hook or a tool that exits 2 or 3 would
+   * lose its code; `exit $LASTEXITCODE` restores it. POSIX shells already
+   * propagate the status, and cmd.exe does too.
+   */
+  commandSuffix?: string;
 }
 
 /**
@@ -60,21 +67,29 @@ export function shellForPlatform(): ShellSpec {
         file: "powershell.exe",
         args: ["-NoLogo", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"],
         label: "PowerShell",
+        commandSuffix: "; exit $LASTEXITCODE",
       };
     }
     const pwsh = process.env.PWSH_PATH;
     if (pwsh !== undefined && existsSync(pwsh)) {
-      return { file: pwsh, args: ["-NoLogo", "-NonInteractive", "-Command"], label: "PowerShell 7" };
+      return {
+        file: pwsh,
+        args: ["-NoLogo", "-NonInteractive", "-Command"],
+        label: "PowerShell 7",
+        commandSuffix: "; exit $LASTEXITCODE",
+      };
     }
     return { file: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c"], label: "cmd.exe" };
   }
 
-  // Termux has no /bin/bash; the shell lives under $PREFIX/bin.
+  // Termux has no /bin/bash; the shell lives under $PREFIX/bin. The prefix is
+  // always a POSIX path, even when a test simulates Termux on a Windows host,
+  // so it must not be joined with the host separator.
   if (currentPlatform() === "android") {
     const prefix = process.env.PREFIX ?? "/data/data/com.termux/files/usr";
-    const termuxBash = join(prefix, "bin", "bash");
+    const termuxBash = posix.join(prefix, "bin", "bash");
     if (existsSync(termuxBash)) return { file: termuxBash, args: ["-lc"], label: "Termux bash" };
-    return { file: join(prefix, "bin", "sh"), args: ["-lc"], label: "Termux sh" };
+    return { file: posix.join(prefix, "bin", "sh"), args: ["-lc"], label: "Termux sh" };
   }
 
   return { file: "/bin/bash", args: ["-lc"], label: "bash" };
@@ -89,10 +104,11 @@ export function systemConfigPath(): string {
     const base = process.env.PROGRAMDATA ?? "C:\\ProgramData";
     return join(base, "carls", ".carlsrc.json");
   }
-  // Termux has no /etc; the writable equivalent is $PREFIX/etc.
+  // Termux has no /etc; the writable equivalent is $PREFIX/etc. The prefix is
+  // POSIX-shaped regardless of the host that is simulating it.
   if (currentPlatform() === "android") {
     const prefix = process.env.PREFIX ?? "/data/data/com.termux/files/usr";
-    return join(prefix, "etc", "carls", ".carlsrc.json");
+    return posix.join(prefix, "etc", "carls", ".carlsrc.json");
   }
   return join("/etc", "carls", ".carlsrc.json");
 }

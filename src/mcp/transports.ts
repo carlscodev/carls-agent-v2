@@ -20,7 +20,8 @@ export interface McpTransport {
   readonly kind: "stdio" | "sse" | "http";
   start(sink: MessageSink): Promise<void>;
   send(message: unknown, timeoutMs: number): Promise<void>;
-  close(): void;
+  /** Async when a child process must be reaped before the caller can remove files. */
+  close(): void | Promise<void>;
 }
 
 /** Splits an SSE byte stream into `{ event, data }` frames. */
@@ -181,9 +182,26 @@ export class StdioTransport implements McpTransport {
     });
   }
 
-  close(): void {
+  async close(): Promise<void> {
+    if (this.closed) return;
     this.closed = true;
-    this.child.kill("SIGTERM");
+    const child = this.child;
+    // Reaping matters on Windows: the child holds a handle to its cwd, so a
+    // test (or `/mcp` reload) that removes the workspace before `exit` gets
+    // EBUSY. Close the pipes, kill, and wait for the exit event.
+    child.stdin.end();
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      child.kill("SIGTERM");
+      await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 2000))]);
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+        await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 1000))]);
+      }
+    }
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.stderr.destroy();
   }
 }
 

@@ -409,7 +409,7 @@ export class Runtime {
         this.mcpClients.push(client);
       } catch (error) {
         this.logger.warn(`MCP "${name}" unavailable: ${(error as Error).message}`);
-        client?.close();
+        await client?.close().catch(() => undefined);
       }
     }
   }
@@ -677,7 +677,7 @@ export class Runtime {
 
   async close(): Promise<void> {
     await this.hooks.sessionEnd({ sessionId: this.session.id });
-    for (const client of this.mcpClients) client.close();
+    await Promise.all(this.mcpClients.map((client) => client.close().catch(() => undefined)));
     this.shadowGit.dispose();
     this.events.clear();
   }

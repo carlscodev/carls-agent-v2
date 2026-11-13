@@ -172,10 +172,11 @@ export class McpClient {
     return this.tools.map((descriptor) => new McpTool(this, descriptor));
   }
 
-  close(): void {
+  async close(): Promise<void> {
+    if (this.closed) return;
     this.closed = true;
     this.failAll(new Error(`MCP server "${this.serverName}" closed.`));
-    this.transport.close();
+    await this.transport.close();
   }
 }
 

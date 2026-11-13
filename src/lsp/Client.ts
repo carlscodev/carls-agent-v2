@@ -399,6 +399,21 @@ export class LspClient {
       // A server that will not shut down politely gets killed below.
     }
     this.closed = true;
-    this.child.kill("SIGTERM");
+    const child = this.child;
+    // Wait for the exit event before returning. On Windows the child keeps a
+    // handle to its cwd, and a test that removes the workspace immediately sees
+    // EBUSY unless the process is genuinely gone.
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      child.kill("SIGTERM");
+      await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 2000))]);
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+        await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 1000))]);
+      }
+    }
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.stderr.destroy();
   }
 }
