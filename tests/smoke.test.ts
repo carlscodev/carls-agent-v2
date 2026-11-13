@@ -5050,6 +5050,23 @@ describe("skill evolution", () => {
     expect(graph.cycles().length).toBeGreaterThan(0);
   });
 
+  it("reads a block-list requires/extends/related from frontmatter", async () => {
+    const root = await workspace();
+    await writeSkill(root, "base", [], "1. Step one.\n2. Step two.");
+    // YAML block-list form, the shape a hand-written or generated skill uses.
+    await writeSkill(
+      root,
+      "ship",
+      ["requires:", "  - base", "extends:", "  - base", "related:", "  - base"],
+      "1. Use base.",
+    );
+
+    const graph = new SkillEvolutionEngine(root).graph();
+    // The graph must see the block-list edges, not silently drop them.
+    expect(graph.dependencies("ship").map((edge) => edge.to)).toEqual(["base", "base", "base"]);
+    expect(graph.closure("ship")).toContain("base");
+  });
+
   it("orders the review queue by how much the skill is hurting", async () => {
     const root = await workspace();
     await writeSkill(root, "flagged", [], "1. Step.\n2. Step.");

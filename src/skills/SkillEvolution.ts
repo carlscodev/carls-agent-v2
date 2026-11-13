@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Skill } from "./SkillLoader.js";
+import { parseFrontmatter, type Skill } from "./SkillLoader.js";
 
 /**
  * Version history for a skill, so a rewrite can be undone.
@@ -209,29 +209,19 @@ export class SkillGraph {
 /**
  * Reads the three relationship keys from a skill file's frontmatter.
  *
- * `SkillLoader.parseFrontmatter` already handles the syntax; this only pulls the
- * keys the graph needs, and tolerates a file that has none.
+ * The parser lives in `SkillLoader` so the graph and the loader cannot disagree
+ * about the syntax; this only pulls the keys the graph needs and tolerates a
+ * file that has none.
  */
 function readFrontmatterLists(path: string): { requires: string[]; extends: string[]; related: string[] } {
   const empty = { requires: [] as string[], extends: [] as string[], related: [] as string[] };
   try {
-    const raw = readFileSync(path, "utf8");
-    const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(raw);
-    if (match === null) return empty;
-    const block = match[1] ?? "";
+    const { data } = parseFrontmatter(readFileSync(path, "utf8"));
     const read = (key: string): string[] => {
-      const inline = new RegExp(`^${key}\\s*:\\s*\\[(.*)\\]\\s*$`, "m").exec(block);
-      if (inline !== null) {
-        return (inline[1] ?? "")
-          .split(",")
-          .map((entry) => entry.trim().replace(/^["']|["']$/g, ""))
-          .filter((entry) => entry.length > 0);
-      }
-      const listed = new RegExp(`^${key}\\s*:\\s*$([\\s\\S]*?)(?=^[A-Za-z0-9_-]+\\s*:|\\Z)`, "m").exec(block);
-      if (listed === null) return [];
-      return (listed[1] ?? "")
-        .split(/\r?\n/)
-        .map((line) => /^\s*-\s+(.*)$/.exec(line)?.[1] ?? "")
+      const value = data[key];
+      if (!Array.isArray(value)) return [];
+      return value
+        .filter((entry): entry is string => typeof entry === "string")
         .map((entry) => entry.trim().replace(/^["']|["']$/g, ""))
         .filter((entry) => entry.length > 0);
     };
