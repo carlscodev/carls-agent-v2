@@ -17,6 +17,8 @@ export class MarkdownRenderer {
   private liveTail = false;
   /** True while a live tail is on screen and must be erased before the next write. */
   private tailVisible = false;
+  /** Glyph appended to the live tail while the model is still writing. */
+  private cursor = "";
 
   constructor(out: NodeJS.WriteStream = process.stdout, width?: number) {
     this.out = out;
@@ -32,6 +34,17 @@ export class MarkdownRenderer {
     this.liveTail = on;
   }
 
+  /**
+   * Sets the glyph appended to the line still being written, e.g. a block cursor.
+   * Passing an empty string removes it, which is what makes the cursor vanish the
+   * moment the message ends. Only meaningful with `setLiveTail(true)`.
+   */
+  setCursor(glyph: string): void {
+    if (this.cursor === glyph) return;
+    this.cursor = glyph;
+    this.renderTail();
+  }
+
   /** Feeds a stream chunk; complete lines are rendered immediately. */
   push(chunk: string): void {
     this.buffer += chunk;
@@ -45,9 +58,14 @@ export class MarkdownRenderer {
     this.renderTail();
   }
 
-  /** Renders whatever is left without a trailing newline. */
+  /**
+   * Renders whatever is left without a trailing newline. When a fenced block is
+   * still open it is closed virtually first, so the box and the syntax colouring
+   * are complete from the first line instead of flickering in as the model types.
+   */
   flush(): void {
     this.clearTail();
+    this.cursor = "";
     if (this.buffer.length > 0) {
       this.renderLine(this.buffer);
       this.buffer = "";
@@ -55,6 +73,15 @@ export class MarkdownRenderer {
     if (this.inFence) {
       this.closeFence();
     }
+  }
+
+  /**
+   * True while a fenced block is open but not yet closed by the model. The
+   * streaming layer uses this to keep the `╰───╯` rule and the colouring stable
+   * across frames.
+   */
+  get fenceOpen(): boolean {
+    return this.inFence;
   }
 
   /** Erases the in-progress line, if one is drawn. */
@@ -81,12 +108,13 @@ export class MarkdownRenderer {
     const preview = this.inFence
       ? `${t.paint(t.colors.border, "│")} ${t.paint(t.colors.markdown.code, this.buffer)}`
       : this.inline(this.buffer);
+    const withCursor = `${preview}${this.cursor}`;
     const width = terminalDimension(this.out.columns, 100);
-    if (visibleWidth(preview) >= width) {
+    if (visibleWidth(withCursor) >= width) {
       this.clearTail();
       return;
     }
-    this.out.write(`\r\u001b[K${preview}`);
+    this.out.write(`\r\u001b[K${withCursor}`);
     this.tailVisible = true;
   }
 
@@ -95,9 +123,47 @@ export class MarkdownRenderer {
     return Math.max(2, this.barWidth - extra);
   }
 
-  private closeFence(): void {
+  /** Top rule of a fence: `╭─ ts ─────╮`. */
+  private fenceOpenLine(lang: string): string {
     const t = theme();
-    this.out.write(`${t.paint(t.colors.border, "╰" + "─".repeat(this.ruleWidth()))}\n`);
+    const label =
+      lang.length > 0 ? `${t.paint(t.colors.border, "─")}${t.paint(t.colors.text.muted, ` ${lang} `)}` : "";
+    const bar = t.paint(t.colors.border, "─".repeat(this.ruleWidth(lang.length + 4)));
+    return `${t.paint(t.colors.border, "╭")}${label}${bar}`;
+  }
+
+  /** Bottom rule of a fence: `╰────────╯`. */
+  private fenceCloseLine(): string {
+    return theme().paint(theme().colors.border, "╰" + "─".repeat(this.ruleWidth()));
+  }
+
+  /** One body row of a fence, keeping the left rail aligned. */
+  private fenceBodyLine(line: string): string {
+    const t = theme();
+    return `${t.paint(t.colors.border, "│")} ${t.paint(t.colors.markdown.code, line)}`;
+  }
+
+  /**
+   * Projects the open fence as if the model had already closed it.
+   *
+   * While a code block streams, the bottom rule and the closing rail do not exist
+   * yet, so the box appears to grow a line at a time and the coloured block looks
+   * unfinished on every frame. This returns the complete block for the text
+   * received so far — top rule, body, bottom rule — without writing anything, so
+   * a renderer can paint a stable, closed box from the first line. Pure: it never
+   * mutates state, so calling it once per frame cannot double-close the fence.
+   */
+  projectOpenFence(): string[] | undefined {
+    if (!this.inFence) return undefined;
+    const body = this.buffer.length > 0 ? this.buffer.split("\n") : [];
+    // A trailing newline means the last split element is empty; drop it so the
+    // projection does not show a phantom blank line at the bottom.
+    if (body.length > 0 && body[body.length - 1] === "") body.pop();
+    return [this.fenceOpenLine(this.fenceLang), ...body.map((line) => this.fenceBodyLine(line)), this.fenceCloseLine()];
+  }
+
+  private closeFence(): void {
+    this.out.write(`${this.fenceCloseLine()}\n`);
     this.inFence = false;
   }
 
@@ -110,21 +176,15 @@ export class MarkdownRenderer {
       if (this.inFence) {
         this.closeFence();
       } else {
-        const t = theme();
         this.fenceLang = fence[1] ?? "";
-        const label =
-          this.fenceLang.length > 0
-            ? `${t.paint(t.colors.border, "─")}${t.paint(t.colors.text.muted, ` ${this.fenceLang} `)}`
-            : "";
-        const bar = t.paint(t.colors.border, "─".repeat(this.ruleWidth(this.fenceLang.length + 4)));
-        this.out.write(`${t.paint(t.colors.border, "╭")}${label}${bar}\n`);
+        this.out.write(`${this.fenceOpenLine(this.fenceLang)}\n`);
         this.inFence = true;
       }
       return;
     }
 
     if (this.inFence) {
-      this.out.write(`${theme().paint(theme().colors.border, "│")} ${theme().paint(theme().colors.markdown.code, line)}\n`);
+      this.out.write(`${this.fenceBodyLine(line)}\n`);
       return;
     }
 
