@@ -199,6 +199,11 @@ export function attachToastBus(bus: EventBus, manager: ToastManager): () => void
       else if (event.phase === "failed") manager.show(`Subagente ${event.role} falló`, "error");
     }),
   );
+  offs.push(bus.on("skill.active", (event) => manager.show(`Skill activa: ${event.name}`, "info")));
+  offs.push(
+    bus.on("checkpoint.created", (event) => manager.show(`Checkpoint #${event.id} creado (${event.files} files)`, "success")),
+  );
+  offs.push(bus.on("operator.rule", (event) => manager.show(`Regla de operador guardada (${event.kind})`, "success")));
   return () => {
     for (const off of offs) off();
   };

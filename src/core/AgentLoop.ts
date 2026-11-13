@@ -492,6 +492,11 @@ export class AgentLoop {
       this.deps.skillRegistry !== undefined
         ? discoverSkillsForGoal(this.deps.skillRegistry, goal)
         : { relevant: [], block: "" };
+    // A discovered skill is injected silently into the prompt, so the only way a
+    // user learns it happened is this event. The toast subscribes to it.
+    for (const hit of discovery.relevant) {
+      this.deps.events?.emit("skill.active", { name: hit.skill.name, at: Date.now() });
+    }
     const baseSystem = this.buildSystemPrompt(this.deps.config.mode);
     const turnSystem = discovery.block.length > 0 ? `${baseSystem}\n\n${discovery.block}` : baseSystem;
     const creationRequest = isCreationRequest(goal);
