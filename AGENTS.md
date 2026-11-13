@@ -129,3 +129,20 @@ rediscover. Afterwards check `carls --version` and a one-shot run
 - New behaviour is covered by a test.
 - Docs updated when a flag, config key or tool changes.
 - Nothing committed that you would not want published.
+
+## Pushing to `carlscodev` (sandbox caveat)
+
+`carlscodev/carls-agent-v2` is the only repository this project pushes to, and
+the local branch is `main`. In this sandbox the push can fail even though the
+working tree is clean:
+
+- Both available GitHub credentials — `GITHUB_TOKEN` and the OpenHands git
+  credential helper (`~/.openhands/git-credential-helper`) — authenticate as
+  `BerunHaider`, which has **read-only** access to `carlscodev/carls-agent-v2`
+  (`permissions.push: false`). A `git push` therefore ends with
+  `403 ... denied to BerunHaider`.
+- `HANDOFF.md` records the intended write path as `cloud_git push`, a command
+  that does not exist in this image; there is no other writer configured.
+
+When the push is blocked, commit locally, deploy to the VM (see above) and
+report the blocker. Do not retarget the remote at `BerunHaider`.
