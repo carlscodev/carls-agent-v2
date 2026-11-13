@@ -138,7 +138,7 @@ prompt: "# DIRECTIVA DE AUTOMATIZACI\xD3N HORARIA: AUDITOR\xCDA CONTINUA, CAZA D
   \ Finaliza entregando un reporte breve de 5 l\xEDneas con: commit hash, bug/mejora\
   \ resuelta, archivos tocados y conteo total de tests pasando en Vitest."
 setup_script_path: setup.sh
-state: DRAFT
+state: INACTIVE
 tarball_executables:
 - setup.sh
 tarball_source:
