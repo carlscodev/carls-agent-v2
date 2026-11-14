@@ -29,6 +29,8 @@ export interface SkillDiscoveryOptions {
   minScore?: number;
   /** Maximum body characters shown per skill. */
   bodyChars?: number;
+  /** Domain skill names suggested by IntentRouter, boosted when present in the registry. */
+  hints?: readonly string[];
 }
 
 export function discoverSkillsForGoal(
@@ -39,9 +41,31 @@ export function discoverSkillsForGoal(
   const limit = Math.max(1, options.limit ?? 2);
   const minScore = options.minScore ?? 3;
   const bodyChars = Math.max(200, options.bodyChars ?? 1200);
-  const relevant = registry
-    .search(goal, Math.max(limit, 8))
-    .filter((hit) => hit.score >= minScore)
+  const byName = new Map<string, SkillDiscoveryHit>();
+
+  for (const hit of registry.search(goal, Math.max(limit, 8))) {
+    if (hit.score >= minScore) {
+      byName.set(hit.skill.name, hit);
+    }
+  }
+
+  // Boost router-recommended domain skills so a terse goal ("crea una api") still
+  // loads its matching architecture skill even when exact keywords differ.
+  if (options.hints !== undefined && options.hints.length > 0) {
+    options.hints.forEach((hintName, index) => {
+      const skill = registry.get(hintName);
+      if (skill === undefined) return;
+      const bonus = Math.max(4, 12 - index * 2);
+      const existing = byName.get(skill.name);
+      byName.set(skill.name, {
+        skill,
+        score: (existing?.score ?? 0) + bonus,
+      });
+    });
+  }
+
+  const relevant = [...byName.values()]
+    .sort((a, b) => b.score - a.score)
     .slice(0, limit);
 
   if (relevant.length === 0) return { relevant: [], block: "" };

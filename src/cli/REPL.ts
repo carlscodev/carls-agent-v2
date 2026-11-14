@@ -38,7 +38,7 @@ import {
 } from "./AnimationTicker.js";
 import { SmoothStreamRenderer, streamCursor } from "./SmoothStream.js";
 import { ToolBatch, isGroupable, toolDetail, toolSummary, renderToolCard, toolCardDetail } from "./ToolCards.js";
-import { RateWindow, renderContextCell, renderRateCell } from "./StatusHud.js";
+import { RateWindow, renderContextCell, renderRateCell, renderServerBadge } from "./StatusHud.js";
 import { ToastManager, attachToastBus } from "./Toast.js";
 import {
   headerBar,
@@ -63,6 +63,8 @@ export interface SessionOptions {
 
 export async function runRepl(options: SessionOptions): Promise<number> {
   const logger = new Logger(options.config.logLevel);
+  /** Assigned once the footer exists; process events piggyback on it. */
+  let refreshStatus: () => void = () => {};
 
   /**
    * Builds one tab's runtime. The config is cloned so a model or mode change in
@@ -84,6 +86,9 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     // The handler is a lazy closure: the wizard needs `chrome`, which exists
     // only after the first tab is built. By the time ask_user runs, it is set.
     runtime.setAskUserHandler((payload) => askUserHandler(payload));
+    // A dev server can crash while the prompt is idle; repaint the SRV badge
+    // as soon as the sentinel reports a state change.
+    runtime.events.on("process.updated", () => refreshStatus());
     return { id: session.id, title, payload: runtime };
   };
 
@@ -395,6 +400,8 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     if (runtime.lastSkillsCreated.length > 0) {
       parts.push(t.paint(t.colors.accent, `SKILL:+${runtime.lastSkillsCreated.join(",")}`));
     }
+    const serverBadge = renderServerBadge(runtime.processes.list());
+    if (serverBadge !== undefined) parts.push(serverBadge);
     const lspServers = Object.keys(runtime.config.lspServers ?? {}).length;
     parts.push(t.paint(t.colors.text.faint, lspServers > 0 ? "LSP:on" : "LSP:off"));
     if (runtime.subAgentPool.activeCount > 0) {
@@ -443,6 +450,7 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       ...(runtime.config.effort !== undefined ? { effort: runtime.config.effort } : {}),
     });
   };
+  refreshStatus = showStatus;
 
   /**
    * Paints the toast overlay in the top-right corner. Only the full-screen layout

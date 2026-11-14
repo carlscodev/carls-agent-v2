@@ -1,5 +1,6 @@
 import { theme } from "./Theme.js";
 import type { Rgb } from "./Theme.js";
+import type { ManagedProcess } from "../core/ProcessSentinel.js";
 
 /**
  * High-density micro-meters for the tactical footer.
@@ -139,4 +140,20 @@ export class RateWindow {
   clear(): void {
     this.samples.length = 0;
   }
+}
+
+/**
+ * `SRV::5173 ●` — the live dev-server badge. Green when the last lines are
+ * clean, red when the sentinel saw an error or the process crashed. Only a
+ * process with a detected port earns the badge; a piped script does not.
+ */
+export function renderServerBadge(processes: readonly ManagedProcess[]): string | undefined {
+  const active = processes.find(
+    (process) => process.port !== undefined && (process.status === "ready" || process.status === "running"),
+  );
+  if (active === undefined) return undefined;
+  const t = theme();
+  const healthy = active.errorCount === 0;
+  const dot = t.paint(healthy ? t.colors.feedback.success : t.colors.feedback.error, "●");
+  return `${t.paint(t.colors.text.faint, "SRV::")}${t.paint(t.colors.text.base, String(active.port))} ${dot}`;
 }

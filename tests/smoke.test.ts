@@ -1967,7 +1967,12 @@ describe("installer launcher node resolution", () => {
     // An absolute bash path on POSIX; Git Bash's `bash` on Windows. The test
     // deliberately empties the child PATH, so the interpreter must be resolved
     // from the parent environment before the script runs.
-    const shell = process.platform === "win32" ? "bash" : "/bin/bash";
+    const winGitBash = [
+      process.env.ProgramFiles !== undefined ? join(process.env.ProgramFiles, "Git", "bin", "bash.exe") : "",
+      "C:\\Program Files\\Git\\bin\\bash.exe",
+      "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
+    ].find((candidate) => candidate.length > 0 && existsSync(candidate));
+    const shell = process.platform === "win32" ? (winGitBash ?? "bash") : "/bin/bash";
     const result = await new Promise<{ stdout: string }>((resolve, reject) => {
       execFile(shell, ["-c", script], {}, (error, stdout) => {
         if (error && (error as { code?: number }).code !== 1) reject(error);

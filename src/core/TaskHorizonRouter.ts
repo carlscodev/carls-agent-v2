@@ -35,7 +35,15 @@ export interface HorizonInput {
   hasActivePlan?: boolean;
 }
 
-/** Words that imply an ordered, multi-part piece of work. */
+/** Normalises accents and case for bilingual Spanish/English matching. */
+function normalize(text: string): string {
+  return text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+/** Words that imply an ordered, multi-part piece of work (English + Spanish). */
 const SEQUENCE_MARKERS = [
   "then",
   "after that",
@@ -56,9 +64,26 @@ const SEQUENCE_MARKERS = [
   "across the codebase",
   "whole project",
   "entire codebase",
+  "primero",
+  "segundo",
+  "despues",
+  "luego",
+  "finalmente",
+  "por ultimo",
+  "paso a paso",
+  "refactoriza",
+  "migra",
+  "reescribe",
+  "audita todo",
+  "todos los archivos",
+  "cada archivo",
+  "de punta a punta",
+  "todo el proyecto",
+  "todo el repositorio",
+  "arquitectura completa",
 ];
 
-/** Words that imply a single, local answer. */
+/** Words that imply a single, local answer (English + Spanish). */
 const SHORT_MARKERS = [
   "what is",
   "what does",
@@ -71,6 +96,17 @@ const SHORT_MARKERS = [
   "typo",
   "one line",
   "this file",
+  "que es",
+  "que hace",
+  "por que",
+  "explica",
+  "explicame",
+  "donde esta",
+  "muestrame",
+  "como hago",
+  "renombra",
+  "una linea",
+  "este archivo",
 ];
 
 const LONG_LENGTH = 900;
@@ -78,9 +114,9 @@ const MEDIUM_LENGTH = 240;
 
 /**
  * Counts the distinct asks in a request: list items first, then sentences, then
- * clauses joined by "and" / "and then". A request with five bullets is five tasks,
- * not one long sentence, and "update X and adjust Y" is two edits that must agree
- * — the strongest signals available without a model.
+ * clauses joined by "and" / "and then" / "y luego" / "ademas". A request with
+ * five bullets is five tasks, not one long sentence, and "update X and adjust Y"
+ * is two edits that must agree — the strongest signals available without a model.
  */
 export function countAsks(goal: string): number {
   const lines = goal.split(/\r?\n/).map((line) => line.trim());
@@ -90,7 +126,7 @@ export function countAsks(goal: string): number {
   // Clauses joined by a conjunction are separate asks; splitting on them before
   // the sentence pass is what catches "do A, and do B" written as one sentence.
   const clauses = goal
-    .split(/[.;]\s+|,\s*and\s+|\s+and\s+then\s+/i)
+    .split(/[.;]\s+|,\s*(?:and|y|adem[aá]s)\s+|\s+(?:and\s+then|y\s+luego|y\s+despu[eé]s|adem[aá]s)\s+/i)
     .map((part) => part.trim())
     .filter((part) => part.length > 12);
   return Math.max(1, clauses.length);
@@ -112,7 +148,7 @@ export class TaskHorizonRouter {
     }
 
     const goal = input.goal.trim();
-    const lower = goal.toLowerCase();
+    const lower = normalize(goal);
     const signals: string[] = [];
     const asks = countAsks(goal);
 

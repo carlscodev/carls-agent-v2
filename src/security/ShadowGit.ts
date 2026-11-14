@@ -38,6 +38,23 @@ export interface Checkpoint {
   at: string;
   /** Files captured, for the confirmation line. */
   files: number;
+  /** Files whose contents changed in this snapshot, when stats were computed. */
+  filesChanged?: number;
+  insertions?: number;
+  deletions?: number;
+}
+
+/** A checkpoint plus where it sits relative to the current workspace. */
+export interface TimelineEntry extends Checkpoint {
+  direction: "undo" | "redo" | "current";
+}
+
+export interface TimeMachineMove {
+  checkpoint: Checkpoint;
+  restored: number;
+  deleted: string[];
+  /** The state captured before the move, when it differed from the checkpoint. */
+  captured?: Checkpoint;
 }
 
 export interface ShadowGitOptions {
@@ -54,6 +71,7 @@ export class ShadowGitError extends Error {
 }
 
 const REF_PREFIX = "refs/carls/checkpoints";
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 export class ShadowGit {
   private readonly cwd: string;
@@ -61,6 +79,9 @@ export class ShadowGit {
   private readonly authorEmail: string;
   private readonly indexPath: string;
   private readonly available: boolean;
+  private undoStack: Checkpoint[] = [];
+  private redoStack: Checkpoint[] = [];
+  private stacksReady = false;
 
   constructor(cwd: string, options: ShadowGitOptions = {}) {
     this.cwd = cwd;
@@ -141,6 +162,18 @@ export class ShadowGit {
    * a repository, so a caller can treat it as a best-effort no-op.
    */
   create(label: string): Checkpoint | undefined {
+    this.ensureStacks();
+    const checkpoint = this.snapshot(label);
+    if (checkpoint === undefined) return undefined;
+    // A new snapshot is the head of the timeline; the redo branch it replaced
+    // is no longer reachable from this point.
+    this.undoStack.push(checkpoint);
+    this.redoStack = [];
+    return checkpoint;
+  }
+
+  /** Creates a commit without touching the undo/redo stacks (used by captures). */
+  private snapshot(label: string, parentOverride?: string): Checkpoint | undefined {
     if (!this.available) return undefined;
 
     try {
@@ -156,7 +189,7 @@ export class ShadowGit {
       // Parent on the previous checkpoint when there is one, so the history of a
       // session is a chain rather than a pile of orphans.
       const parents: string[] = [];
-      const previous = this.latestCommit();
+      const previous = parentOverride ?? this.latestCommit();
       if (previous !== undefined) parents.push(previous);
 
       const parentArgs = parents.flatMap((parent) => ["-p", parent]);
@@ -164,11 +197,139 @@ export class ShadowGit {
 
       const id = commit.slice(0, 8);
       this.git(["update-ref", `${REF_PREFIX}/${id}`, commit]);
+      const stats = this.diffStats(commit);
 
-      return { id, ref: `${REF_PREFIX}/${id}`, commit, label, at: now, files };
+      return {
+        id,
+        ref: `${REF_PREFIX}/${id}`,
+        commit,
+        label,
+        at: now,
+        files,
+        ...stats,
+      };
     } catch (error) {
       if (error instanceof ShadowGitError) return undefined;
       return undefined;
+    }
+  }
+
+  /**
+   * Number of entries in a tree, used only for the confirmation message.
+   *
+   * The undo/redo stack is the in-memory timeline of this session, seeded from
+   * the checkpoint refs on disk the first time it is needed. Existing refs are
+   * history; the working tree may already be ahead of the newest one, which the
+   * captures in `undo`/`redo` account for.
+   */
+  private ensureStacks(): void {
+    if (this.stacksReady) return;
+    this.stacksReady = true;
+    this.undoStack = this.list();
+    this.redoStack = [];
+  }
+
+  /** Number of steps available backwards. */
+  get undoDepth(): number {
+    this.ensureStacks();
+    return Math.max(0, this.undoStack.length - 1);
+  }
+
+  /** Number of steps available forwards. */
+  get redoDepth(): number {
+    this.ensureStacks();
+    return this.redoStack.length;
+  }
+
+  /** Snapshot the current tree only when it differs from `base`. */
+  private captureIfChanged(label: string, base: Checkpoint): Checkpoint | undefined {
+    if (!this.available) return undefined;
+    try {
+      this.git(["add", "-A", "--", "."]);
+      const tree = this.git(["write-tree"]).trim();
+      const baseTree = this.git(["rev-parse", `${base.commit}^{tree}`]).trim();
+      if (tree === baseTree) return undefined;
+      return this.snapshot(label, base.commit);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Steps back one checkpoint. The exact pre-undo tree is captured so redo can
+   * return to it, including edits made after the last checkpoint.
+   */
+  undo(): TimeMachineMove | undefined {
+    this.ensureStacks();
+    if (this.undoStack.length < 2) return undefined;
+    const leaving = this.undoStack.pop();
+    const target = this.undoStack[this.undoStack.length - 1];
+    if (leaving === undefined || target === undefined) return undefined;
+    const captured = this.captureIfChanged("before undo", leaving);
+    try {
+      const result = this.rewind(target);
+      this.redoStack.push(captured ?? leaving);
+      return { checkpoint: target, ...result, ...(captured !== undefined ? { captured } : {}) };
+    } catch (error) {
+      this.undoStack.push(leaving);
+      throw error;
+    }
+  }
+
+  /** Steps forward to the checkpoint captured by the last undo. */
+  redo(): TimeMachineMove | undefined {
+    this.ensureStacks();
+    const target = this.redoStack.pop();
+    if (target === undefined) return undefined;
+    const current = this.undoStack[this.undoStack.length - 1];
+    const captured = current === undefined ? undefined : this.captureIfChanged("before redo", current);
+    try {
+      const result = this.rewind(target);
+      if (captured !== undefined) this.undoStack.push(captured);
+      this.undoStack.push(target);
+      return { checkpoint: target, ...result, ...(captured !== undefined ? { captured } : {}) };
+    } catch (error) {
+      this.redoStack.push(target);
+      throw error;
+    }
+  }
+
+  /** Full timeline, with the current node and the undo/redo branches marked. */
+  timeline(): TimelineEntry[] {
+    this.ensureStacks();
+    const current = this.undoStack[this.undoStack.length - 1]?.commit;
+    const redo = new Set(this.redoStack.map((checkpoint) => checkpoint.commit));
+    return this.list().map((checkpoint) => ({
+      ...checkpoint,
+      ...this.diffStats(checkpoint.commit),
+      direction:
+        checkpoint.commit === current ? "current" : redo.has(checkpoint.commit) ? "redo" : "undo",
+    }));
+  }
+
+  /** `+insertions / -deletions` for a checkpoint against its parent. */
+  private diffStats(commit: string): { filesChanged: number; insertions: number; deletions: number } {
+    try {
+      let parent = EMPTY_TREE;
+      try {
+        parent = this.git(["rev-parse", `${commit}^`]).trim();
+      } catch {
+        parent = EMPTY_TREE;
+      }
+      const output = this.git(["diff", "--numstat", parent, commit]);
+      let filesChanged = 0;
+      let insertions = 0;
+      let deletions = 0;
+      for (const line of output.split("\n")) {
+        if (line.trim().length === 0) continue;
+        const [added, removed] = line.split("\t");
+        filesChanged += 1;
+        if (added !== undefined && added !== "-") insertions += Number.parseInt(added, 10) || 0;
+        if (removed !== undefined && removed !== "-") deletions += Number.parseInt(removed, 10) || 0;
+      }
+      return { filesChanged, insertions, deletions };
+    } catch {
+      return { filesChanged: 0, insertions: 0, deletions: 0 };
     }
   }
 

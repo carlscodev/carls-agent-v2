@@ -18,6 +18,8 @@ export type ExpertRole =
   | "Web Developer / UI Architect"
   | "3D/2D Browser Game Architect"
   | "Full-Stack / Backend Engineer"
+  | "Security / Reliability Auditor"
+  | "DevOps / Cloud Infrastructure Architect"
   | "Systems Architect";
 
 export interface IntentDecision {
@@ -66,41 +68,62 @@ const DIRECT_INTENT =
 const GAME_HINT =
   /\b(juego|game|videojuego|3d|2d|three\.?js|babylon|webgl|canvas|shader|sprite|arcade|plataformas|platformer|fps|rpg|godot|unity|pixel)\b/;
 const WEB_HINT =
-  /\b(web|website|pagina|landing|dashboard|panel|frontend|ui|ux|css|tailwind|react|vue|svelte|astro|html|portafolio|portfolio|glassmorphism|animacion|responsive|tienda|shop)\b/;
+  /\b(web|website|pagina|landing|dashboard|panel|frontend|ui|ux|css|tailwind|react|vue|svelte|astro|html|portafolio|portfolio|glassmorphism|animacion|responsive|tienda|shop|bento)\b/;
 const BACKEND_HINT =
-  /\b(api|backend|servidor|server|base de datos|database|sql|postgres|sqlite|mysql|mongo|rest|graphql|endpoint|microservicio|microservice|auth|autenticacion|fullstack|full-stack|crud|cola|queue|worker|cache)\b/;
+  /\b(api|backend|servidor|server|base de datos|database|sql|postgres|sqlite|mysql|mongo|rest|graphql|endpoint|microservicio|microservice|auth|autenticacion|fullstack|full-stack|crud|cola|queue|worker|cache|webhook|grpc)\b/;
+const SECURITY_HINT =
+  /\b(seguridad|security|vulnerabilidad\w*|vulnerability|pentest\w*|auditoria|hardening|endurec\w*|exploit|xss|csrf|sqli|inyeccion|injection|criptografia|owasp|secret\w*)\b/;
+const DEVOPS_HINT =
+  /\b(docker|dockerfile|kubernetes|k8s|helm|ci\/cd|cicd|github actions|gitlab ci|deploy\w*|desplieg\w*|contenedor\w*|container\w*|infraestructura|infrastructure|terraform|nginx)\b/;
 const SYSTEMS_HINT =
-  /\b(sistema|system|compilador|compiler|interprete|runtime|kernel|driver|daemon|concurrencia|concurrency|memoria|memory|performance|rendimiento|optimiza\w*|cli|terminal|parser|scraper|protocolo|protocol|socket|thread|proceso|process|vm|bytecode|linux|bash|shell)\b/;
+  /\b(sistema|system|compilador|compiler|interprete|runtime|kernel|driver|daemon|concurrencia|concurrency|memoria|memory|performance|rendimiento|optimiza\w*|cli|tui|terminal|parser|scraper|protocolo|protocol|socket|thread|proceso|process|vm|bytecode|linux|bash|shell|agente|agent)\b/;
 
-/** Skill names the router prefers per role, in priority order. */
+/** Skill names the router prefers per role, matching real builtin skills first. */
 const ROLE_SKILL_HINTS: Record<ExpertRole, string[]> = {
   "Web Developer / UI Architect": [
     "modern-web-glassmorphism",
-    "web-app-architect",
-    "frontend-design",
+    "design-no-generic-ui",
+    "frontend-web",
     "autonomous-project-scaffold",
   ],
   "3D/2D Browser Game Architect": [
     "tactical-3d-web-game",
-    "browser-game-architect",
-    "three-js-game",
     "autonomous-project-scaffold",
+    "performance",
   ],
   "Full-Stack / Backend Engineer": [
-    "fullstack-architect",
-    "rest-api-architect",
-    "database-design",
+    "api-design",
+    "sql-databases",
+    "security-review",
     "autonomous-project-scaffold",
   ],
-  "Systems Architect": ["systems-architect", "autonomous-project-scaffold"],
+  "Security / Reliability Auditor": [
+    "security-review",
+    "testing-strategy",
+    "anti-generic-code",
+  ],
+  "DevOps / Cloud Infrastructure Architect": [
+    "docker-containers",
+    "kubernetes",
+    "ci-cd",
+    "shell-bash",
+  ],
+  "Systems Architect": [
+    "anti-generic-code",
+    "autonomous-project-scaffold",
+    "performance",
+    "testing-strategy",
+  ],
 };
 
 /** Picks the expert role from the domain keywords, most specific first. */
 export function detectRole(goal: string): ExpertRole | undefined {
   const text = normalizeGoal(goal);
   if (GAME_HINT.test(text)) return "3D/2D Browser Game Architect";
+  if (DEVOPS_HINT.test(text)) return "DevOps / Cloud Infrastructure Architect";
   if (BACKEND_HINT.test(text)) return "Full-Stack / Backend Engineer";
   if (WEB_HINT.test(text)) return "Web Developer / UI Architect";
+  if (SECURITY_HINT.test(text)) return "Security / Reliability Auditor";
   if (SYSTEMS_HINT.test(text)) return "Systems Architect";
   return undefined;
 }
@@ -155,7 +178,12 @@ export function routeIntent(goal: string): IntentDecision {
   }
 
   if (DIRECT_INTENT.test(text) || heavyIntent) {
-    return { profile: "DIRECT_CODE_TASK", skillHints: [], reason: "direct edit or command" };
+    return {
+      profile: "DIRECT_CODE_TASK",
+      ...(role !== undefined ? { role } : {}),
+      skillHints: role !== undefined ? ROLE_SKILL_HINTS[role] : [],
+      reason: "direct edit or command",
+    };
   }
 
   // A very short utterance with no code signal is conversation; anything longer
