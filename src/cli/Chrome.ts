@@ -2,6 +2,7 @@ import pc from "picocolors";
 import { terminalDimension, visibleWidth } from "./Text.js";
 import { FrameRenderer } from "./FrameRenderer.js";
 import { Viewport } from "./Viewport.js";
+import { TranscriptStore, type BlockOptions, type BlockRenderContext, type ToggleResult } from "./TranscriptStore.js";
 import { claimMouse, parseMouseEvent, type MouseEvent } from "./Input.js";
 import { theme } from "./Theme.js";
 
@@ -100,6 +101,9 @@ export class Chrome {
   private readonly menuFrame: FrameRenderer;
   private readonly promptFrame: FrameRenderer;
   private scrollport: Viewport | undefined;
+  /** Addressable source of truth for the full-screen transcript. */
+  private readonly transcript = new TranscriptStore();
+  private spinnerGlyph = "⠋";
   private viewportTimer: NodeJS.Timeout | undefined;
   private releaseMouse: (() => void) | undefined;
   private mouseTracking = true;
@@ -176,6 +180,7 @@ export class Chrome {
 
     if (this.fullscreenMode) {
       this.scrollport = new Viewport();
+      this.transcript.clear();
       this.altSuspended = false;
       this.installWriter();
       this.installMouse();
@@ -427,6 +432,7 @@ export class Chrome {
       return;
     }
     if (this.fullscreenMode) {
+      this.transcript.appendText(text);
       this.scrollport?.append(text);
       this.scheduleViewport();
       return;
@@ -434,18 +440,66 @@ export class Chrome {
     this.write(text);
   }
 
-  /** Appends pre-rendered lines to the virtual stream. */
-  writeBlock(lines: readonly string[]): void {
+  /** Appends pre-rendered lines to the virtual stream, or replaces a block by id. */
+  writeBlock(lines: readonly string[], id?: string): void {
     if (!this.enabled) {
       this.out.write(`${lines.join("\n")}\n`);
       return;
     }
     if (this.fullscreenMode) {
-      this.scrollport?.appendLines(lines);
-      this.scheduleViewport();
+      this.transcript.putBlock(id, () => [...lines]);
+      this.rebuildTranscript();
       return;
     }
     this.write(`${lines.join("\n")}\n`);
+  }
+
+  /**
+   * Inserts or updates an addressable card. `render` receives the live spinner
+   * and the current accordion state, so a done card can replace its running form
+   * in the same position without appending a second block.
+   */
+  writeCard(
+    id: string,
+    render: (context: BlockRenderContext) => string[],
+    options: BlockOptions = {},
+  ): void {
+    if (!this.enabled) {
+      this.out.write(`${render({ spinner: "⠋", expanded: true }).join("\n")}\n`);
+      return;
+    }
+    if (this.fullscreenMode) {
+      this.transcript.putBlock(id, render, options);
+      this.rebuildTranscript();
+      return;
+    }
+    this.write(`${render({ spinner: "⠋", expanded: true }).join("\n")}\n`);
+  }
+
+  /** Ctrl+O target: the newest expandable card, or a specific block id. */
+  toggleCard(id?: string): ToggleResult | undefined {
+    if (!this.fullscreenMode) return undefined;
+    const result = this.transcript.toggle(id);
+    if (result !== undefined) this.rebuildTranscript();
+    return result;
+  }
+
+  /** Advances the spinner and repaints only when a card is actually running. */
+  setSpinner(glyph: string): void {
+    this.spinnerGlyph = glyph;
+    if (this.fullscreenMode && this.transcript.hasRunning()) this.rebuildTranscript();
+  }
+
+  /** Discards the transcript (used by /clear and a fresh full-screen session). */
+  clearTranscript(): void {
+    this.transcript.clear();
+    this.scrollport?.clear();
+    if (this.fullscreenMode) this.scheduleViewport();
+  }
+
+  private rebuildTranscript(): void {
+    this.scrollport?.replaceAll(this.transcript.render(this.spinnerGlyph));
+    this.scheduleViewport();
   }
 
   /** Replaces the split inspector content; undefined hides the pane. */
@@ -1026,6 +1080,7 @@ export class Chrome {
         return this.originalWrite?.(text, ...args) ?? true;
       }
       this.scrollport?.append(text);
+      this.transcript.appendText(text);
       this.scheduleViewport();
       return true;
     }) as WriteFn;

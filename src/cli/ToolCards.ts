@@ -262,7 +262,168 @@ export class ToolBatch {
     return this.expandedState;
   }
 
-  render(options: Omit<ToolTreeOptions, "title" | "expanded"> = {}): string[] {
-    return renderToolTree(this.entries, { ...options, title: this.title, expanded: this.expandedState });
+  render(options: Omit<ToolTreeOptions, "title"> = {}): string[] {
+    return renderToolTree(this.entries, {
+      ...options,
+      title: this.title,
+      expanded: options.expanded ?? this.expandedState,
+    });
   }
+}
+
+/**
+ * Parses the harness name of an MCP tool. `mcp__demo__echo` is server `demo`
+ * and tool `echo`; the underscores are an encoding detail, not something a human
+ * should read in the transcript.
+ */
+export function parseMcpToolName(name: string): { server: string; tool: string } | undefined {
+  const match = /^mcp__(.+?)__(.+)$/.exec(name);
+  if (match === null) return undefined;
+  const server = match[1] ?? "";
+  const tool = match[2] ?? "";
+  return server.length > 0 && tool.length > 0 ? { server, tool } : undefined;
+}
+
+/** Detail for a card head: a bash command, a path, or an MCP tool. */
+export function toolCardDetail(name: string, input: unknown): string {
+  const record = isRecord(input) ? input : {};
+  if (name === "bash" && typeof record.command === "string") return record.command;
+  return toolDetail(name, input);
+}
+
+export type ToolCardState = "running" | "ok" | "failed";
+
+export interface ToolCardOptions {
+  name: string;
+  detail?: string | undefined;
+  state: ToolCardState;
+  durationMs?: number | undefined;
+  exitCode?: number | null | undefined;
+  output?: string | undefined;
+  error?: string | undefined;
+  /** Supplied by the animation ticker. */
+  spinner?: string | undefined;
+  /** Accordion state. */
+  expanded?: boolean | undefined;
+  /** Total columns. */
+  width?: number | undefined;
+  /** Lines shown while collapsed. The brief fixes this at four. */
+  previewLines?: number | undefined;
+  /** Tool arguments, rendered as a tree row for MCP. */
+  args?: unknown;
+}
+
+const COLLAPSE_THRESHOLD = 5;
+const DEFAULT_PREVIEW = 4;
+/** Exact Phase 13 state palette; independent of the semantic theme tokens. */
+const RUNNING_COLOR = { r: 0x00, g: 0xd8, b: 0xff };
+const SUCCESS_COLOR = { r: 0x00, g: 0xff, b: 0x88 };
+const ERROR_COLOR = { r: 0xff, g: 0x4d, b: 0x4d };
+
+function formatJson(value: string): string | undefined {
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return undefined;
+  }
+}
+
+function shortJson(value: unknown, limit = 76): string {
+  let text: string;
+  try {
+    text = JSON.stringify(value);
+  } catch {
+    text = String(value);
+  }
+  const collapsed = text.replace(/\s+/g, " ");
+  return collapsed.length > limit ? `${collapsed.slice(0, limit - 1)}…` : collapsed;
+}
+
+/** Tiny syntax tint: comments, strings, numbers and a few keywords. */
+function highlight(line: string): string {
+  const t = theme();
+  if (/^\s*(\/\/|#|--)/.test(line)) return t.paint(t.colors.syntax.comment, line);
+  return line
+    .replace(/(["'`])(?:\.|(?!\1).)*\1/g, (match) => t.paint(t.colors.syntax.string, match))
+    .replace(/\b(const|let|var|function|return|if|else|for|while|import|from|export|class|interface|type|await|async|true|false|null)\b/g, (match) =>
+      t.paint(t.colors.syntax.keyword, match),
+    )
+    .replace(/\b\d+(?:\.\d+)?\b/g, (match) => t.paint(t.colors.syntax.number, match));
+}
+
+/**
+ * One tool call as an OpenCode-style left-gutter block.
+ *
+ * The `┃` rail is the state: cyan while running, neon green on success, coral
+ * on failure. The body is the same block that `Ctrl+O` toggles, so the card can
+ * be replaced in place by `TranscriptStore` when the result lands.
+ */
+export function renderToolCard(options: ToolCardOptions): string[] {
+  const t = theme();
+  const width = Math.max(40, Math.min(options.width ?? terminalDimension(undefined, 100), 160));
+  const inner = Math.max(1, width - 2);
+  const mcp = parseMcpToolName(options.name);
+  const stateColor =
+    options.state === "running"
+      ? RUNNING_COLOR
+      : options.state === "ok"
+        ? SUCCESS_COLOR
+        : ERROR_COLOR;
+  const rail = t.paint(stateColor, "┃");
+  const spinner = options.spinner ?? "⠋";
+  const glyph = options.state === "running" ? spinner : options.state === "ok" ? "✓" : "✗";
+  const title = mcp !== undefined ? `◆ MCP  [${mcp.server} ▸ ${mcp.tool}]` : options.name;
+  const detail = options.detail !== undefined && options.detail.length > 0 ? `  ${options.detail}` : "";
+  const duration = options.durationMs !== undefined ? formatDuration(options.durationMs) : undefined;
+  const metric =
+    options.state === "running"
+      ? `[${duration ?? "running"}]`
+      : options.state === "ok"
+        ? options.exitCode !== undefined && options.exitCode !== null
+          ? `[exit ${options.exitCode} · ${duration ?? "0ms"}]`
+          : `[${duration ?? "0ms"}]`
+        : options.exitCode !== undefined && options.exitCode !== null
+          ? `[exit ${options.exitCode} · ${duration ?? "0ms"}]`
+          : `[failed · ${duration ?? "0ms"}]`;
+  const headText = ` ${t.paint(stateColor, glyph)} ${t.bold(title)}${t.paint(t.colors.text.muted, detail)} `;
+  const headBudget = Math.max(0, inner - visibleWidth(headText) - visibleWidth(metric) - 2);
+  const head = `${headText}${t.paint(t.colors.border, `${"─".repeat(headBudget)} `)}${t.paint(t.colors.text.faint, metric)}`;
+  const lines: string[] = [`${rail}${truncate(head, inner)}`];
+
+  const raw = (options.output ?? options.error ?? "").replace(/\r\n/g, "\n");
+  const pretty = mcp !== undefined ? formatJson(raw) : undefined;
+  const body = (pretty ?? raw).split("\n");
+  if (body.length > 0 && body[body.length - 1] === "") body.pop();
+
+  if (mcp !== undefined && options.args !== undefined) {
+    lines.push(`${rail} ${t.paint(t.colors.text.faint, "  ├─ args   :")} ${shortJson(options.args)}`);
+    const resultText = pretty ?? shortJson(raw);
+    const resultLines = resultText.split("\n");
+    lines.push(`${rail} ${t.paint(t.colors.text.faint, "  ╰─ result :")} ${truncate(resultLines[0] ?? "", Math.max(1, inner - 15))}`);
+    for (const extra of resultLines.slice(1)) {
+      lines.push(`${rail} ${t.paint(t.colors.text.muted, `              ${truncate(extra, Math.max(1, inner - 16))}`)}`);
+    }
+  } else if (body.length > 0 && (body[0] ?? "") !== "") {
+    const preview = body.length > COLLAPSE_THRESHOLD;
+    const count = Math.max(1, options.previewLines ?? DEFAULT_PREVIEW);
+    const show = options.expanded === true ? body : preview ? body.slice(0, count) : body;
+    if (options.state === "failed" && preview && options.expanded !== true) {
+      // Errors live at the end of the output; show the tail where the assertion is.
+      show.splice(0, show.length, ...body.slice(-count));
+    }
+    const start = options.state === "failed" && preview && options.expanded !== true ? body.length - count : 0;
+    show.forEach((line, index) => {
+      const number = String(start + index + 1).padStart(3, " ");
+      lines.push(`${rail} ${t.paint(t.colors.text.faint, `${number} │`)} ${truncate(highlight(line), Math.max(1, inner - 6))}`);
+    });
+    if (preview) {
+      const hidden = body.length - show.length;
+      lines.push(
+        options.expanded === true
+          ? `${rail} ${t.paint(t.colors.text.faint, `▾ [ Mostrando ${body.length} líneas · Ctrl+O colapsar ]`)}`
+          : `${rail} ${t.paint(t.colors.text.faint, `▸ [ +${hidden} líneas ocultas · Ctrl+O expandir ]`)}`,
+      );
+    }
+  }
+  return lines;
 }

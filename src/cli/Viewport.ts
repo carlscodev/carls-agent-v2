@@ -120,6 +120,22 @@ export class Viewport {
     this.unread = 0;
   }
 
+  /**
+   * Replaces the whole stream from a block renderer. Used after an in-place card
+   * update: the transcript is the source of truth, so the old raw lines are
+   * discarded and re-wrapped at the current width. A scrolled-up reader keeps
+   * their position, clamped to the new length.
+   */
+  replaceAll(lines: readonly string[]): void {
+    const previousOffset = this.offset;
+    this.rawLines = [];
+    this.wrappedLines = [];
+    this.pending = "";
+    for (const line of lines) this.pushRaw(line);
+    this.offset = Math.min(previousOffset, Math.max(0, this.wrappedLines.length - this.height));
+    this.clampOffset();
+  }
+
   /** Visible rows, top to bottom, at most `height`. No padding is added. */
   visible(height: number = this.height): string[] {
     const rows = Math.max(1, height);

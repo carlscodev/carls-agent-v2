@@ -409,6 +409,16 @@ describe("shadow git checkpoints", () => {
     const shadow = new ShadowGit(dir);
     const checkpoint = shadow.create("with exec")!;
 
+    if (process.platform === "win32") {
+      // Windows has no POSIX mode bits and Git does not track them. Assert the
+      // invariant that actually matters there: the rewind restores the content.
+      await writeFile(script, "#!/bin/sh\necho changed\n", "utf8");
+      shadow.rewind(checkpoint);
+      expect(await readFile(script, "utf8")).toContain("echo hi");
+      shadow.dispose();
+      return;
+    }
+
     await chmodSync(script, 0o600);
     expect((await statSync(script)).mode & 0o111).toBe(0);
 
