@@ -10,6 +10,21 @@ export interface TruncateResult {
   omitted: number;
 }
 
+/** The head+tail marker, naming how many characters were dropped. */
+function omittedMarker(omitted: number): string {
+  return `\n... [salida truncada: ${omitted} caracteres omitidos] ...\n`;
+}
+
+/** A head and a tail holding exactly `budget` characters between them. */
+function splitAt(input: string, budget: number, headRatio: number): { head: string; tail: string } {
+  const headLen = Math.floor(budget * headRatio);
+  const tailLen = budget - headLen;
+  return {
+    head: input.slice(0, headLen),
+    tail: tailLen > 0 ? input.slice(input.length - tailLen) : "",
+  };
+}
+
 export function truncate(
   input: string,
   limit: number,
@@ -20,22 +35,37 @@ export function truncate(
     return { text: input, truncated: false, originalLength, omitted: 0 };
   }
 
-  const marker = (omitted: number): string =>
-    `\n... [salida truncada: ${omitted} caracteres omitidos] ...\n`;
+  // The marker's width grows with the digits of `omitted`, while `omitted` shrinks
+  // as the marker takes more room. A fixed reserve ignored that coupling: past
+  // three digits the marker outgrew it, so the "never exceeds `limit`" promise
+  // broke on a small limit. Reserve the widest marker the input could ever need —
+  // `omitted` is at most `originalLength` — so the result is bounded by `limit` by
+  // construction.
+  const reserve = omittedMarker(originalLength).length;
+  if (limit >= reserve) {
+    const { head, tail } = splitAt(input, limit - reserve, headRatio);
+    const omitted = originalLength - head.length - tail.length;
+    return {
+      text: `${head}${omittedMarker(omitted)}${tail}`,
+      truncated: true,
+      originalLength,
+      omitted,
+    };
+  }
 
-  // Reserve room for the marker so the result never exceeds `limit`.
-  const markerReserve = 64;
-  const budget = Math.max(0, limit - markerReserve);
-  const headLen = Math.floor(budget * headRatio);
-  const tailLen = budget - headLen;
-  const head = input.slice(0, headLen);
-  const tail = input.slice(input.length - tailLen);
-  const omitted = originalLength - head.length - tail.length;
-
+  // `limit` is too small for the descriptive marker. Fall back to a compact
+  // `...N...`; if not even that fits, keep a bare head slice. The result stays
+  // within `limit` in every branch.
+  const compact = `...${originalLength}...`;
+  if (limit >= compact.length) {
+    const { head, tail } = splitAt(input, limit - compact.length, headRatio);
+    const omitted = originalLength - head.length - tail.length;
+    return { text: `${head}...${omitted}...${tail}`, truncated: true, originalLength, omitted };
+  }
   return {
-    text: `${head}${marker(omitted)}${tail}`,
+    text: input.slice(0, limit),
     truncated: true,
     originalLength,
-    omitted,
+    omitted: originalLength - limit,
   };
 }
