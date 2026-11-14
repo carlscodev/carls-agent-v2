@@ -164,43 +164,49 @@ export function applyToolTokenBudget(text: string, options: ToolBudgetOptions): 
 
   const headChars = charsForTokens(Math.max(1, Math.floor(budgetTokens * 0.6)));
   const tailChars = charsForTokens(Math.max(1, Math.floor(budgetTokens * 0.3)));
-  let headCount = takeHead(lines, headChars).length;
-  let tailCount = takeTail(lines, tailChars).length;
+  // Keep the truncated line arrays, not only their counts. `takeHead`/`takeTail`
+  // cut an over-long boundary line to its window; re-slicing the original lines by
+  // count would put that whole line back and blow the ceiling it was cut to
+  // respect. A minified first or last line is exactly that boundary line.
+  let head = takeHead(lines, headChars);
+  let tail = takeTail(lines, tailChars);
   // Never let the two windows overlap; the marker must describe a real middle.
-  if (headCount + tailCount >= lines.length) {
-    tailCount = Math.max(0, lines.length - headCount - 1);
-  }
+  const tailKeep = Math.max(0, lines.length - head.length - 1);
+  if (tail.length > tailKeep) tail = tail.slice(tail.length - tailKeep);
 
-  const build = (head: number, tail: number): string => {
-    const omitted = lines.slice(head, lines.length - tail);
+  const build = (headLines: readonly string[], tailLines: readonly string[]): string => {
+    const omitted = lines.slice(headLines.length, lines.length - tailLines.length);
     const omittedTokens = estimateTokens(omitted.join("\n"));
     const marker =
       `… [${omitted.length} line${omitted.length === 1 ? "" : "s"} / ~${omittedTokens} tokens omitted · ` +
       "read_file (start_line/end_line) or grep_search to inspect] …";
-    return [...lines.slice(0, head), marker, ...lines.slice(lines.length - tail)].join("\n");
+    return [...headLines, marker, ...tailLines].join("\n");
   };
 
-  let result = build(headCount, tailCount);
-  // The marker has a cost too; shrink the tail first, then the head, until the
-  // rendered observation respects its ceiling.
-  while (estimateTokens(result) > budgetTokens && tailCount > 1) {
-    tailCount -= 1;
-    result = build(headCount, tailCount);
+  let result = build(head, tail);
+  // The marker has a cost too; shrink the tail window first, then the head, until
+  // the rendered observation respects its ceiling.
+  while (estimateTokens(result) > budgetTokens && tail.length > 1) {
+    tail = tail.slice(1);
+    result = build(head, tail);
   }
-  while (estimateTokens(result) > budgetTokens && headCount > 1) {
-    headCount -= 1;
-    result = build(headCount, tailCount);
+  while (estimateTokens(result) > budgetTokens && head.length > 1) {
+    head = head.slice(0, head.length - 1);
+    result = build(head, tail);
   }
+  // A few very long lines leave no whole line to drop, so the line windows cannot
+  // shrink further; the character pass is the one that can still cut them.
+  if (estimateTokens(result) > budgetTokens) return truncateByChars(text, budgetTokens);
 
-  const omittedLines = Math.max(0, lines.length - headCount - tailCount);
-  const omittedTokens = estimateTokens(lines.slice(headCount, lines.length - tailCount).join("\n"));
+  const omittedLines = Math.max(0, lines.length - head.length - tail.length);
+  const omittedTokens = estimateTokens(lines.slice(head.length, lines.length - tail.length).join("\n"));
   return {
     text: result,
     truncated: true,
     budgetTokens,
     omittedLines,
     omittedTokens,
-    headLines: headCount,
-    tailLines: tailCount,
+    headLines: head.length,
+    tailLines: tail.length,
   };
 }

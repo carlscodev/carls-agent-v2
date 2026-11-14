@@ -236,6 +236,26 @@ describe("Phase 14 ToolTokenBudget", () => {
     expect(result.text.endsWith("b")).toBe(true);
   });
 
+  it("keeps a multi-line observation inside its budget when a boundary line is minified", () => {
+    // A minified first or last line is exactly the boundary line of the head/tail
+    // window. `takeHead`/`takeTail` cut it to its character window, but re-slicing
+    // the original lines by count put the whole line back and blew the ceiling.
+    const first = `{${"a".repeat(100_000)}}`;
+    const last = `{${"z".repeat(100_000)}}`;
+    const middle = Array.from({ length: 40 }, (_value, index) => `line ${index}`);
+    const text = [first, ...middle, last].join("\n");
+    const budget = tokenBudgetFor({ toolName: "read_file" });
+
+    const result = applyToolTokenBudget(text, { toolName: "read_file" });
+
+    expect(result.truncated).toBe(true);
+    // The bug made this the whole 200k-character payload (~55k tokens).
+    expect(estimateTokens(result.text)).toBeLessThanOrEqual(budget);
+    expect(result.text.startsWith("{a")).toBe(true);
+    expect(result.text.endsWith("z}")).toBe(true);
+    expect(result.text).toContain("tokens omitted");
+  });
+
   it("still returns a short single line untouched", () => {
     const result = applyToolTokenBudget("one short line", { toolName: "read_file", maxTokens: 200 });
     expect(result.truncated).toBe(false);
