@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Skill } from "./SkillLoader.js";
 import { parseFrontmatter } from "./SkillLoader.js";
 import { SkillGraph, SkillHistory } from "./SkillEvolution.js";
@@ -221,4 +222,116 @@ function countStructure(body: string): number {
   const commands = (body.match(/`[^`]+`/g) ?? []).length;
   const checks = body.split(/\r?\n/).filter((line) => /\b(verify|check|test|ensure|confirm)\b/i.test(line)).length;
   return steps + Math.floor(commands / 3) + checks;
+}
+
+export interface DuplicatePair {
+  a: string;
+  b: string;
+  similarity: number;
+}
+
+const DUPLICATE_STOP = new Set([
+  "the", "and", "for", "with", "that", "this", "from", "into", "use", "using",
+  "when", "your", "you", "are", "not", "but", "can", "all", "any", "its",
+]);
+
+/** Significant body tokens; structure words and short words add noise to Jaccard. */
+function bodyTokens(body: string): Set<string> {
+  const tokens = body
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 3 && !DUPLICATE_STOP.has(token));
+  return new Set(tokens);
+}
+
+/** Jaccard similarity over significant body tokens. */
+export function jaccardSimilarity(a: string, b: string): number {
+  const left = bodyTokens(a);
+  const right = bodyTokens(b);
+  if (left.size === 0 || right.size === 0) return 0;
+  let intersection = 0;
+  for (const token of left) if (right.has(token)) intersection += 1;
+  return intersection / (left.size + right.size - intersection);
+}
+
+/** Pairs whose bodies are at least `threshold` similar, highest first. */
+export function detectDuplicates(skills: readonly Skill[], threshold = 0.75): DuplicatePair[] {
+  const pairs: DuplicatePair[] = [];
+  for (let left = 0; left < skills.length; left++) {
+    for (let right = left + 1; right < skills.length; right++) {
+      const a = skills[left];
+      const b = skills[right];
+      if (a === undefined || b === undefined) continue;
+      const similarity = jaccardSimilarity(a.body, b.body);
+      if (similarity >= threshold) pairs.push({ a: a.name, b: b.name, similarity });
+    }
+  }
+  return pairs.sort((x, y) => y.similarity - x.similarity || x.a.localeCompare(y.a) || x.b.localeCompare(y.b));
+}
+
+export interface SkillUsageSummary {
+  uses: number;
+  needsWork?: boolean | undefined;
+}
+
+export interface PromotionResult {
+  ok: boolean;
+  path?: string;
+  reason?: string;
+}
+
+/**
+ * Publishes a proven project skill to the user catalog. The source stays in
+ * place; a project that shares it keeps its local copy, while every other
+ * project can now discover the promoted version.
+ */
+export function promoteSkill(
+  skill: Skill,
+  targetDir: string,
+  usage: SkillUsageSummary | undefined,
+): PromotionResult {
+  if (skill.source !== "project") return { ok: false, reason: `only project skills can be promoted; "${skill.name}" is ${skill.source}` };
+  if (usage === undefined || usage.uses < 3) return { ok: false, reason: `"${skill.name}" needs at least 3 recorded uses before promotion` };
+  if (usage.needsWork === true) return { ok: false, reason: `"${skill.name}" is flagged as needing work` };
+  try {
+    const contents = readFileSync(skill.path, "utf8");
+    const dir = join(targetDir, skill.name);
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, "SKILL.md");
+    writeFileSync(path, contents, "utf8");
+    return { ok: true, path };
+  } catch (error) {
+    return { ok: false, reason: (error as Error).message };
+  }
+}
+
+export interface ArchiveResult {
+  ok: boolean;
+  disabledPath?: string;
+  reason?: string;
+}
+
+/**
+ * Disables a skill reversibly by renaming its file. An active skill that
+ * requires or extends it is a hard blocker: archiving the dependency would
+ * leave a dangling procedure for every future session.
+ */
+export function archiveSkill(skill: Skill, graph: SkillGraph): ArchiveResult {
+  const dependents = graph
+    .dependents(skill.name)
+    .filter((edge) => edge.kind === "requires" || edge.kind === "extends");
+  if (dependents.length > 0) {
+    return {
+      ok: false,
+      reason: `"${skill.name}" is required by ${dependents.map((edge) => edge.from).join(", ")}; archive those first`,
+    };
+  }
+  if (!existsSync(skill.path)) return { ok: false, reason: `"${skill.name}" has no file on disk` };
+  const disabledPath = `${skill.path}.disabled`;
+  try {
+    renameSync(skill.path, disabledPath);
+    return { ok: true, disabledPath };
+  } catch (error) {
+    return { ok: false, reason: (error as Error).message };
+  }
 }

@@ -198,3 +198,75 @@ export class SkillGraphTool implements Tool<Record<string, never>> {
     return { ok: true, output: lines.join("\n"), metadata: { edges: graph.all().length, cycles: cycles.length } };
   }
 }
+
+export class DuplicateSkills implements Tool<Record<string, never>> {
+  readonly name = "duplicate_skills";
+  readonly description =
+    "Find skills whose bodies overlap enough to consolidate (Jaccard similarity >= 0.75). Use it before adding another skill that may already exist.";
+  readonly readOnly = true;
+  private readonly schemaObject = z.object({});
+
+  schema(): ToolSchema {
+    return { name: this.name, description: this.description, input_schema: zodToJsonSchema(this.schemaObject) };
+  }
+
+  parse(input: unknown): Record<string, never> {
+    return this.schemaObject.parse(input);
+  }
+
+  async run(_input: Record<string, never>, ctx: ToolContext): Promise<ToolResult> {
+    const pairs = engine(ctx).detectDuplicates();
+    if (pairs.length === 0) return { ok: true, output: "No duplicate skills found." };
+    return {
+      ok: true,
+      output: pairs.map((pair) => `${pair.a} ~ ${pair.b} (${Math.round(pair.similarity * 100)}% similar)`).join("\n"),
+      metadata: { pairs: pairs.length },
+    };
+  }
+}
+
+export class PromoteSkill implements Tool<{ name: string }> {
+  readonly name = "promote_skill";
+  readonly description =
+    "Publish a high-performing project skill to the user catalog so other projects can use it. Requires at least 3 recorded uses and no active flag.";
+  readonly readOnly = false;
+  readonly category = "write" as const;
+  private readonly schemaObject = z.object({ name: z.string().describe("Project skill name.") });
+
+  schema(): ToolSchema {
+    return { name: this.name, description: this.description, input_schema: zodToJsonSchema(this.schemaObject) };
+  }
+
+  parse(input: unknown): { name: string } {
+    return this.schemaObject.parse(input);
+  }
+
+  async run(input: { name: string }, ctx: ToolContext): Promise<ToolResult> {
+    const result = engine(ctx).promote(input.name, ctx.skills);
+    if (!result.ok) return { ok: false, output: "", error: result.reason ?? "promotion refused" };
+    return { ok: true, output: `Promoted "${input.name}" to ${result.path}.`, metadata: { path: result.path } };
+  }
+}
+
+export class ArchiveSkill implements Tool<{ name: string }> {
+  readonly name = "archive_skill";
+  readonly description =
+    "Disable a skill reversibly by renaming its file to .disabled. Refused while another active skill requires or extends it.";
+  readonly readOnly = false;
+  readonly category = "write" as const;
+  private readonly schemaObject = z.object({ name: z.string().describe("Skill name to archive.") });
+
+  schema(): ToolSchema {
+    return { name: this.name, description: this.description, input_schema: zodToJsonSchema(this.schemaObject) };
+  }
+
+  parse(input: unknown): { name: string } {
+    return this.schemaObject.parse(input);
+  }
+
+  async run(input: { name: string }, ctx: ToolContext): Promise<ToolResult> {
+    const result = engine(ctx).archive(input.name, ctx.skills);
+    if (!result.ok) return { ok: false, output: "", error: result.reason ?? "archive refused" };
+    return { ok: true, output: `Archived "${input.name}" -> ${result.disabledPath}.`, metadata: { path: result.disabledPath } };
+  }
+}

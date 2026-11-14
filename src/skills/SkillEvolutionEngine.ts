@@ -1,7 +1,19 @@
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { SkillLoader, type Skill } from "./SkillLoader.js";
 import { SkillGraph, SkillHistory } from "./SkillEvolution.js";
-import { SkillCurator, type CurationCandidate, type SkillProposal, type ValidationResult } from "./SkillCurator.js";
+import {
+  SkillCurator,
+  archiveSkill as disableSkill,
+  detectDuplicates as findDuplicateSkills,
+  promoteSkill as publishProjectSkill,
+  type ArchiveResult,
+  type CurationCandidate,
+  type DuplicatePair,
+  type PromotionResult,
+  type SkillProposal,
+  type ValidationResult,
+} from "./SkillCurator.js";
 import type { SkillRegistry } from "./SkillRegistry.js";
 
 /**
@@ -133,5 +145,34 @@ export class SkillEvolutionEngine {
       author: revision.author,
       chars: revision.contents.length,
     }));
+  }
+
+  /** Skills whose bodies overlap enough to be consolidated. */
+  detectDuplicates(): DuplicatePair[] {
+    return findDuplicateSkills(this.skills());
+  }
+
+  /** Publishes a proven project skill to the user catalog. */
+  promote(name: string, registry: SkillRegistry | undefined): PromotionResult {
+    const skill = this.skills().find((candidate) => candidate.name === name);
+    if (skill === undefined) return { ok: false, reason: `unknown skill "${name}"` };
+    const usage = registry?.usageFor(name);
+    const result = publishProjectSkill(
+      skill,
+      join(homedir(), ".carls", "skills"),
+      usage === undefined ? undefined : { uses: usage.uses, needsWork: usage.needsWork },
+    );
+    if (result.ok) registry?.refresh();
+    return result;
+  }
+
+  /** Disables a skill reversibly, refusing when an active skill depends on it. */
+  archive(name: string, registry: SkillRegistry | undefined): ArchiveResult {
+    const skills = this.skills();
+    const skill = skills.find((candidate) => candidate.name === name);
+    if (skill === undefined) return { ok: false, reason: `unknown skill "${name}"` };
+    const result = disableSkill(skill, new SkillGraph(skills));
+    if (result.ok) registry?.refresh();
+    return result;
   }
 }

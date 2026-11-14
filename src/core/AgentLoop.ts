@@ -22,6 +22,8 @@ import { fileStateCache } from "./FileStateCache.js";
 import type { SkillRegistry } from "../skills/SkillRegistry.js";
 import { discoverSkillsForGoal } from "../skills/SkillDiscovery.js";
 import { routeIntent, type ExpertRole, type IntentDecision } from "./IntentRouter.js";
+import { EvidenceTracker, evaluateEvidence, EVIDENCE_CORRECTION, isVerificationCommand } from "./EvidenceGate.js";
+import { applyToolTokenBudget } from "./ToolTokenBudget.js";
 
 /**
  * How many independent read-only calls one assistant turn may run at once.
@@ -302,10 +304,17 @@ export class AgentLoop {
     const body = result.ok
       ? result.output
       : `${result.error ?? "error"}\n${result.output}`.trim();
+    const tool = this.deps.registry.get(toolUse.name);
+    const category = tool?.category ?? (tool?.readOnly === true ? "read" : "write");
+    const budgeted = applyToolTokenBudget(this.deps.contextManager.truncateObservation(redact(body)), {
+      toolName: toolUse.name,
+      category,
+      modelWindow: this.deps.config.contextWindow,
+    });
     return {
       type: "tool_result",
       tool_use_id: toolUse.id,
-      content: this.deps.contextManager.truncateObservation(redact(body)),
+      content: budgeted.text,
       is_error: !result.ok,
     };
   }
@@ -559,6 +568,8 @@ export class AgentLoop {
     const creationRequest = powerMode || isCreationRequest(goal);
     let madeChanges = false;
     let lazyCorrections = 0;
+    const evidence = new EvidenceTracker();
+    let evidenceGateFired = false;
 
     for (let step = 0; step < maxSteps; step++) {
       if (ctx.signal.aborted) {
@@ -736,6 +747,28 @@ export class AgentLoop {
           this.finishTools(streamTools);
           continue;
         }
+        // Evidence gate: a success claim after an unverified write is the
+        // expensive failure mode. Fire at most once per turn and give the model
+        // a real verification step before it can close.
+        if (!evidenceGateFired) {
+          const gate = evaluateEvidence({ ...evidence.snapshot(), finalText: text });
+          if (gate.trigger) {
+            evidenceGateFired = true;
+            this.deps.events?.emit("evidence.gate", {
+              reason: gate.reason ?? "unverified success claim",
+              pendingWrites: evidence.pendingWrites,
+              at: Date.now(),
+            });
+            const correction: Message = {
+              role: "user",
+              content: [{ type: "text", text: EVIDENCE_CORRECTION }],
+            };
+            history.push(correction);
+            this.deps.session.recordMessage(correction);
+            this.finishTools(streamTools);
+            continue;
+          }
+        }
         // A provider that emitted a tool call and then dropped it must not leave
         // a prefetched read running after the turn is already over.
         this.finishTools(streamTools);
@@ -782,6 +815,25 @@ export class AgentLoop {
             .take(call)
             .then((prefetched) => this.runToolUse(toolUse, ctx, options, filesTouched, prefetched));
         });
+        // A failed write did not change the workspace, so it is not a pending
+        // write. A verification that exits non-zero still ran: it is evidence
+        // of a check (and of a failure to fix), not evidence that no check ran.
+        for (let offset = 0; offset < batch.length; offset++) {
+          const call = batch[offset];
+          const block = blocks[offset];
+          if (call === undefined || block?.type !== "tool_result") continue;
+          if (!block.is_error && WRITE_TOOLS.has(call.name)) evidence.recordWrite(call.name);
+          if (call.name === "bash") {
+            const command = (call.input as { command?: unknown }).command;
+            if (typeof command === "string" && isVerificationCommand(command)) {
+              evidence.recordVerification(command);
+            }
+          }
+          if (call.name === "lsp") {
+            const action = (call.input as { action?: unknown }).action;
+            if (action === undefined || action === "diagnostics") evidence.recordVerification("lsp diagnostics");
+          }
+        }
         results.push(...blocks);
       }
 
