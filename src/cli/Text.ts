@@ -118,8 +118,15 @@ export function terminalDimension(columns: number | undefined, fallback = 80): n
  */
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
-  const minutes = Math.floor(ms / 60_000);
-  const seconds = Math.round((ms % 60_000) / 1000);
+  // Minutes and seconds are derived from one floored total. Rounding the minute
+  // and the second remainder independently lets them disagree, which prints an
+  // impossible field: 119_999ms became "1m60s" and 59_999ms became "60s".
+  const totalSeconds = Math.floor(ms / 1000);
+  if (totalSeconds < 60) {
+    const totalTenths = Math.floor(ms / 100);
+    return totalTenths < 100 ? `${(totalTenths / 10).toFixed(1)}s` : `${totalSeconds}s`;
+  }
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
   return `${minutes}m${seconds.toString().padStart(2, "0")}s`;
 }

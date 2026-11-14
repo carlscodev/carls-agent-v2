@@ -1354,6 +1354,20 @@ describe("turn reporting", () => {
     expect(formatDuration(65_000)).toBe("1m05s");
   });
 
+  it("never emits an out-of-range second field at a minute boundary", () => {
+    // Rounding the minute and the second remainder separately used to print an
+    // impossible field: 119_999ms read "1m60s" and 59_999ms read "60s".
+    expect(formatDuration(59_999)).toBe("59s");
+    expect(formatDuration(60_000)).toBe("1m00s");
+    expect(formatDuration(119_999)).toBe("1m59s");
+    expect(formatDuration(120_000)).toBe("2m00s");
+    expect(formatDuration(179_999)).toBe("2m59s");
+    for (const ms of [0, 999, 59_999, 60_000, 119_999, 120_000, 3_599_999]) {
+      const seconds = Number(/(\d+)s$/.exec(formatDuration(ms))?.[1] ?? "0");
+      expect(seconds).toBeLessThan(60);
+    }
+  });
+
   it("summarises a finished turn with time, steps and spend", () => {
     const line = turnSummaryLine({ durationMs: 4200, steps: 3, stoppedReason: "completed", tokens: "↑1.2k ↓340" });
     const plain = line.replace(/\u001b\[[0-9;]*m/g, "");
