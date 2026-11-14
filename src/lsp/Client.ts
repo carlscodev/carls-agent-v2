@@ -102,7 +102,10 @@ export class LspClient {
   private readonly child: ChildProcessWithoutNullStreams;
   private buffer: Buffer = Buffer.alloc(0);
   private nextId = 1;
-  private readonly pending = new Map<number, (message: RpcMessage) => void>();
+  private readonly pending = new Map<
+    number,
+    { resolve: (message: RpcMessage) => void; reject: (error: Error) => void }
+  >();
   private readonly diagnostics = new Map<string, LspDiagnostic[]>();
   private readonly waiters = new Map<string, (diagnostics: LspDiagnostic[]) => void>();
   /** Last version sent per uri, so a re-sync uses didChange, not a second didOpen. */
@@ -128,9 +131,9 @@ export class LspClient {
     this.buffer = rest;
     for (const message of messages) {
       if (message.id !== undefined && this.pending.has(message.id)) {
-        const resolve = this.pending.get(message.id);
+        const entry = this.pending.get(message.id);
         this.pending.delete(message.id);
-        resolve?.(message);
+        entry?.resolve(message);
         continue;
       }
       if (message.method === "textDocument/publishDiagnostics") {
@@ -153,13 +156,19 @@ export class LspClient {
         this.pending.delete(id);
         reject(new Error(`language server did not answer ${message.method ?? "request"} within ${timeoutMs} ms`));
       }, timeoutMs);
-      this.pending.set(id, (reply) => {
-        clearTimeout(timer);
-        if (reply.error !== undefined) {
-          reject(new Error(reply.error.message ?? "language server error"));
-          return;
-        }
-        resolve(reply);
+      this.pending.set(id, {
+        resolve: (reply) => {
+          clearTimeout(timer);
+          if (reply.error !== undefined) {
+            reject(new Error(reply.error.message ?? "language server error"));
+            return;
+          }
+          resolve(reply);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
       });
       if (this.closed || !this.child.stdin.writable) {
         clearTimeout(timer);
@@ -386,6 +395,12 @@ export class LspClient {
 
   private finishAll(): void {
     this.closed = true;
+    // A server that exited or failed to spawn will never answer, so reject every
+    // in-flight request now. Without this the caller waits out the full request
+    // timeout (initialize, hover, rename) before it learns the server is gone.
+    const pending = [...this.pending.values()];
+    this.pending.clear();
+    for (const entry of pending) entry.reject(new Error("language server is not running"));
     for (const resolve of this.waiters.values()) resolve([]);
     this.waiters.clear();
   }

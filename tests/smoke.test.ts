@@ -4643,6 +4643,40 @@ process.stdin.on("data", (chunk) => {
     await pool.close();
   });
 
+  it(
+    "fails fast when the server dies mid-request instead of waiting out the timeout",
+    { timeout: 15_000 },
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "carls-lsp-"));
+      const file = join(root, "sample.ts");
+      await writeFile(file, "export const a = 1;\n", "utf8");
+      // A server that exits immediately after spawn: it never answers initialize.
+      const script = join(root, "dead-lsp.mjs");
+      await writeFile(script, "process.exit(0);\n", "utf8");
+
+      const pool = new LspSessionPool({
+        servers: { ".ts": { command: process.execPath, args: [script] } },
+        cwd: root,
+        // A generous timeout that the fix must not need: the exit event has to
+        // reject the in-flight initialize, not the timer.
+        initTimeoutMs: 60_000,
+        diagnosticsTimeoutMs: 60_000,
+      });
+
+      const startedAt = Date.now();
+      const verification = await pool.verify([file]);
+      const elapsed = Date.now() - startedAt;
+
+      expect(verification.clean).toBe(true);
+      expect(verification.checked).toBe(0);
+      expect(verification.unavailable[0]?.key).toBe(".ts");
+      // Rejecting on exit keeps this in the tens of milliseconds; waiting for the
+      // 60 s timeout would make it orders of magnitude slower.
+      expect(elapsed).toBeLessThan(3000);
+      await pool.close();
+    },
+  );
+
   it("maps files to the server by extension and by name", () => {
     const pool = new LspSessionPool({
       servers: { ".ts": { command: "tsserver" }, Makefile: { command: "make-ls" } },
