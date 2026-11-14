@@ -2310,6 +2310,22 @@ describe("updater", () => {
     expect(compareVersions("0.1.0", "0.10.0")).toBe(-1);
   });
 
+  it("orders pre-release identifiers per SemVer 11 instead of comparing them as text", async () => {
+    const { compareVersions } = await import("../src/update/Updater.js");
+    // A numeric identifier compares numerically: 10 is newer than 9, though the
+    // text "alpha.10" sorts before "alpha.9".
+    expect(compareVersions("1.0.0-alpha.10", "1.0.0-alpha.9")).toBe(1);
+    expect(compareVersions("1.0.0-rc.2", "1.0.0-rc.10")).toBe(-1);
+    // Numeric identifiers have lower precedence than alphanumeric ones.
+    expect(compareVersions("1.0.0-1", "1.0.0-alpha")).toBe(-1);
+    expect(compareVersions("1.0.0-alpha", "1.0.0-1")).toBe(1);
+    // A shorter set of identifiers is lower once the shared ones match.
+    expect(compareVersions("1.0.0-alpha", "1.0.0-alpha.1")).toBe(-1);
+    // Identical pre-releases are equal, and a pre-release still loses to release.
+    expect(compareVersions("1.0.0-beta.2", "1.0.0-beta.2")).toBe(0);
+    expect(compareVersions("1.0.0-beta.2", "1.0.0")).toBe(-1);
+  });
+
   it("reads a release, falls back to a tag, and builds a pinned installer plan", async () => {
     const { releaseFromPayload, tagFromPayload, installerPlan } = await import("../src/update/Updater.js");
     expect(releaseFromPayload({ tag_name: "v0.3.0", html_url: "u" })).toEqual({

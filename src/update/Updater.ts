@@ -71,7 +71,38 @@ export function compareVersions(a: string, b: string): number {
   if (left.pre === right.pre) return 0;
   if (left.pre.length === 0) return 1;
   if (right.pre.length === 0) return -1;
-  return left.pre < right.pre ? -1 : 1;
+  return comparePrerelease(left.pre, right.pre);
+}
+
+/**
+ * Compares two pre-release strings per SemVer §11: split on `.`, numeric
+ * identifiers compare numerically, alphanumeric ones compare lexically, and a
+ * numeric identifier always sorts below an alphanumeric one. A plain string
+ * compare ranked `alpha.10` below `alpha.9` and `rc.2` above `rc.10`, which is
+ * the wrong answer for `carls update` on a numbered pre-release tag.
+ */
+function comparePrerelease(a: string, b: string): number {
+  const left = a.split(".");
+  const right = b.split(".");
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index++) {
+    const x = left[index];
+    const y = right[index];
+    // Fewer identifiers has lower precedence once the shared ones match.
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    const xNumeric = /^\d+$/.test(x);
+    const yNumeric = /^\d+$/.test(y);
+    if (xNumeric && yNumeric) {
+      const xNumber = Number.parseInt(x, 10);
+      const yNumber = Number.parseInt(y, 10);
+      if (xNumber !== yNumber) return xNumber < yNumber ? -1 : 1;
+      continue;
+    }
+    if (xNumeric !== yNumeric) return xNumeric ? -1 : 1;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
 }
 
 function splitVersion(version: string): { nums: number[]; pre: string } {
