@@ -209,6 +209,38 @@ describe("Phase 14 ToolTokenBudget", () => {
     expect(result.truncated).toBe(false);
     expect(result.text).toBe("small output");
   });
+
+  it("cuts a single-line observation that has no middle line to drop", () => {
+    // A minified file, a one-line JSON blob or a one-row error: the line-based
+    // pass finds no middle to remove, so the whole payload would reach the model.
+    const text = "x".repeat(200_000);
+    const result = applyToolTokenBudget(text, { toolName: "bash", maxTokens: 3000 });
+
+    expect(result.truncated).toBe(true);
+    expect(estimateTokens(result.text)).toBeLessThanOrEqual(result.budgetTokens);
+    // The head and the tail are both preserved; only the middle is dropped.
+    expect(result.text.startsWith("x")).toBe(true);
+    expect(result.text.endsWith("x")).toBe(true);
+    expect(result.text).toContain("characters");
+    expect(result.text).toContain("tokens omitted");
+    expect(result.omittedTokens).toBeGreaterThan(0);
+  });
+
+  it("cuts an oversized two-line observation by characters, not lines", () => {
+    const text = `${"a".repeat(100_000)}\n${"b".repeat(100_000)}`;
+    const result = applyToolTokenBudget(text, { toolName: "bash", maxTokens: 3000 });
+
+    expect(result.truncated).toBe(true);
+    expect(estimateTokens(result.text)).toBeLessThanOrEqual(result.budgetTokens);
+    expect(result.text.startsWith("a")).toBe(true);
+    expect(result.text.endsWith("b")).toBe(true);
+  });
+
+  it("still returns a short single line untouched", () => {
+    const result = applyToolTokenBudget("one short line", { toolName: "read_file", maxTokens: 200 });
+    expect(result.truncated).toBe(false);
+    expect(result.text).toBe("one short line");
+  });
 });
 
 describe("Phase 14 SubAgentContract and cost forwarding", () => {

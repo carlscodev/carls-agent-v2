@@ -91,6 +91,54 @@ function takeTail(lines: readonly string[], maxChars: number): string[] {
 }
 
 /**
+ * Cuts a one- or two-line observation that has no line boundary to drop.
+ *
+ * A minified file, a single-line JSON blob or a long one-row error has no middle
+ * line to remove, so the line-based pass below finds nothing to omit and would
+ * hand the whole thing to the model. Cutting by characters keeps the head (the
+ * signature, the start of the payload) and the tail (the verdict, the closing
+ * brace) and states how much was dropped.
+ */
+function truncateByChars(text: string, budgetTokens: number): ToolBudgetResult {
+  const budgetChars = charsForTokens(budgetTokens);
+  let headChars = Math.max(1, Math.floor(budgetChars * 0.6));
+  let tailChars = Math.max(0, Math.floor(budgetChars * 0.3));
+
+  const build = (head: number, tail: number): string => {
+    const headPart = text.slice(0, head);
+    const tailPart = tail > 0 ? text.slice(text.length - tail) : "";
+    const omitted = Math.max(0, text.length - headPart.length - tailPart.length);
+    const marker =
+      `… [${omitted} character${omitted === 1 ? "" : "s"} / ~${estimateTokens("x".repeat(omitted))} tokens omitted · ` +
+      "read_file (start_line/end_line) or grep_search to inspect] …";
+    return `${headPart}${marker}${tailPart}`;
+  };
+
+  // The marker has a cost of its own; halve the tail, then the head, until the
+  // rendered observation respects its ceiling. The bound is a safety net: each
+  // step at least halves a window, so it terminates well before it.
+  let result = build(headChars, tailChars);
+  let guard = 0;
+  while (estimateTokens(result) > budgetTokens && guard++ < 64) {
+    if (tailChars > 1) tailChars = Math.floor(tailChars / 2);
+    else if (headChars > 1) headChars = Math.floor(headChars / 2);
+    else break;
+    result = build(headChars, tailChars);
+  }
+
+  const omitted = Math.max(0, text.length - headChars - tailChars);
+  return {
+    text: result,
+    truncated: true,
+    budgetTokens,
+    omittedLines: 0,
+    omittedTokens: estimateTokens("x".repeat(omitted)),
+    headLines: 1,
+    tailLines: tailChars > 0 ? 1 : 0,
+  };
+}
+
+/**
  * Applies the category budget. Text under the ceiling is returned untouched;
  * larger text is cut to 60% head + 30% tail and an explicit middle marker.
  */
@@ -98,7 +146,7 @@ export function applyToolTokenBudget(text: string, options: ToolBudgetOptions): 
   const budgetTokens = tokenBudgetFor(options);
   const lines = text.split("\n");
   const totalTokens = estimateTokens(text);
-  if (totalTokens <= budgetTokens || lines.length <= 2) {
+  if (totalTokens <= budgetTokens) {
     return {
       text,
       truncated: false,
@@ -109,6 +157,10 @@ export function applyToolTokenBudget(text: string, options: ToolBudgetOptions): 
       tailLines: 0,
     };
   }
+
+  // One or two lines cannot leave a middle for the line-based pass to remove, so
+  // an oversized one (a minified file, a one-line JSON) is cut by characters.
+  if (lines.length <= 2) return truncateByChars(text, budgetTokens);
 
   const headChars = charsForTokens(Math.max(1, Math.floor(budgetTokens * 0.6)));
   const tailChars = charsForTokens(Math.max(1, Math.floor(budgetTokens * 0.3)));
