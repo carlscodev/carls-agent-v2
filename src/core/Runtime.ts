@@ -18,6 +18,7 @@ import { FileEdit } from "../tools/FileEdit.js";
 import { GlobFiles } from "../tools/GlobFiles.js";
 import { GrepSearch } from "../tools/GrepSearch.js";
 import { BashExecution } from "../tools/BashExecution.js";
+import { BgLogs, BgStart, BgStop } from "../tools/ProcessTools.js";
 import { DelegateTask } from "../tools/DelegateTask.js";
 import { RepoMap } from "./RepoMap.js";
 import { RepoMapTool } from "../tools/RepoMapTool.js";
@@ -105,6 +106,7 @@ import { SubAgentPool } from "./SubAgentPool.js";
 import { AgentLoop, type RunOptions } from "./AgentLoop.js";
 import { McpClient } from "../mcp/McpClient.js";
 import { EventBus } from "./EventBus.js";
+import { ProcessSentinel } from "./ProcessSentinel.js";
 import type { Checkpoint as ShadowCheckpoint } from "../security/ShadowGit.js";
 import { autoResolveAskUser, type AskUserHandler, type AskUserPayload, type AskUserResult } from "../types/askUser.js";
 import { buildSystemPrompt } from "./SystemPrompt.js";
@@ -127,6 +129,8 @@ export class Runtime {
   readonly registry: ToolRegistry;
   /** Push bus: views subscribe to turn, tool and plan updates. */
   readonly events: EventBus;
+  /** Background dev-server supervisor; killed on close. */
+  readonly processes: ProcessSentinel;
   /** The subset of `registry` whose schemas are sent to the model. */
   private advertised: ToolRegistry;
   readonly gate: PermissionGate;
@@ -173,6 +177,10 @@ export class Runtime {
     this.session = deps.session;
     this.history = history;
     this.events = new EventBus();
+    this.processes = new ProcessSentinel({
+      cwd: this.config.cwd,
+      onChange: () => this.events.emit("process.updated", { at: Date.now() }),
+    });
     // The HUD reads live tools from these two facts; the bus keeps them exact
     // without a polling loop in the renderer.
     this.events.on("tool.start", ({ id, name, at }) => {
@@ -217,6 +225,9 @@ export class Runtime {
       new GrepSearch(),
       new RepoMapTool(this.repoMap),
       new BashExecution(),
+      new BgStart(),
+      new BgLogs(),
+      new BgStop(),
       new DelegateTask(),
       new TodoWrite(),
       new AskUserTool(),
@@ -333,6 +344,7 @@ export class Runtime {
       compaction: this.compaction,
       events: this.events,
       skillRegistry: this.skills,
+      getOperatorRules: () => this.operatorMemory.activeTexts(),
     });
   }
 
@@ -350,6 +362,7 @@ export class Runtime {
       spawnSubAgentPool: (tasks) => this.subAgentPool.run(tasks),
       subAgentPoolLimit: this.subAgentPool.limit,
       askUser: (payload: AskUserPayload) => this.askUser(payload),
+      processes: this.processes,
     };
   }
 
@@ -694,6 +707,9 @@ export class Runtime {
   flushState(): void {
     this.session.flush();
     this.dag.save();
+    // `disposeAll` kills synchronously before its first await, so this is safe
+    // even when the caller is about to exit; close() awaits the full reap.
+    void this.processes.disposeAll();
   }
 
   /** The REPL installs the keyboard widget here; tests may install a script. */
@@ -807,6 +823,7 @@ export class Runtime {
   }
 
   async close(): Promise<void> {
+    await this.processes.disposeAll();
     await this.hooks.sessionEnd({ sessionId: this.session.id });
     await Promise.all(this.mcpClients.map((client) => client.close().catch(() => undefined)));
     this.shadowGit.dispose();

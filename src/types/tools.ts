@@ -8,6 +8,7 @@ import type { SubAgentRole } from "../core/SubAgent.js";
 import type { SubAgentOutcome, SubAgentTask } from "../core/SubAgentPool.js";
 import type { PersistentTaskDAG } from "../core/PersistentTaskDAG.js";
 import type { AskUserHandler } from "./askUser.js";
+import type { ProcessSentinel } from "../core/ProcessSentinel.js";
 
 export interface ToolContext {
   cwd: string;
@@ -35,6 +36,8 @@ export interface ToolContext {
    * runs without it resolves the defaults itself.
    */
   askUser?: AskUserHandler;
+  /** Background dev-server supervisor, when the runtime provides one. */
+  processes?: ProcessSentinel;
 }
 
 export interface ToolResult {

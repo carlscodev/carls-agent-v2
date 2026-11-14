@@ -23,6 +23,7 @@ import type { SkillRegistry } from "../skills/SkillRegistry.js";
 import { discoverSkillsForGoal } from "../skills/SkillDiscovery.js";
 import { routeIntent, type ExpertRole, type IntentDecision } from "./IntentRouter.js";
 import { EvidenceTracker, evaluateEvidence, EVIDENCE_CORRECTION, isVerificationCommand } from "./EvidenceGate.js";
+import { TaskHorizonRouter, describeSnapshot } from "./TaskHorizonRouter.js";
 import { applyToolTokenBudget } from "./ToolTokenBudget.js";
 
 /**
@@ -52,16 +53,30 @@ const LAZY_CODE_LANGUAGES: ReadonlySet<string> = new Set([
   "tsx",
   "jsx",
   "ts",
+  "typescript",
   "js",
+  "javascript",
   "css",
+  "scss",
   "vue",
   "svelte",
   "py",
+  "python",
   "go",
+  "golang",
   "rs",
+  "rust",
   "java",
   "c",
   "cpp",
+  "csharp",
+  "cs",
+  "php",
+  "rb",
+  "ruby",
+  "sql",
+  "sh",
+  "bash",
 ]);
 
 /** True when the operator asked for something to be built, not merely explained. */
@@ -70,7 +85,9 @@ export function isCreationRequest(goal: string): boolean {
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
-  return /\b(crea\w*|constru\w*|haz\w*|hacer|build|create|make|genera\w*|desarrolla\w*)\b/.test(normalized);
+  return /\b(crea\w*|constru\w*|haz\w*|hacer|build|create|make|genera\w*|desarrolla\w*|implementa\w*|scaffold\w*|monta\w*|levanta\w*|disena\w*|design)\b/.test(
+    normalized,
+  );
 }
 
 /** Detects a long fenced source block that should have been written to disk. */
@@ -88,9 +105,31 @@ export function lazyCodeDump(text: string): { language: string; lines: number } 
   }
 }
 
+/** Stable fingerprint of a tool call so repeated identical failures are caught. */
+function toolCallSignature(name: string, input: unknown): string {
+  try {
+    if (input !== null && typeof input === "object" && !Array.isArray(input)) {
+      const sorted = Object.keys(input as Record<string, unknown>)
+        .sort()
+        .reduce<Record<string, unknown>>((acc, key) => {
+          acc[key] = (input as Record<string, unknown>)[key];
+          return acc;
+        }, {});
+      return `${name}:${JSON.stringify(sorted)}`;
+    }
+    return `${name}:${JSON.stringify(input)}`;
+  } catch {
+    return `${name}:${String(input)}`;
+  }
+}
+
+/** Corrective guidance appended to a repeated identical failing tool result. */
+export const LOOP_STALL_WARNING =
+  "[SISTEMA - ANTI-LOOP]: Has repetido exactamente la misma llamada fallida. PROHIBIDO volver a invocarla con los mismos argumentos: inspecciona el contexto real con read_file / grep_search, analiza la causa raíz del error y cambia de estrategia.";
+
 /** The corrective observation injected when the model tries to chat code at us. */
 export const EXECUTION_FIRST_CORRECTION =
-  "[SISTEMA]: Violación de protocolo Execution-First. No pegues el código en el chat. Usa write_file / edit_file ahora mismo para escribir estos archivos directamente en el disco y verifica su funcionamiento.";
+  "[SISTEMA]: Violación crítica de protocolo Execution-First (LAW 1). Está PROHIBIDO volcar el código fuente en el chat esperando que el operador cree los archivos. Invoca write_file, write_many o edit_file AHORA MISMO para materializar todos los archivos directamente en el disco y ejecuta una verificación real antes de responder.";
 
 /**
  * The non-negotiable contract appended to a power-mode turn. The operator asked
@@ -100,12 +139,12 @@ export const EXECUTION_FIRST_CORRECTION =
 export function POWER_MODE_MANDATE(role: ExpertRole): string {
   return [
     "",
-    "[MODO POTENCIA ACTIVO] El operador pidió construir algo real. Cumple este contrato sin excepciones:",
-    `- Rol experto activo: ${role}. Actúa con el criterio de ese especialista senior.`,
-    "- Paso 1 obligatorio: crea primero el plan con plan_task (tareas atómicas y verificables) antes de escribir código.",
-    "- Escribe TODOS los archivos reales en disco con write_file / edit_file. Está PROHIBIDO escupir el código en el chat.",
-    "- Verifica el resultado: ejecuta tests, build o el comando de arranque con bash y arregla lo que falle.",
-    "- No declares la tarea terminada hasta que el proyecto funcione de punta a punta sobre el disco.",
+    "[MODO POTENCIA ACTIVO — ARQUITECTURA DE HIPER-AGENTE] El operador pidió construir ingeniería real. Cumple este contrato sin excepciones:",
+    `- Rol experto activo: ${role}. Opera con el rigor técnico, criterio estético y precisión de un Principal Engineer en esa especialidad.`,
+    "- Fase 1 (Inspección + Plan): explora el directorio en un único lote paralelo (glob_files / repo_map / read_file) y registra el grafo de ejecución con plan_task (nodos atómicos: contratos/tipos -> núcleo -> UI/adaptadores -> pruebas/build).",
+    "- Fase 2 (Ejecución 100% en disco): escribe TODOS los archivos reales con write_file / write_many / edit_file. Cero bloques largos de código en el chat, cero `// TODO`, cero placeholders o lógica truncada.",
+    "- Fase 3 (Verificación empírica): ejecuta typecheck, tests, linter o build real con bash / lsp y corrige cualquier error de raíz hasta obtener código de salida 0.",
+    "- Fase 4 (Cierre limpio): avanza los nodos con advance_task y entrega únicamente un resumen ejecutivo conciso con archivos creados/modificados, verificación ejecutada y comando de uso.",
   ].join("\n");
 }
 
@@ -144,6 +183,8 @@ export interface AgentLoopDeps {
   events?: EventBus;
   /** Skill catalog used for the per-turn auto-discovery block. */
   skillRegistry?: SkillRegistry;
+  /** Learned operator preferences/corrections injected into non-fast-path turns. */
+  getOperatorRules?: () => string[];
 }
 
 export interface RunOptions {
@@ -545,6 +586,7 @@ export class AgentLoop {
             // Power mode injects the domain skills at full length: the templates
             // and checklists are the point, so the body cap is lifted.
             ...(powerMode ? { limit: 3, minScore: 0, bodyChars: 8000 } : {}),
+            ...(decision.skillHints.length > 0 ? { hints: decision.skillHints } : {}),
           })
         : { relevant: [], block: "" };
     // A discovered skill is injected silently into the prompt, so the only way a
@@ -558,6 +600,25 @@ export class AgentLoop {
     }
     const baseSystem = this.buildSystemPrompt(this.deps.config.mode);
     let turnSystem = discovery.block.length > 0 ? `${baseSystem}\n\n${discovery.block}` : baseSystem;
+    if (!fastPath) {
+      const operatorRules = this.deps.getOperatorRules?.() ?? [];
+      if (operatorRules.length > 0) {
+        const rulesBlock = [
+          "[Operator rules in force — learned from explicit operator preferences/corrections; obey strictly]:",
+          ...operatorRules.map((rule) => `- ${rule}`),
+        ].join("\n");
+        turnSystem = `${turnSystem}\n\n${rulesBlock}`;
+      }
+      const dagSnapshot = this.deps.toolContext.dag?.snapshot();
+      const hasActivePlan = dagSnapshot !== undefined && dagSnapshot.nodes.length > 0 && !dagSnapshot.done;
+      const horizon = new TaskHorizonRouter().decide({ goal, hasActivePlan });
+      if (horizon.horizon === "long") {
+        const dagHint = hasActivePlan
+          ? `Active DAG on disk (${describeSnapshot(dagSnapshot)}). Call resume_task / read_task_graph first and continue with advance_task.`
+          : "Long-horizon multi-step work detected. Structure your execution graph with plan_task and advance nodes with advance_task so state survives compaction or restarts.";
+        turnSystem = `${turnSystem}\n\n[Horizon: LONG] ${dagHint}`;
+      }
+    }
     if (powerMode) {
       turnSystem = `${turnSystem}\n\n${POWER_MODE_MANDATE(decision.role ?? "Systems Architect")}`;
     }
@@ -569,7 +630,8 @@ export class AgentLoop {
     let madeChanges = false;
     let lazyCorrections = 0;
     const evidence = new EvidenceTracker();
-    let evidenceGateFired = false;
+    let evidenceCorrections = 0;
+    const failureStreak = new Map<string, number>();
 
     for (let step = 0; step < maxSteps; step++) {
       if (ctx.signal.aborted) {
@@ -729,12 +791,12 @@ export class AgentLoop {
       if (toolUses.length === 0) {
         // Anti-Lazy guard: a creation request answered with a long fenced code
         // block and no write is a protocol violation, not a finished task. Nudge
-        // the model once, then let the normal loop continue so it can write.
+        // the model up to twice, then let the normal loop continue so it can write.
         if (
           creationRequest &&
           !madeChanges &&
           this.deps.config.mode !== "plan" &&
-          lazyCorrections < 1 &&
+          lazyCorrections < 2 &&
           lazyCodeDump(text) !== undefined
         ) {
           lazyCorrections += 1;
@@ -747,13 +809,13 @@ export class AgentLoop {
           this.finishTools(streamTools);
           continue;
         }
-        // Evidence gate: a success claim after an unverified write is the
-        // expensive failure mode. Fire at most once per turn and give the model
-        // a real verification step before it can close.
-        if (!evidenceGateFired) {
+        // Evidence gate: a success claim after an unverified write (or a failed
+        // verification) is the expensive failure mode. Fire up to twice per turn
+        // so both "forgot to verify" and "verified red, claimed green" get caught.
+        if (evidenceCorrections < 2) {
           const gate = evaluateEvidence({ ...evidence.snapshot(), finalText: text });
           if (gate.trigger) {
-            evidenceGateFired = true;
+            evidenceCorrections += 1;
             this.deps.events?.emit("evidence.gate", {
               reason: gate.reason ?? "unverified success claim",
               pendingWrites: evidence.pendingWrites,
@@ -816,22 +878,37 @@ export class AgentLoop {
             .then((prefetched) => this.runToolUse(toolUse, ctx, options, filesTouched, prefetched));
         });
         // A failed write did not change the workspace, so it is not a pending
-        // write. A verification that exits non-zero still ran: it is evidence
-        // of a check (and of a failure to fix), not evidence that no check ran.
+        // write. A verification that exits non-zero is recorded as failed so
+        // pendingWrites stays positive until a subsequent check passes.
         for (let offset = 0; offset < batch.length; offset++) {
           const call = batch[offset];
           const block = blocks[offset];
           if (call === undefined || block?.type !== "tool_result") continue;
+          const sig = toolCallSignature(call.name, call.input);
+          if (block.is_error) {
+            const count = (failureStreak.get(sig) ?? 0) + 1;
+            failureStreak.set(sig, count);
+            if (count >= 2) {
+              blocks[offset] = {
+                ...block,
+                content: `${block.content}\n\n${LOOP_STALL_WARNING}`,
+              };
+            }
+          } else {
+            failureStreak.delete(sig);
+          }
           if (!block.is_error && WRITE_TOOLS.has(call.name)) evidence.recordWrite(call.name);
           if (call.name === "bash") {
             const command = (call.input as { command?: unknown }).command;
             if (typeof command === "string" && isVerificationCommand(command)) {
-              evidence.recordVerification(command);
+              evidence.recordVerification(command, !block.is_error);
             }
           }
           if (call.name === "lsp") {
             const action = (call.input as { action?: unknown }).action;
-            if (action === undefined || action === "diagnostics") evidence.recordVerification("lsp diagnostics");
+            if (action === undefined || action === "diagnostics") {
+              evidence.recordVerification("lsp diagnostics", !block.is_error);
+            }
           }
         }
         results.push(...blocks);

@@ -44,32 +44,33 @@ export const SUBAGENT_ROLES: Record<SubAgentRole, RoleSpec> = {
   explorer: {
     description: "Map where things live and how they connect.",
     instruction:
-      "Report the files and symbols that matter, the call path between them, and anything surprising. Do not propose changes.",
-    maxSteps: 15,
+      "Batch grep_search, glob_files, repo_map and read_file in parallel. Report the exact file paths, exported symbols, call graph between them, and architectural invariants or surprises. Do not propose edits.",
+    maxSteps: 16,
   },
   planner: {
     description: "Turn a goal into an ordered, concrete plan.",
     instruction:
-      "Produce an ordered list of concrete steps, each naming the file and symbol it touches, plus the risks and the order they must happen in. Do not write code.",
-    maxSteps: 12,
+      "Inspect types/contracts and call sites first. Produce an ordered list of atomic steps (contracts -> core -> adapters/UI -> tests), each naming the exact file, symbol, invariants and failure risks. Do not write code.",
+    maxSteps: 14,
   },
   auditor: {
     description: "Hunt for bugs, security issues and dead code.",
     instruction:
-      "Look for real defects: incorrect edge cases, resource leaks, unhandled errors, unsafe input handling and unreachable code. Cite file and line. Rank by severity and do not report style preferences.",
-    maxSteps: 20,
+      "Hunt for real, high-signal defects: broken invariants, race conditions, off-by-one/edge-case bugs, resource leaks, swallowed errors, injection/traversal flaws, and unreachable code. Cite exact file:line, rank by severity, and omit stylistic nitpicks.",
+    maxSteps: 22,
   },
   tester: {
     description: "Find how the project is verified and what is untested.",
     instruction:
-      "Identify the test command, the existing coverage of the area under study, and the specific cases that are missing. Name the files a new test would live in.",
-    maxSteps: 15,
+      "Identify the exact test/typecheck/lint commands, map existing coverage and test helpers for the target module, and list concrete missing edge-case scenarios plus the exact test file where they belong.",
+    maxSteps: 16,
   },
 };
 
-const SUBAGENT_CONTRACT = `You are an isolated sub-agent. You have READ-ONLY tools.
-Investigate the goal thoroughly, then stop. Do not attempt edits.
-When done, reply with a single JSON object and nothing else, shaped exactly:
+const SUBAGENT_CONTRACT = `You are an isolated specialist sub-agent with READ-ONLY tools.
+Batch independent read_file, multi_read, grep_search, glob_files and repo_map calls in parallel to minimise turns.
+Verify every claim against actual source lines; never guess file paths or symbol names, and never attempt edits.
+When finished, reply with a single valid JSON object and nothing else, shaped exactly:
 {"summary": string, "findings": string[], "relevantFiles": string[], "suggestedCommands": string[]}`;
 
 /**

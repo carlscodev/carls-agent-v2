@@ -93,6 +93,9 @@ export const CORE_TOOLS: string[] = [
   "glob_files",
   "grep_search",
   "bash",
+  "bg_start",
+  "bg_logs",
+  "bg_stop",
   "todo_write",
   // A local model still needs the one sanctioned way to ask before guessing.
   "ask_user",

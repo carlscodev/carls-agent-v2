@@ -116,6 +116,11 @@ export interface ReasoningDeltaEvent {
   at: number;
 }
 
+/** A managed background process changed state; the HUD refreshes its badge. */
+export interface ProcessUpdatedEvent {
+  at: number;
+}
+
 /** The anti-hallucination gate blocked a success claim without verification. */
 export interface EvidenceGateEvent {
   reason: string;
@@ -147,6 +152,7 @@ export interface CarlsEventMap {
   "reasoning.delta": ReasoningDeltaEvent;
   "agent.thought": AgentThoughtEvent;
   "evidence.gate": EvidenceGateEvent;
+  "process.updated": ProcessUpdatedEvent;
 }
 
 export type CarlsEventName = keyof CarlsEventMap;

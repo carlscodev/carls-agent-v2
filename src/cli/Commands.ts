@@ -344,11 +344,28 @@ export const COMMANDS: CommandSpec[] = [
   {
     name: "/undo",
     usage: "/undo [n]",
-    summary: "Revert the last agent file edit(s) from a snapshot",
+    summary: "Step back through whole-tree checkpoints, or revert the last agent edit(s)",
     run: (args, ctx) => {
+      const shadow = ctx.runtime.shadowGit;
+      if (shadow.enabled && shadow.undoDepth > 0) {
+        try {
+          const move = shadow.undo();
+          if (move !== undefined) {
+            fileStateCache.invalidateUnder(ctx.runtime.config.cwd);
+            ctx.runtime.setLastCheckpoint(move.checkpoint);
+            printInfo(`Undo -> ${move.checkpoint.id} "${move.checkpoint.label}" · restored ${move.restored} file(s)`);
+            if (move.deleted.length > 0) printInfo(`Removed ${move.deleted.length} file(s) added since then.`);
+            if (move.captured !== undefined) printInfo(`Captured pre-undo state as ${move.captured.id}; /redo returns to it.`);
+            return false;
+          }
+        } catch (error) {
+          printError(`Undo failed: ${(error as Error).message}`);
+          return false;
+        }
+      }
       const store = ctx.runtime.backups;
       if (store.list().length === 0) {
-        printInfo("No edits to undo in this session.");
+        printInfo("No checkpoints or edits to undo in this session.");
         return false;
       }
       const count = Math.max(1, Number.parseInt(args[0] ?? "1", 10) || 1);
@@ -359,8 +376,23 @@ export const COMMANDS: CommandSpec[] = [
   {
     name: "/redo",
     usage: "/redo [n]",
-    summary: "Re-apply the last undone edits",
+    summary: "Step forward through the TimeMachine, or re-apply the last undone edits",
     run: (args, ctx) => {
+      const shadow = ctx.runtime.shadowGit;
+      if (shadow.enabled && shadow.redoDepth > 0) {
+        try {
+          const move = shadow.redo();
+          if (move !== undefined) {
+            fileStateCache.invalidateUnder(ctx.runtime.config.cwd);
+            ctx.runtime.setLastCheckpoint(move.checkpoint);
+            printInfo(`Redo -> ${move.checkpoint.id} "${move.checkpoint.label}" · restored ${move.restored} file(s)`);
+            return false;
+          }
+        } catch (error) {
+          printError(`Redo failed: ${(error as Error).message}`);
+          return false;
+        }
+      }
       const store = ctx.runtime.backups;
       if (store.redoDepth() === 0) {
         printInfo("Nothing to redo. /undo first, then /redo puts it back.");
@@ -368,6 +400,53 @@ export const COMMANDS: CommandSpec[] = [
       }
       const count = Math.max(1, Number.parseInt(args[0] ?? "1", 10) || 1);
       for (const line of store.redo(count)) printInfo(line);
+      return false;
+    },
+  },
+  {
+    name: "/timeline",
+    usage: "/timeline",
+    summary: "Show the checkpoint timeline with undo and redo availability",
+    run: (_args, ctx) => {
+      const entries = ctx.runtime.shadowGit.timeline();
+      if (entries.length === 0) {
+        printInfo("No checkpoints yet. Create one with /checkpoint.");
+        return false;
+      }
+      printPanel(
+        "Timeline",
+        entries.map((entry) => {
+          const marker = entry.direction === "current" ? `${pc.green("❯ ●")}` : `${pc.gray("┃")} `;
+          const stats = `${pc.green(`+${entry.insertions ?? 0}`)} / ${pc.red(`-${entry.deletions ?? 0}`)}`;
+          const direction =
+            entry.direction === "current"
+              ? pc.green("[current]")
+              : entry.direction === "redo"
+                ? pc.gray("[redo]")
+                : pc.gray("[undo]");
+          return `${marker} ${entry.id}  ${stats}  ${entry.label}  ${direction}`;
+        }),
+      );
+      return false;
+    },
+  },
+  {
+    name: "/ps",
+    usage: "/ps",
+    summary: "List background dev servers and watchers, their ports and error counts",
+    run: (_args, ctx) => {
+      const all = ctx.runtime.processes.list();
+      if (all.length === 0) {
+        printInfo("No background processes.");
+        return false;
+      }
+      printPanel(
+        "Background processes",
+        all.map(
+          (process) =>
+            `${process.id}  ${process.name}  ${process.status}  pid ${process.pid ?? "-"}  port ${process.port ?? "-"}  errors ${process.errorCount}`,
+        ),
+      );
       return false;
     },
   },

@@ -12,21 +12,32 @@ export interface EvidenceSnapshot {
   pendingWrites: number;
   lastWriteAt: number;
   lastVerificationAt: number;
+  lastVerificationPassed: boolean;
+  lastVerificationCommand?: string;
 }
 
 export class EvidenceTracker {
   private pending = 0;
+  private clock = 0;
   private writeAt = 0;
   private verificationAt = 0;
+  private verificationPassed = true;
+  private verificationCommand: string | undefined;
 
   recordWrite(_toolName: string): void {
     this.pending += 1;
-    this.writeAt = Date.now();
+    this.clock += 1;
+    this.writeAt = this.clock;
   }
 
-  recordVerification(_command: string): void {
-    this.pending = 0;
-    this.verificationAt = Date.now();
+  recordVerification(command: string, passed = true): void {
+    this.clock += 1;
+    this.verificationAt = this.clock;
+    this.verificationPassed = passed;
+    this.verificationCommand = command;
+    if (passed) {
+      this.pending = 0;
+    }
   }
 
   get pendingWrites(): number {
@@ -41,29 +52,40 @@ export class EvidenceTracker {
     return this.verificationAt;
   }
 
+  get lastVerificationPassed(): boolean {
+    return this.verificationPassed;
+  }
+
+  get lastVerificationCommand(): string | undefined {
+    return this.verificationCommand;
+  }
+
   snapshot(): EvidenceSnapshot {
     return {
       pendingWrites: this.pending,
       lastWriteAt: this.writeAt,
       lastVerificationAt: this.verificationAt,
+      lastVerificationPassed: this.verificationPassed,
+      ...(this.verificationCommand !== undefined ? { lastVerificationCommand: this.verificationCommand } : {}),
     };
   }
 }
 
 /** Commands whose first executable is a real build/test/typecheck runner. */
 const VERIFICATION_PATTERNS: readonly RegExp[] = [
-  /^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|typecheck|build|lint|check)\b/i,
-  /^(?:npx\s+)?(?:vitest|jest|tsc)\b/i,
+  /^(?:(?:npm|pnpm|yarn|bun)(?:\.cmd|\.exe)?)\s+(?:run\s+)?(?:test|typecheck|build|lint|check|verify)\b/i,
+  /^(?:npx(?:\.cmd|\.exe)?\s+)?(?:vitest|jest|tsc|biome|eslint|ruff|pyright)\b/i,
   /^pytest\b/i,
-  /^python\s+-m\s+pytest\b/i,
+  /^python3?\s+-m\s+(?:pytest|unittest|mypy|py_compile)\b/i,
   /^mypy\b/i,
-  /^cargo\s+test\b/i,
-  /^go\s+test\b/i,
-  /^mvn\s+(?:test|verify)\b/i,
-  /^gradle\w*\s+(?:test|check)\b/i,
-  /^dotnet\s+test\b/i,
-  /^node\s+--test\b/i,
-  /^(?:make|just)\s+(?:test|check)\b/i,
+  /^cargo\s+(?:test|check|build|clippy)\b/i,
+  /^go\s+(?:test|vet|build)\b/i,
+  /^mvn\s+(?:test|verify|compile)\b/i,
+  /^gradle\w*\s+(?:test|check|build)\b/i,
+  /^dotnet\s+(?:test|build)\b/i,
+  /^node\s+(?:--test|--check|-c)\b/i,
+  /^(?:make|just)\s+(?:test|check|build)\b/i,
+  /^(?:phpunit|rspec|mix\s+test|zig\s+build(?:\s+test)?|deno\s+(?:test|check))\b/i,
   /^lsp(?:\s+diagnostics)?\b/i,
 ];
 
@@ -103,16 +125,21 @@ export function isVerificationCommand(command: string): boolean {
 
 /** A final answer that claims the work is complete. */
 export function claimsSuccess(text: string): boolean {
-  return /\b(listo|funciona|funcion[oó]|done|fixed|passing|completed?|completado|success(?:ful)?|works?)\b/i.test(text);
+  return /\b(listo|funciona|funcion[oó]|solucionad[oa]|corregid[oa]|arreglad[oa]|implementad[oa]|cread[oa]|terminad[oa]|verificad[oa]|done|fixed|resolved|implemented|passing|completed?|completado|success(?:ful)?|works?|ready)\b/i.test(
+    text,
+  );
 }
 
 /** A final answer that admits a blocker, which makes a verification demand noise. */
 export function reportsBlock(text: string): boolean {
-  return /\b(blocked|no puedo|no se pudo|cannot|can't|unable|failed|fall[oó]|errors? found|error:|not working|broken)\b/i.test(text);
+  return /\b(blocked|bloquead[oa]|no puedo|no se pudo|cannot|can't|unable|failed|fall[oó]|errors? found|error:|not working|broken|pendiente de)\b/i.test(
+    text,
+  );
 }
 
-export interface EvidenceEvaluationInput extends EvidenceSnapshot {
+export interface EvidenceEvaluationInput extends Omit<EvidenceSnapshot, "lastVerificationPassed"> {
   finalText: string;
+  lastVerificationPassed?: boolean;
 }
 
 export interface EvidenceEvaluation {
@@ -122,19 +149,28 @@ export interface EvidenceEvaluation {
 
 /**
  * The three-condition gate. It deliberately does not care how many writes there
- * were: one unverified write is enough to make a success claim unsafe.
+ * were: one unverified write — or a verification that exited non-zero followed
+ * by a success claim — is enough to make a green claim unsafe.
  */
 export function evaluateEvidence(input: EvidenceEvaluationInput): EvidenceEvaluation {
   if (input.pendingWrites <= 0) return { trigger: false };
-  if (input.lastVerificationAt > input.lastWriteAt) return { trigger: false };
+  const verifiedAfterWrite = input.lastVerificationAt >= input.lastWriteAt && input.lastVerificationAt > 0;
+  const verificationPassed = input.lastVerificationPassed ?? true;
+  if (verifiedAfterWrite && verificationPassed) return { trigger: false };
   if (!claimsSuccess(input.finalText)) return { trigger: false };
   if (reportsBlock(input.finalText)) return { trigger: false };
+  if (verifiedAfterWrite && !verificationPassed) {
+    return {
+      trigger: true,
+      reason: `the last verification (${input.lastVerificationCommand ?? "check"}) failed, yet the turn claims success without fixing and re-verifying`,
+    };
+  }
   return {
     trigger: true,
     reason: "the turn changed files and claims success without running a real verification after the last write",
   };
 }
 
-/** Corrective observation injected once when the gate fires. */
+/** Corrective observation injected when the gate fires. */
 export const EVIDENCE_CORRECTION =
-  "[SISTEMA]: Evidence gate: este turno escribió archivos y afirmó que funciona sin ejecutar una verificación real después del último cambio. No cierres el turno todavía: ejecuta npm test, npm run typecheck, tsc, pytest, cargo test, go test o lsp diagnostics sobre lo que cambiaste y reporta la salida real. Un `echo \"tests pass\"` no cuenta como evidencia.";
+  "[SISTEMA]: Evidence gate: este turno escribió archivos y afirmó que funciona sin contar con una verificación real exitosa después del último cambio. No cierres el turno todavía: ejecuta npm test, npm run typecheck, tsc --noEmit, pytest, cargo test, go test o lsp diagnostics sobre lo que cambiaste, corrige cualquier fallo si el comando devuelve error, y reporta la evidencia real. Un `echo \"tests pass\"` no cuenta como evidencia.";
