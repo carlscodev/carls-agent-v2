@@ -116,7 +116,15 @@ export function applyHunks(original: string[], hunks: PatchHunk[], fuzz = 3): st
   for (const hunk of hunks) {
     const context = hunk.lines.filter((line) => line.type !== "add");
     const replacement = hunk.lines.filter((line) => line.type !== "remove");
-    const expected = hunk.oldStart - 1 + offset;
+    // A hunk with no context and no removal is a pure insertion. Its `oldStart`
+    // names the line the new lines follow (0 when they go at the top), so the
+    // 0-based insertion point is `oldStart`. A hunk with a context or a removal
+    // starts *at* `oldStart`, i.e. index `oldStart - 1`. The context formula
+    // placed every pure-insertion hunk one line too early: `git diff -U0` emits
+    // `@@ -2,0 +3 @@` for a line inserted after old line 2, which belongs at
+    // index 2, not 1.
+    const base = context.length === 0 ? hunk.oldStart : hunk.oldStart - 1;
+    const expected = base + offset;
 
     const at = locate(result, context.map((line) => line.text), expected, fuzz);
     if (at === -1) {

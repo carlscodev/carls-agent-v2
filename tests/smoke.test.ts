@@ -1420,6 +1420,38 @@ describe("new tools", () => {
     expect(await readFile(file, "utf8")).toBe("one\nTWO\nthree\n");
   });
 
+  it("inserts a pure-insertion hunk after the line its header names", async () => {
+    // `git diff -U0` emits `@@ -2,0 +3 @@` for a line added after old line 2, so
+    // the new line belongs after "two". The old `oldStart - 1` put it before.
+    const file = join(dir, "insert.txt");
+    await writeFile(file, "one\ntwo\nthree\n", "utf8");
+    const tool = new ApplyPatch();
+    const patch = "@@ -2,0 +3 @@ two\n+NEW\n";
+    const result = await tool.run(tool.parse({ path: "insert.txt", patch }), makeContext());
+    expect(result.ok).toBe(true);
+    expect(await readFile(file, "utf8")).toBe("one\ntwo\nNEW\nthree\n");
+  });
+
+  it("inserts a pure-insertion hunk at the end of the file", async () => {
+    const file = join(dir, "append.txt");
+    await writeFile(file, "one\ntwo\nthree\n", "utf8");
+    const tool = new ApplyPatch();
+    const patch = "@@ -3,0 +4 @@ three\n+FOUR\n";
+    const result = await tool.run(tool.parse({ path: "append.txt", patch }), makeContext());
+    expect(result.ok).toBe(true);
+    expect(await readFile(file, "utf8")).toBe("one\ntwo\nthree\nFOUR\n");
+  });
+
+  it("inserts a pure-insertion hunk at the top of the file", async () => {
+    const file = join(dir, "prepend.txt");
+    await writeFile(file, "one\ntwo\n", "utf8");
+    const tool = new ApplyPatch();
+    const patch = "@@ -0,0 +1 @@\n+ZERO\n";
+    const result = await tool.run(tool.parse({ path: "prepend.txt", patch }), makeContext());
+    expect(result.ok).toBe(true);
+    expect(await readFile(file, "utf8")).toBe("ZERO\none\ntwo\n");
+  });
+
   it("rejects a patch whose context does not match", async () => {
     const file = join(dir, "nomatch.txt");
     await writeFile(file, "alpha\n", "utf8");
