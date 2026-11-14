@@ -82,7 +82,16 @@ import { OperatorCognitiveMemory } from "../symbiosis/OperatorMemory.js";
 import { AutoReviewSteeringClassifier } from "../symbiosis/SteeringClassifier.js";
 import { ExecutionReceipt, type Receipt } from "../symbiosis/ExecutionReceipt.js";
 import { PlanTask, AdvanceTask, ReadTaskGraph, ResumeTask } from "../tools/HorizonTools.js";
-import { EvolveSkill, ReviewSkills, SkillHistoryTool, RevertSkill, SkillGraphTool } from "../tools/SkillEvolutionTools.js";
+import {
+  ArchiveSkill,
+  DuplicateSkills,
+  EvolveSkill,
+  PromoteSkill,
+  ReviewSkills,
+  SkillHistoryTool,
+  RevertSkill,
+  SkillGraphTool,
+} from "../tools/SkillEvolutionTools.js";
 import { SessionStore } from "./SessionStore.js";
 import { BackupStore } from "./Backups.js";
 import { CostTracker } from "./CostTracker.js";
@@ -261,6 +270,9 @@ export class Runtime {
       new ResumeTask(),
       new EvolveSkill(),
       new ReviewSkills(),
+      new DuplicateSkills(),
+      new PromoteSkill(),
+      new ArchiveSkill(),
       new SkillHistoryTool(),
       new RevertSkill(),
       new SkillGraphTool(),
@@ -276,7 +288,8 @@ export class Runtime {
 
     this.subAgent = new SubAgent({
       registry: this.registry,
-      createLoop: (registry, maxSteps) => {
+      costTracker: this.cost,
+      createLoop: (registry, maxSteps, costTracker) => {
         const subConfig: ResolvedConfig = {
           ...this.config,
           maxSteps,
@@ -288,7 +301,7 @@ export class Runtime {
           gate: new PermissionGate(subConfig, this.logger, async () => "y"),
           contextManager: this.contextManager,
           session: this.session,
-          costTracker: this.cost,
+          costTracker,
           hooks: this.hooks,
           config: subConfig,
           logger: this.logger,

@@ -1,5 +1,5 @@
 import type { SubAgent, SubAgentRole } from "./SubAgent.js";
-import { parseReport } from "./SubAgent.js";
+import { parseSubAgentContract } from "../subagents/SubAgentContract.js";
 import { mapWithConcurrency } from "../utils/concurrency.js";
 import type { EventBus } from "./EventBus.js";
 
@@ -33,6 +33,12 @@ export interface SubAgentOutcome {
   findings: string[];
   relevantFiles: string[];
   suggestedCommands: string[];
+  filesModified?: string[];
+  commandsExecuted?: string[];
+  verificationPassed?: boolean;
+  verificationEvidence?: string[];
+  tokensUsed?: number;
+  durationMs?: number;
   error?: string;
 }
 
@@ -96,7 +102,7 @@ export class SubAgentPool {
             at: Date.now(),
           });
         });
-        const report = parseReport(raw);
+        const report = parseSubAgentContract(raw);
         this.events?.emit("subagent.status", {
           role: task.role,
           goal: task.goal,
@@ -112,6 +118,12 @@ export class SubAgentPool {
           findings: report.findings,
           relevantFiles: report.relevantFiles,
           suggestedCommands: report.suggestedCommands,
+          filesModified: report.filesModified,
+          commandsExecuted: report.commandsExecuted,
+          verificationPassed: report.verificationPassed,
+          verificationEvidence: report.verificationEvidence,
+          tokensUsed: report.tokensUsed,
+          durationMs: report.durationMs,
         } satisfies SubAgentOutcome;
       } catch (error) {
         this.events?.emit("subagent.status", {
@@ -149,6 +161,9 @@ export function formatOutcomes(outcomes: readonly SubAgentOutcome[]): string {
     const header = `[${index + 1}] ${outcome.role} · ${outcome.goal}`;
     if (!outcome.ok) return `${header}\n  FAILED: ${outcome.error ?? "unknown error"}`;
     const parts = [header, `  ${outcome.summary || "(no summary)"}`];
+    if (outcome.verificationPassed !== undefined) {
+      parts.push(`  observed: ${outcome.verificationPassed ? "verification passed" : "no verification"} · ${outcome.durationMs ?? 0}ms · ${outcome.tokensUsed ?? 0} tokens`);
+    }
     if (outcome.findings.length > 0) {
       parts.push(`  findings:\n${outcome.findings.map((f) => `    - ${f}`).join("\n")}`);
     }

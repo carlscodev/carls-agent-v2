@@ -2,12 +2,20 @@ import type { Message } from "../types/llm.js";
 import type { AgentRunResult } from "../types/agent.js";
 import type { ToolRegistry } from "../tools/ToolRegistry.js";
 import type { AgentLoop } from "./AgentLoop.js";
+import { CostTracker } from "./CostTracker.js";
+import {
+  buildSubAgentContract,
+  parseSubAgentContract,
+  type SubAgentContractResult,
+} from "../subagents/SubAgentContract.js";
 
 export interface SubAgentDeps {
   /** Factory that builds a loop already wired to the read-only tool set. */
-  createLoop: (registry: ToolRegistry, maxSteps: number) => AgentLoop;
+  createLoop: (registry: ToolRegistry, maxSteps: number, costTracker: CostTracker) => AgentLoop;
   registry: ToolRegistry;
   maxSteps?: number;
+  /** Parent cost tracker; the child forwards its usage here. */
+  costTracker?: CostTracker;
 }
 
 export interface SubAgentReport {
@@ -90,7 +98,11 @@ export class SubAgent {
     const spec = SUBAGENT_ROLES[role];
     const maxSteps = this.deps.maxSteps ?? spec.maxSteps;
     const registry = this.deps.registry.readOnlyOnly();
-    const loop = this.deps.createLoop(registry, maxSteps);
+    // Each child keeps its own breakdown and forwards the same usage to the
+    // parent, so the session total is right without losing which child spent it.
+    const childCost = this.deps.costTracker?.child(`${role}: ${goal.slice(0, 40)}`) ?? new CostTracker("unknown");
+    const loop = this.deps.createLoop(registry, maxSteps, childCost);
+    const startedAt = Date.now();
 
     const history: Message[] = [
       {
@@ -111,18 +123,43 @@ export class SubAgent {
           : {}),
       });
     } catch (error) {
-      return JSON.stringify({
-        summary: `Sub-agent failed: ${(error as Error).message}`,
-        findings: [],
-        relevantFiles: [],
-        suggestedCommands: [],
-      } satisfies SubAgentReport);
+      return JSON.stringify(
+        buildSubAgentContract(
+          {
+            summary: `Sub-agent failed: ${(error as Error).message}`,
+            findings: [],
+            relevantFiles: [],
+            suggestedCommands: [],
+          },
+          {
+            filesModified: [],
+            commandsExecuted: [],
+            verificationPassed: false,
+            verificationEvidence: [],
+            tokensUsed: 0,
+            durationMs: Date.now() - startedAt,
+          },
+        ),
+      );
     }
 
     const parsed = parseReport(result.finalText);
-    return JSON.stringify(parsed);
+    const usage = childCost.snapshot();
+    const observed = {
+      filesModified: [] as string[],
+      commandsExecuted: [] as string[],
+      verificationPassed: false,
+      verificationEvidence: [] as string[],
+      tokensUsed: usage.inputTokens + usage.outputTokens,
+      durationMs: Date.now() - startedAt,
+    };
+    return JSON.stringify(buildSubAgentContract(parsed, observed));
   }
 }
+
+/** Re-exported so callers can parse a pool payload through the same contract. */
+export type { SubAgentContractResult };
+export { parseSubAgentContract };
 
 export function parseReport(text: string): SubAgentReport {
   const start = text.indexOf("{");

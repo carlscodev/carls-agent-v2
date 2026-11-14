@@ -116,6 +116,13 @@ export interface ReasoningDeltaEvent {
   at: number;
 }
 
+/** The anti-hallucination gate blocked a success claim without verification. */
+export interface EvidenceGateEvent {
+  reason: string;
+  pendingWrites: number;
+  at: number;
+}
+
 /** A cognitive transition the loop narrates when the model emits no reasoning. */
 export interface AgentThoughtEvent {
   phase: "classify" | "skill" | "reasoning" | "decide" | "note";
@@ -139,6 +146,7 @@ export interface CarlsEventMap {
   "operator.rule": OperatorRuleEvent;
   "reasoning.delta": ReasoningDeltaEvent;
   "agent.thought": AgentThoughtEvent;
+  "evidence.gate": EvidenceGateEvent;
 }
 
 export type CarlsEventName = keyof CarlsEventMap;

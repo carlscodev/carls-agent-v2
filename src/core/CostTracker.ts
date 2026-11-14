@@ -16,6 +16,11 @@ const PRICES: Record<string, ModelPrice> = {
   "deepseek-chat": { input: 0.27, output: 1.1 },
 };
 
+export interface CostChildSnapshot {
+  label: string;
+  cost: CostSnapshot;
+}
+
 export interface CostSnapshot {
   inputTokens: number;
   outputTokens: number;
@@ -23,6 +28,16 @@ export interface CostSnapshot {
   cacheWriteTokens: number;
   usd: number;
   priced: boolean;
+  /** Set on a child tracker, so a aggregate can label the breakdown. */
+  label?: string;
+  /** Per-child breakdown, present on a parent that spawned sub-agents. */
+  children?: CostChildSnapshot[];
+}
+
+export interface CostTrackerOptions {
+  /** Parent that receives this tracker's usage, preserving the aggregate. */
+  parent?: CostTracker;
+  label?: string;
 }
 
 export class CostTracker {
@@ -31,9 +46,22 @@ export class CostTracker {
   private cacheReadTokens = 0;
   private cacheWriteTokens = 0;
   private model: string;
+  private readonly parent?: CostTracker;
+  private readonly label?: string;
+  private readonly children: CostTracker[] = [];
 
-  constructor(model: string) {
+  constructor(model: string, options: CostTrackerOptions = {}) {
     this.model = model;
+    if (options.parent !== undefined) {
+      this.parent = options.parent;
+      options.parent.children.push(this);
+    }
+    if (options.label !== undefined) this.label = options.label;
+  }
+
+  /** A child tracker whose usage is forwarded to this one, with a label. */
+  child(label: string): CostTracker {
+    return new CostTracker(this.model, { parent: this, label });
   }
 
   setModel(model: string): void {
@@ -50,6 +78,9 @@ export class CostTracker {
     this.outputTokens += usage.outputTokens;
     this.cacheReadTokens += usage.cacheReadTokens ?? 0;
     this.cacheWriteTokens += usage.cacheWriteTokens ?? 0;
+    // A sub-agent's tracker forwards to its parent so the session total stays
+    // correct while this tracker keeps its own individual breakdown.
+    this.parent?.add(usage);
   }
 
   /** Share of prompt tokens served from cache, 0 when the provider is silent. */
@@ -60,27 +91,23 @@ export class CostTracker {
 
   snapshot(): CostSnapshot {
     const price = PRICES[this.model];
-    if (!price) {
-      return {
-        inputTokens: this.inputTokens,
-        outputTokens: this.outputTokens,
-        cacheReadTokens: this.cacheReadTokens,
-        cacheWriteTokens: this.cacheWriteTokens,
-        usd: 0,
-        priced: false,
-      };
-    }
-    const usd =
-      (this.inputTokens / 1_000_000) * price.input +
-      (this.outputTokens / 1_000_000) * price.output;
-    return {
+    const base = {
       inputTokens: this.inputTokens,
       outputTokens: this.outputTokens,
       cacheReadTokens: this.cacheReadTokens,
       cacheWriteTokens: this.cacheWriteTokens,
-      usd,
-      priced: true,
+      ...(this.label !== undefined ? { label: this.label } : {}),
+      ...(this.children.length > 0
+        ? { children: this.children.map((child) => ({ label: child.label ?? "child", cost: child.snapshot() })) }
+        : {}),
     };
+    if (!price) {
+      return { ...base, usd: 0, priced: false };
+    }
+    const usd =
+      (this.inputTokens / 1_000_000) * price.input +
+      (this.outputTokens / 1_000_000) * price.output;
+    return { ...base, usd, priced: true };
   }
 
   format(): string {
