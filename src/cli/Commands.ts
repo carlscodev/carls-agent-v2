@@ -14,6 +14,7 @@ import { refreshTheme, theme } from "./Theme.js";
 import { selectList } from "./SelectList.js";
 import { runOnboarding } from "../setup/Onboarding.js";
 import { formatProviderTable } from "./ProviderList.js";
+import { renderMcpDashboard, type McpServerView } from "./McpCard.js";
 import { collectDoctorRows } from "./Doctor.js";
 import { loadConfig, specFor } from "../config/Config.js";
 import { apiKeyEnvFor } from "../config/Config.js";
@@ -32,6 +33,8 @@ export interface CommandContext {
   retryLast: () => Promise<void>;
   /** Puts text back into the prompt line, used by /editor. */
   composePrompt?: (text: string) => void;
+  /** Toggles the newest expandable transcript card, used by /expand. */
+  expand?: () => void;
   /**
    * Called after `/resume` swaps the conversation history, so the REPL can
    * hydrate the screen with the tail of the session it just loaded. Absent in
@@ -1056,39 +1059,61 @@ export const COMMANDS: CommandSpec[] = [
         return false;
       }
 
-      // Default: status.
+      // Default: status, rendered as a first-class MCP dashboard instead of a
+      // flat row per server. The tool names and the ping are the two facts that
+      // tell an operator whether the server is usable.
       const servers = ctx.runtime.mcpServers();
       const configured = Object.entries(ctx.runtime.config.mcpServers);
       if (configured.length === 0 && servers.length === 0) {
-        printPanel("MCP", [
-          "No servers configured.",
-          pc.gray("Add a preset:  /mcp add filesystem path=."),
-          pc.gray("List presets:  /mcp presets"),
-          pc.gray('Or set "mcpServers" in .carlsrc.json / .carls/mcp.json.'),
-        ]);
+        process.stderr.write(`${renderMcpDashboard([]).join("\n")}\n`);
+        printInfo("Add a preset with /mcp add <preset> or set mcpServers in .carlsrc.json.");
         return false;
       }
-      const rows: string[] = [];
+      const views: McpServerView[] = [];
       for (const server of servers) {
-        const version = server.version !== undefined ? pc.gray(` v${server.version}`) : "";
         const client = ctx.runtime.mcpClient(server.name);
-        let latency = pc.gray("…");
+        let latencyMs: number | undefined;
+        let status: McpServerView["status"] = "idle";
+        let tools: string[] = [];
         if (client !== undefined) {
           try {
-            latency = pc.gray(`${await client.ping()}ms`);
-          } catch {
-            latency = pc.red("down");
+            latencyMs = await client.ping();
+            tools = client.toolNames();
+            status = "online";
+          } catch (error) {
+            status = "error";
+            tools = [];
+            views.push({
+              name: server.name,
+              status,
+              transport: server.transport,
+              ...(server.version !== undefined ? { version: server.version } : {}),
+              tools,
+              error: (error as Error).message,
+            });
+            continue;
           }
         }
-        rows.push(
-          `${pc.green("✓")} ${pc.bold(server.name)}${version} ${pc.cyan(server.transport)} · ${server.tools} tools · ${latency}`,
-        );
+        views.push({
+          name: server.name,
+          status,
+          transport: server.transport,
+          ...(server.version !== undefined ? { version: server.version } : {}),
+          ...(latencyMs !== undefined ? { latencyMs } : {}),
+          tools,
+        });
       }
-      const failed = configured
-        .map(([name]) => name)
-        .filter((name) => !servers.some((server) => server.name === name))
-        .map((name) => `${pc.red("✗")} ${name} ${pc.gray("not connected")}`);
-      printPanel("MCP", [...rows, ...failed]);
+      for (const [name, config] of configured) {
+        if (servers.some((server) => server.name === name)) continue;
+        views.push({
+          name,
+          status: "idle",
+          transport: config.transport ?? (config.url !== undefined ? "http" : "stdio"),
+          tools: [],
+          error: "configured but not connected",
+        });
+      }
+      process.stderr.write(`${renderMcpDashboard(views).join("\n")}\n`);
       return false;
     },
   },
@@ -1153,6 +1178,15 @@ export const COMMANDS: CommandSpec[] = [
       for (const rule of rules) {
         printInfo(`${rule.id}  (${rule.kind}, confirmed ${rule.confirmations}x)  ${rule.text}`);
       }
+      return false;
+    },
+  },
+  {
+    name: "/expand",
+    usage: "/expand",
+    summary: "Expand or collapse the newest tool card in the transcript",
+    run: (_args, ctx) => {
+      ctx.expand?.();
       return false;
     },
   },

@@ -368,7 +368,9 @@ describe("skill evolution tools", () => {
     await mkdir(userDir, { recursive: true });
     await writeFile(join(userDir, "SKILL.md"), "---\nname: shared\ndescription: user skill\n---\n\nBody.\n", "utf8");
     const savedHome = process.env.HOME;
+    const savedProfile = process.env.USERPROFILE;
     process.env.HOME = join(root, "home");
+    process.env.USERPROFILE = join(root, "home");
     try {
       const ctx = makeContext();
       ctx.skills?.refresh();
@@ -388,6 +390,8 @@ describe("skill evolution tools", () => {
     } finally {
       if (savedHome === undefined) delete process.env.HOME;
       else process.env.HOME = savedHome;
+      if (savedProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = savedProfile;
     }
   });
 });

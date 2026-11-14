@@ -37,7 +37,7 @@ import {
   type PhaseTimelineState,
 } from "./AnimationTicker.js";
 import { SmoothStreamRenderer, streamCursor } from "./SmoothStream.js";
-import { ToolBatch, isGroupable, toolDetail, toolSummary } from "./ToolCards.js";
+import { ToolBatch, isGroupable, toolDetail, toolSummary, renderToolCard, toolCardDetail } from "./ToolCards.js";
 import { RateWindow, renderContextCell, renderRateCell } from "./StatusHud.js";
 import { ToastManager, attachToastBus } from "./Toast.js";
 import {
@@ -45,8 +45,6 @@ import {
   homeIndexHint,
   reasoningFooter,
   reasoningHeader,
-  toolCard,
-  toolResultCard,
   userBlock,
 } from "./MessageBlocks.js";
 import { formatDuration, terminalDimension, truncate } from "./Text.js";
@@ -235,11 +233,17 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   process.on("SIGINT", onSigint);
 
   /**
-   * Ctrl+O reprints the last collapsed block in full. A terminal cannot rewrite
-   * lines it has already scrolled away, so the expansion is appended: the block
-   * is shown again, complete, below the collapsed form.
+   * Ctrl+O toggles the newest expandable card in the full-screen transcript.
+   * In the scrolling layout it keeps the legacy fold behaviour.
    */
   const expandLast = (): void => {
+    if (fullscreen) {
+      const result = chrome.toggleCard();
+      if (result === undefined) {
+        writeLine(theme().paint(theme().colors.text.faint, "  nothing to expand yet"));
+      }
+      return;
+    }
     const fold = folds().last();
     const t = theme();
     if (fold === undefined) {
@@ -690,18 +694,19 @@ export async function runRepl(options: SessionOptions): Promise<number> {
   const beginActivity = (label: string): void => {
     activity = { label, startedAt: Date.now() };
     if (useChrome && ticker === undefined) {
-      ticker = new AnimationTicker(() => {
+      ticker = new AnimationTicker((frame) => {
         showStatus();
         // One clock drives everything that must breathe: the footer segment, the
-        // phase line, the sub-agent fleet and the write cursor. When the turn ends
-        // the ticker stops, so all of them freeze together instead of one timer
-        // per animation.
+        // phase line, the sub-agent fleet, the write cursor and every running
+        // tool card. When the turn ends the ticker stops, so all of them freeze
+        // together instead of one timer per animation.
         tickPhase();
         tickThought();
         agentsTick += 1;
         if (agentFleet.size > 0) paintAgents();
         cursorTick += 1;
         if (streamMarkdown !== undefined) streamMarkdown.setCursor(streamCursor(cursorTick, true) ?? "");
+        if (fullscreen) chrome.setSpinner(frame.spinner);
       }, 80);
       ticker.start();
     }
@@ -856,28 +861,59 @@ export async function runRepl(options: SessionOptions): Promise<number> {
     let streamed = false;
     let reasoningStarted = false;
     let reasoningStartedAt = 0;
-    const activeToolDetails = new Map<string, string>();
     // Read-only calls in one step are collected here and drawn as a single tree
     // instead of one card each, so exploring a workspace does not bury the answer.
     // A mutating tool is never grouped: it flushes the batch and gets its own card.
     let batch: ToolBatch | undefined;
     const batchRunning = new Set<string>();
+    let batchBlockId: string | undefined;
+    let batchSequence = 0;
+    /** Non-groupable tools, tracked by id so their running card can be replaced. */
+    const runningTools = new Map<
+      string,
+      { name: string; detail: string; startedAt: number; blockId: string }
+    >();
     const drawBatch = (): void => {
-      if (batch === undefined || !fullscreen) return;
-      const spinner = SPINNER_FRAMES[Math.floor(cursorTick / 2) % SPINNER_FRAMES.length] ?? "⠋";
-      chrome.writeBlock(batch.render({ width: chrome.current().contentWidth, spinner }));
+      const current = batch;
+      if (current === undefined || !fullscreen) return;
+      if (batchBlockId === undefined) batchBlockId = `batch:${++batchSequence}`;
+      const blockId = batchBlockId;
+      chrome.writeCard(
+        blockId,
+        ({ spinner, expanded }) =>
+          current.render({ width: chrome.current().contentWidth, spinner, expanded }),
+        { expandable: true, state: current.settled ? "ok" : "running" },
+      );
     };
     const flushBatch = (): void => {
       if (batch === undefined) return;
       drawBatch();
       batch = undefined;
       batchRunning.clear();
+      batchBlockId = undefined;
     };
     const toolStart = (id: string, name: string, input: unknown): void => {
       // A mutating tool is never grouped: it closes the current tree and gets its
       // own card, because it changed the workspace and deserves the attention.
       if (!isGroupable(name)) {
         flushBatch();
+        if (!fullscreen) return;
+        const detail = toolCardDetail(name, input);
+        const blockId = `tool:${id}`;
+        runningTools.set(id, { name, detail, startedAt: Date.now(), blockId });
+        chrome.writeCard(
+          blockId,
+          ({ spinner, expanded }) =>
+            renderToolCard({
+              name,
+              detail,
+              state: "running",
+              spinner,
+              expanded,
+              width: chrome.current().contentWidth,
+            }),
+          { expandable: true, state: "running" },
+        );
         return;
       }
       if (!fullscreen) return;
@@ -892,6 +928,36 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       batch.complete(id, ok ? "ok" : "failed", durationMs, toolSummary(name, durationMs));
       drawBatch();
       if (batch.settled) flushBatch();
+    };
+    /** Turn-end safety net: nothing may survive as a running spinner. */
+    const finalizeRunningBlocks = (): void => {
+      if (!fullscreen) {
+        runningTools.clear();
+        return;
+      }
+      for (const info of runningTools.values()) {
+        chrome.writeCard(
+          info.blockId,
+          ({ spinner, expanded }) =>
+            renderToolCard({
+              name: info.name,
+              detail: info.detail,
+              state: "failed",
+              durationMs: Date.now() - info.startedAt,
+              output: "interrupted by the operator",
+              spinner,
+              expanded,
+              width: chrome.current().contentWidth,
+            }),
+          { state: "failed" },
+        );
+      }
+      runningTools.clear();
+      for (const id of batchRunning) batch?.complete(id, "failed", 0, "interrupted");
+      if (batch !== undefined) {
+        drawBatch();
+        flushBatch();
+      }
     };
     // Streaming deltas arrive per token; both renderers are batched to one write
     // per 16 ms frame so a fast model cannot saturate the PTY.
@@ -1073,10 +1139,6 @@ export async function runRepl(options: SessionOptions): Promise<number> {
           const detail = toolLabel(name, input);
           if (activity === undefined) beginActivity(detail);
           else setActivity(detail);
-          activeToolDetails.set(name, detail);
-          // The tree covers the groupable calls; a mutating tool still gets its own
-          // card, and its start line is what announces it.
-          if (fullscreen && !isGroupable(name)) chrome.writeBlock(toolCard({ name, detail, state: "running" }));
           setPhaseCell("think", "done", "THINK");
           setPhaseCell("act", "running", `ACT: ${detail}`);
         },
@@ -1105,18 +1167,35 @@ export async function runRepl(options: SessionOptions): Promise<number> {
             reasoningStarted = false;
           }
           if (fullscreen) {
-            const detail = activeToolDetails.get(name);
-            if (!isGroupable(name)) {
-              const preview = toolResult.ok
+            // The running card was created under `tool:<id>` when the bus emitted
+            // tool.start. Replace that exact block with its terminal state; never
+            // append a second card, which is what left the spinner frozen above.
+            const running = [...runningTools.entries()].find(([, info]) => info.name === name);
+            if (running !== undefined && !isGroupable(name)) {
+              const [id, info] = running;
+              const exitCode =
+                typeof toolResult.metadata?.exitCode === "number" ? toolResult.metadata.exitCode : undefined;
+              const body = toolResult.ok
                 ? toolResult.output
-                    .split("\n")
-                    .filter((line) => line.trim().length > 0)
-                    .slice(0, 4)
-                    .map((line) => truncate(line, 90))
-                : [truncate(toolResult.error ?? "failed", 90)];
-              chrome.writeBlock(toolResultCard(name, detail, toolResult.ok, durationMs, preview));
+                : `${toolResult.error ?? "failed"}\n${toolResult.output}`.trim();
+              chrome.writeCard(
+                info.blockId,
+                ({ spinner, expanded }) =>
+                  renderToolCard({
+                    name,
+                    detail: info.detail,
+                    state: toolResult.ok ? "ok" : "failed",
+                    durationMs,
+                    ...(exitCode !== undefined ? { exitCode } : {}),
+                    output: body,
+                    spinner,
+                    expanded,
+                    width: chrome.current().contentWidth,
+                  }),
+                { expandable: true, state: toolResult.ok ? "ok" : "failed" },
+              );
+              runningTools.delete(id);
             }
-            activeToolDetails.delete(name);
             if (inspectorOpen) toggleInspector(true);
           }
           setPhaseCell("act", "done", "ACT");
@@ -1158,6 +1237,9 @@ export async function runRepl(options: SessionOptions): Promise<number> {
       detachToolDone();
       detachThought();
       detachReasoning();
+      // No tool card may survive the turn in `running`: the sweep turns every
+      // remaining spinner into its terminal state before the frame settles.
+      finalizeRunningBlocks();
       flushBatch();
       streamMarkdown = undefined;
       textFrames.dispose();
@@ -1374,6 +1456,8 @@ export async function runRepl(options: SessionOptions): Promise<number> {
             composePrompt: (text: string) => {
               resume = text;
             },
+            // /expand toggles the newest card without a keyboard chord.
+            expand: expandLast,
             // /resume swaps the history in place; repaint its tail so the screen
             // does not keep showing the previous session.
             onHistoryLoaded: (messages) => hydrateHistory(messages),

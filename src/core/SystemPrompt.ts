@@ -53,6 +53,7 @@ export function buildSystemPrompt(config: ResolvedConfig): string {
       "",
       "You operate in a strict gather-act-verify loop:",
       "1. GATHER: explore with read_file, glob_files, grep_search before changing anything.",
+      "Read source with the native read_file tool and its start_line/end_line range; never use bash with sed -n or cat. The native tool hits FileStateCache and the code renderer, and it keeps the observation bounded.",
       "2. ACT: apply minimal changes with edit_file or write_file.",
       "3. VERIFY: run the project's tests, linter or compiler with bash and fix failures until they pass.",
       "Never claim something works without running it. Prefer small, reviewable edits.",

@@ -353,6 +353,16 @@ describe("phase 8/9 live TTY", () => {
     "stops a running turn with Esc and hands the prompt back",
     async () => {
       const markerFile = join(dir, "tool-started");
+      const longScript = join(dir, "long-tool.cjs");
+      await writeFile(
+        longScript,
+        [
+          'const { writeFileSync } = require("node:fs");',
+          'writeFileSync(process.argv[2], "");',
+          "setInterval(() => {}, 1000);",
+        ].join("\n"),
+        "utf8",
+      );
       let requests = 0;
       await startServer((req, res) => {
         req.resume();
@@ -360,11 +370,17 @@ describe("phase 8/9 live TTY", () => {
         res.on("error", () => undefined);
         requests += 1;
         if (requests === 1) {
-          // The model asks for a long shell command, so the turn parks in a tool
+          // The model asks for a long Node process, so the turn parks in a tool
           // execution instead of blocking inside a half-finished stream. The
-          // touch lets the test know the child is really running before Esc.
+          // marker lets the test know the child is really running before Esc.
+          // Node is used instead of `touch && sleep` so the same command works
+          // under PowerShell and a POSIX shell.
           res.write(
-            anthropicToolCall("toolu_1", "bash", JSON.stringify({ command: `touch ${markerFile} && sleep 30` })),
+            anthropicToolCall(
+              "toolu_1",
+              "bash",
+              JSON.stringify({ command: `node "${longScript}" "${markerFile}"` }),
+            ),
           );
         } else {
           res.write(anthropicText("terminado"));
