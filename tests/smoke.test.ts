@@ -4121,6 +4121,17 @@ describe("observation masking", () => {
     // With nothing recognisable, the size still tells the model what happened.
     expect(digest("plain output", false)).toContain("chars");
   });
+
+  it("keeps the tally for mocha and jest output, not only vitest", () => {
+    // Mocha prints "<n> passing" / "<n> failing" with no noun before the count.
+    const mocha = digest("186 passing (2s)\n[exit code] 0", false);
+    expect(mocha).toContain("186 tests ok");
+    expect(digest("2 failing\n[exit code] 1", true)).toContain("2 failed");
+    // Jest prints a colon after "Tests" and a bare "<n> passed"/"<n> failed".
+    const jest = digest("Tests:       2 failed, 5 passed, 7 total\n[exit code] 1", true);
+    expect(jest).toContain("5 tests ok");
+    expect(jest).toContain("2 failed");
+  });
 });
 
 describe("shadow git checkpoints", () => {

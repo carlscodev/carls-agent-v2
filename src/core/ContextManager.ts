@@ -243,16 +243,22 @@ export function digest(content: string, isError: boolean): string {
   const exit = content.match(/\[exit code\]\s*(-?\d+|null)/);
   if (exit?.[1] !== undefined) facts.push(`exit ${exit[1]}`);
 
-  // A test tally. Runners disagree on the order: vitest prints "Tests  186 passed",
-  // mocha-style output prints "186 passing", so both shapes are matched.
-  const passed = content.match(/(?:tests?|specs?)\s+(\d+)\s+(?:passed|ok)|(\d+)\s+(?:tests?|specs?)\s+(?:passed|ok)/i);
+  // A test tally. Runners disagree on the shape: vitest prints "Tests  186 passed",
+  // mocha prints "186 passing", jest prints "2 failing" with no noun at all, so a
+  // bare "<n> passed/passing" (or failed/failing) counts too. Without that last
+  // alternative a mocha or jest observation was digested with no tally at all.
+  const passed = content.match(
+    /(?:tests?|specs?)\s+(\d+)\s+(?:passed|passing|ok)\b|(\d+)\s+(?:tests?|specs?)\s+(?:passed|passing|ok)\b|(\d+)\s+(?:passed|passing)\b/i,
+  );
   if (passed !== null) {
-    const count = passed[1] ?? passed[2];
+    const count = passed[1] ?? passed[2] ?? passed[3];
     if (count !== undefined) facts.push(`${count} tests ok`);
   }
-  const failed = content.match(/(?:tests?|specs?)\s+(\d+)\s+failed|(\d+)\s+(?:tests?|specs?)\s+failed/i);
+  const failed = content.match(
+    /(?:tests?|specs?)\s+(\d+)\s+(?:failed|failing)\b|(\d+)\s+(?:tests?|specs?)\s+(?:failed|failing)\b|(\d+)\s+(?:failed|failing)\b/i,
+  );
   if (failed !== null) {
-    const count = failed[1] ?? failed[2];
+    const count = failed[1] ?? failed[2] ?? failed[3];
     if (count !== undefined) facts.push(`${count} failed`);
   }
 
